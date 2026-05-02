@@ -370,7 +370,7 @@ async function createPanel() {
         break;
 
       case "pushCert": {
-        const caPath = path.join(CERT_DIR, "mitmproxy-ca-cert.cer");
+        const caPath = path.join(CERT_DIR, "mitmproxy-ca-cert.pem");
         if (!fs.existsSync(caPath)) {
           panel.webview.postMessage({
             command: "certStatus",
@@ -572,8 +572,7 @@ function activate(context) {
   });
 
   const pushCertCmd = vscode.commands.registerCommand("mitm-proxy.pushCert", async () => {
-    // Check for mitmproxy CA cert
-    const caPath = path.join(CERT_DIR, "mitmproxy-ca-cert.cer");
+    const caPath = path.join(CERT_DIR, "mitmproxy-ca-cert.pem");
     if (!fs.existsSync(caPath)) {
       vscode.window.showErrorMessage("CA certificate not found. Run the proxy once first to generate it.");
       return;

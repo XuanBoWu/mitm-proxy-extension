@@ -8,6 +8,7 @@
 import sys
 import os
 import json
+import hashlib
 import subprocess
 import argparse
 from pathlib import Path
@@ -19,6 +20,50 @@ if sys.platform == "win32":
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS_DIR = os.path.join(SCRIPT_DIR, "scripts")
 WORK_PATH = "/data/local/tmp/"
+
+# ===== 证书格式转换：PEM → Android .0 格式 =====
+
+def compute_subject_hash_old(cert_pem_path):
+    """
+    计算 OpenSSL -subject_hash_old（在对证书进行 MD5 哈希前，对其 DER 编码的 Subject 进行哈希）。
+    用于 Android 系统证书命名（如 269953fb.0）。
+    """
+    from cryptography import x509
+    from cryptography.hazmat.primitives.serialization import Encoding
+
+    with open(cert_pem_path, "rb") as f:
+        cert = x509.load_pem_x509_certificate(f.read())
+
+    # DER 编码的 Subject
+    subject_der = cert.subject.public_bytes(Encoding.DER)
+    md5 = hashlib.md5(subject_der).digest()
+
+    # OpenSSL 对前 4 字节按大端序解释为 uint32，输出 hex
+    hash_val = (md5[0] << 24) | (md5[1] << 16) | (md5[2] << 8) | md5[3]
+    return format(hash_val, "08x")
+
+
+def convert_to_android_cert(cert_pem_path, output_dir=None):
+    """
+    将 PEM 格式 CA 证书转换为 Android 系统信任 store 所需的 .0 格式。
+    返回生成的 .0 文件路径。
+    """
+    if not os.path.exists(cert_pem_path):
+        raise FileNotFoundError(f"Certificate not found: {cert_pem_path}")
+
+    hash_val = compute_subject_hash_old(cert_pem_path)
+    target_name = f"{hash_val}.0"
+
+    if output_dir is None:
+        output_dir = os.path.dirname(cert_pem_path)
+
+    target_path = os.path.join(output_dir, target_name)
+
+    # 直接复制 PEM 内容（Android 接受 PEM 格式的 .0 文件）
+    import shutil
+    shutil.copy2(cert_pem_path, target_path)
+
+    return target_path, hash_val
 
 
 def run_adb(cmd, timeout=15):
@@ -132,8 +177,12 @@ def main():
 
     check_parser = subparsers.add_parser("check", help="Check ADB device status")
 
-    push_parser = subparsers.add_parser("push", help="Push and inject certificate")
-    push_parser.add_argument("--cert", required=True, help="Path to certificate file")
+    push_parser = subparsers.add_parser("push", help="Convert, push and inject certificate")
+    push_parser.add_argument("--cert", required=True, help="Path to CA certificate (PEM format)")
+
+    convert_parser = subparsers.add_parser("convert", help="Convert PEM cert to Android .0 format only")
+    convert_parser.add_argument("--cert", required=True, help="Path to CA certificate (PEM format)")
+    convert_parser.add_argument("--output-dir", default=None, help="Output directory (default: same as cert)")
 
     inject_parser = subparsers.add_parser("inject", help="Inject certificates only")
 
@@ -141,13 +190,36 @@ def main():
 
     if args.command == "check":
         result = check_device()
+    elif args.command == "convert":
+        try:
+            target_path, hash_val = convert_to_android_cert(args.cert, args.output_dir)
+            result = {
+                "success": True,
+                "message": f"Certificate converted: {os.path.basename(target_path)}",
+                "hash": hash_val,
+                "outputFile": target_path,
+            }
+        except Exception as e:
+            result = {"success": False, "message": str(e)}
     elif args.command == "push":
-        push_result = push_certificate(args.cert)
+        # Step 1: 将 PEM 证书转换为 Android .0 格式
+        try:
+            target_path, hash_val = convert_to_android_cert(args.cert)
+            sys.stdout.flush()
+        except Exception as e:
+            result = {"success": False, "message": f"Certificate conversion failed: {e}"}
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            sys.exit(1)
+
+        # Step 2: 推送 .0 文件到设备
+        push_result = push_certificate(target_path)
         if push_result["success"]:
+            # Step 3: 注入证书
             inject_result = inject_certificates()
             result = {
                 "success": inject_result["success"],
-                "message": f"Pushed and injected. {inject_result['message']}",
+                "message": f"{hash_val}.0 pushed and injected. {inject_result['message']}",
+                "hash": hash_val,
                 "push": push_result,
                 "inject": inject_result,
             }

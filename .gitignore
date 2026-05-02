@@ -7,3 +7,4 @@ Tasks/
 node_modules/
 *.vsix
 certificate/
+*.0
