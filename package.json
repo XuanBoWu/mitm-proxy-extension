@@ -1,0 +1,48 @@
+{
+  "name": "mitm-proxy-extension",
+  "displayName": "MITM Proxy",
+  "description": "Android MITM security testing - ADB certificate injection + proxy capture with professional UI",
+  "version": "0.1.0",
+  "publisher": "xbowu",
+  "engines": {
+    "vscode": "^1.74.0"
+  },
+  "activationEvents": [],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "mitm-proxy.startProxy",
+        "title": "MITM Proxy: Start Proxy"
+      },
+      {
+        "command": "mitm-proxy.stopProxy",
+        "title": "MITM Proxy: Stop Proxy"
+      },
+      {
+        "command": "mitm-proxy.pushCert",
+        "title": "MITM Proxy: Push Certificate to Device"
+      },
+      {
+        "command": "mitm-proxy.setupProxy",
+        "title": "MITM Proxy: Setup Device Proxy"
+      },
+      {
+        "command": "mitm-proxy.clearProxy",
+        "title": "MITM Proxy: Clear Device Proxy"
+      },
+      {
+        "command": "mitm-proxy.exportHar",
+        "title": "MITM Proxy: Export as HAR"
+      },
+      {
+        "command": "mitm-proxy.exportJson",
+        "title": "MITM Proxy: Export as JSON"
+      },
+      {
+        "command": "mitm-proxy.showPanel",
+        "title": "MITM Proxy: Show Capture Panel"
+      }
+    ]
+  }
+}

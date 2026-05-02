@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MITM Proxy</title>
+<link rel="stylesheet" href="./style.css">
+</head>
+<body>
+<div id="app">
+  <!-- Header -->
+  <header id="header">
+    <div class="header-left">
+      <span class="logo">MITM Proxy</span>
+      <span id="proxyIndicator" class="indicator stopped">●</span>
+      <span id="proxyStatusText">未启动</span>
+    </div>
+    <div class="header-center">
+      <div class="filter-bar">
+        <input type="text" id="filterInput" placeholder="搜索 URL / Host / 状态码..." />
+        <button id="filterBtn" class="btn btn-sm">过滤</button>
+        <button id="clearFilterBtn" class="btn btn-sm btn-outline">清除</button>
+      </div>
+    </div>
+    <div class="header-right">
+      <span id="flowCount" class="badge">0</span> 条请求
+      <button id="clearBtn" class="btn btn-sm btn-outline">清空</button>
+      <button id="exportHarBtn" class="btn btn-sm">导出 HAR</button>
+      <button id="exportJsonBtn" class="btn btn-sm">导出 JSON</button>
+    </div>
+  </header>
+
+  <!-- Main Layout -->
+  <div id="main">
+    <!-- Left: Device Panel -->
+    <aside id="devicePanel">
+      <h3>设备管理</h3>
+
+      <div class="card">
+        <div class="card-title">ADB 状态</div>
+        <div id="adbStatus" class="status-row">
+          <span class="dot disconnected"></span>
+          <span id="adbStatusText">未连接</span>
+        </div>
+        <button id="refreshDeviceBtn" class="btn btn-block btn-sm">刷新设备</button>
+      </div>
+
+      <div id="deviceInfoCard" class="card" style="display:none;">
+        <div class="card-title">设备信息</div>
+        <dl>
+          <dt>型号</dt><dd id="devModel">-</dd>
+          <dt>Android</dt><dd id="devVersion">-</dd>
+          <dt>Root</dt><dd id="devRoot">-</dd>
+        </dl>
+        <button id="rootDeviceBtn" class="btn btn-block btn-sm" style="margin-top:6px;">获取 Root</button>
+      </div>
+
+      <div class="card">
+        <div class="card-title">证书管理</div>
+        <button id="pushCertBtn" class="btn btn-block btn-sm">推送 CA 证书</button>
+        <div id="certStatus" class="status-text" style="display:none;"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">代理设置</div>
+        <div class="input-row">
+          <label>端口</label>
+          <input type="number" id="proxyPort" value="8080" min="1024" max="65535" />
+        </div>
+        <button id="startProxyBtn" class="btn btn-block btn-primary">启动代理</button>
+        <button id="stopProxyBtn" class="btn btn-block btn-danger" style="display:none;">停止代理</button>
+        <button id="setDeviceProxyBtn" class="btn btn-block btn-sm">设置设备代理</button>
+        <button id="clearDeviceProxyBtn" class="btn btn-block btn-sm btn-outline">清除设备代理</button>
+        <div id="proxySetupStatus" class="status-text" style="display:none;"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">会话</div>
+        <button id="saveSessionBtn" class="btn btn-block btn-sm">保存会话</button>
+        <button id="loadSessionBtn" class="btn btn-block btn-sm">加载会话</button>
+      </div>
+    </aside>
+
+    <!-- Middle: Request List -->
+    <section id="requestList">
+      <table id="flowTable">
+        <thead>
+          <tr>
+            <th class="col-method">Method</th>
+            <th class="col-host">Host</th>
+            <th class="col-path">Path</th>
+            <th class="col-status">Status</th>
+            <th class="col-time">Time</th>
+            <th class="col-size">Size</th>
+          </tr>
+        </thead>
+        <tbody id="flowTableBody">
+          <tr class="empty-state">
+            <td colspan="6">等待抓包数据...</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <!-- Right: Detail Panel -->
+    <section id="detailPanel">
+      <div id="detailPlaceholder" class="placeholder">
+        <p>选择一个请求查看详情</p>
+      </div>
+
+      <div id="detailContent" style="display:none;">
+        <div class="tabs">
+          <button class="tab active" data-tab="headers">Headers</button>
+          <button class="tab" data-tab="request">Request</button>
+          <button class="tab" data-tab="response">Response</button>
+          <button class="tab" data-tab="tls">TLS</button>
+          <button class="tab" data-tab="timing">Timing</button>
+        </div>
+
+        <div id="tab-headers" class="tab-content active">
+          <h4>请求头</h4>
+          <pre id="reqHeaders"></pre>
+          <h4>响应头</h4>
+          <pre id="resHeaders"></pre>
+        </div>
+
+        <div id="tab-request" class="tab-content">
+          <h4>请求体</h4>
+          <div id="reqBody" class="body-view"></div>
+        </div>
+
+        <div id="tab-response" class="tab-content">
+          <h4>响应体</h4>
+          <div id="resBody" class="body-view"></div>
+        </div>
+
+        <div id="tab-tls" class="tab-content">
+          <h4>TLS 信息</h4>
+          <dl>
+            <dt>版本</dt><dd id="tlsVersion">-</dd>
+            <dt>加密套件</dt><dd id="tlsCipher">-</dd>
+            <dt>服务器 IP</dt><dd id="tlsServerIp">-</dd>
+            <dt>客户端 IP</dt><dd id="tlsClientIp">-</dd>
+          </dl>
+        </div>
+
+        <div id="tab-timing" class="tab-content">
+          <h4>耗时</h4>
+          <dl>
+            <dt>总耗时</dt><dd id="timingTotal">-</dd>
+            <dt>请求时间</dt><dd id="timingReq">-</dd>
+            <dt>响应时间</dt><dd id="timingRes">-</dd>
+          </dl>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <!-- Footer -->
+  <footer id="footer">
+    <span id="footerStatus">就绪</span>
+    <span class="footer-right" id="footerTime"></span>
+  </footer>
+</div>
+
+<script src="./app.js"></script>
+</body>
+</html>
