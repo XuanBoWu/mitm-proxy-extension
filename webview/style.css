@@ -196,7 +196,6 @@ dd { color: var(--text-primary); }
 }
 
 #flowTable {
-  width: max-content;
   min-width: 100%;
   border-collapse: collapse;
   table-layout: fixed;
@@ -209,6 +208,7 @@ dd { color: var(--text-primary); }
 }
 
 #flowTable th {
+  position: relative;
   background: var(--bg-secondary);
   color: var(--text-muted);
   font-size: 11px;
@@ -220,10 +220,26 @@ dd { color: var(--text-primary); }
   cursor: grab;
   user-select: none;
   white-space: nowrap;
+  overflow: hidden;
 }
 #flowTable th:active { cursor: grabbing; }
 #flowTable th.drag-over { border-left: 2px solid var(--accent); }
 #flowTable th.dragging { opacity: 0.4; }
+
+/* Column resize handle */
+.resize-handle {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 5px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 1;
+}
+.resize-handle:hover,
+.resize-handle.resizing {
+  background: var(--accent);
+}
 
 #flowTable tbody tr {
   cursor: pointer;
@@ -242,19 +258,17 @@ dd { color: var(--text-primary); }
   color: var(--text-secondary);
 }
 
-/* Column widths */
-.col-num { width: 40px; color: var(--text-muted); }
-.col-tls { width: 44px; text-align: center; }
-.col-proto { width: 70px; }
-.col-host { width: 140px; }
-.col-path { width: 160px; }
-.col-method { width: 68px; }
-.col-status { width: 58px; }
-.col-time { width: 80px; }
-.col-size { width: 64px; }
-.col-mime { width: 80px; }
-.col-ip { width: 120px; }
-.col-port { width: 54px; }
+/* TLS version label */
+.tls-label {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 4px;
+  border-radius: 3px;
+  white-space: nowrap;
+}
+.tls-label.secure { color: var(--green); background: #1a3a1a; }
+.tls-label.outdated { color: var(--orange); background: #3a2a1a; }
+.tls-label.none { color: var(--text-muted); }
 
 .method { font-weight: 600; font-size: 11px; padding: 1px 4px; border-radius: 3px; }
 .method.GET { color: var(--green); }
@@ -281,10 +295,6 @@ dd { color: var(--text-primary); }
   border-radius: 3px;
   color: var(--text-muted);
 }
-
-.tls-icon { font-size: 12px; }
-.tls-icon.secure { color: var(--green); }
-.tls-icon.insecure { color: var(--orange); }
 
 .proto-tag {
   font-size: 10px;

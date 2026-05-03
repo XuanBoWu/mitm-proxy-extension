@@ -7,21 +7,25 @@ let selectedFlowId = null;
 let proxyRunning = false;
 let filterText = "";
 
-// Column order (index into flow field order)
+// Column definitions
 const COLUMNS = [
-  { id: "num",      title: "#",       width: "40px"  },
-  { id: "tls",      title: "TLS",     width: "44px"  },
-  { id: "proto",    title: "Protocol", width: "70px"  },
-  { id: "host",     title: "Host",    width: "140px" },
-  { id: "path",     title: "Path",    width: "160px" },
-  { id: "method",   title: "Method",  width: "68px"  },
-  { id: "status",   title: "Status",  width: "58px"  },
-  { id: "time",     title: "Time",    width: "80px"  },
-  { id: "size",     title: "Size",    width: "64px"  },
-  { id: "mime",     title: "MIME",    width: "80px"  },
-  { id: "ip",       title: "IP",      width: "120px" },
-  { id: "port",     title: "Port",    width: "54px"  },
+  { id: "num",    title: "#",       width: 35  },
+  { id: "tls",    title: "TLS",     width: 60  },
+  { id: "proto",  title: "Protocol",width: 72  },
+  { id: "host",   title: "Host",    width: 140 },
+  { id: "path",   title: "Path",    width: 160 },
+  { id: "method", title: "Method",  width: 68  },
+  { id: "status", title: "Status",  width: 55  },
+  { id: "time",   title: "Time",    width: 80  },
+  { id: "size",   title: "Size",    width: 60  },
+  { id: "mime",   title: "MIME",    width: 80  },
+  { id: "ip",     title: "IP",      width: 120 },
+  { id: "port",   title: "Port",    width: 50  },
 ];
+
+// Column order / width persistence keyed by column id
+let colWidths = {};  // { colId: number (px) }
+let colOrder = [];   // ["num", "tls", ...]
 
 // DOM refs
 const $ = (id) => document.getElementById(id);
@@ -148,17 +152,27 @@ function methodLabel(m) {
   return `<span class="method ${m}">${m}</span>`;
 }
 
-function tlsIcon(flow) {
-  if (flow.tls_version) {
-    return `<span class="tls-icon secure" title="${escapeHtml(flow.tls_version)}">🔒</span>`;
-  }
-  if (flow.scheme === "https" || (flow.url && flow.url.startsWith("https"))) {
-    return `<span class="tls-icon secure" title="HTTPS">🔒</span>`;
+function tlsLabel(flow) {
+  const ver = flow.tls_version || "";
+  if (ver) {
+    // Parse TLS version: "TLSv1.2" → major=1, minor=2
+    const m = ver.match(/TLSv(\d+)\.(\d+)/i);
+    if (m) {
+      const major = parseInt(m[1]);
+      const minor = parseInt(m[2]);
+      // TLS 1.1+ (major>1 or major==1&&minor>=1) = secure
+      if (major > 1 || (major === 1 && minor >= 1)) {
+        return `<span class="tls-label secure" title="${escapeHtml(ver)}">${escapeHtml(ver)}</span>`;
+      }
+      // TLS 1.0 or SSL = outdated
+      return `<span class="tls-label outdated" title="${escapeHtml(ver)}">${escapeHtml(ver)}</span>`;
+    }
+    return `<span class="tls-label secure" title="${escapeHtml(ver)}">${escapeHtml(ver)}</span>`;
   }
   if (flow.scheme === "http" || (flow.url && flow.url.startsWith("http:"))) {
-    return `<span class="tls-icon insecure" title="HTTP">⚠</span>`;
+    return `<span class="tls-label none">HTTP</span>`;
   }
-  return "";
+  return `<span class="tls-label none">-</span>`;
 }
 
 function protoTag(flow) {
@@ -240,10 +254,8 @@ function renderFlowList() {
     return;
   }
 
-  const colOrder = getColumnOrder();
-
   flowTableBody.innerHTML = filtered
-    .map((f, idx) => {
+    .map((f) => {
       const rowNum = flows.indexOf(f) + 1;
       const cells = colOrder.map(col => renderCell(col, f, rowNum)).join("");
       return `<tr class="${selectedFlowId === f.id ? "selected" : ""}" data-id="${f.id}">${cells}</tr>`;
@@ -266,7 +278,7 @@ function renderCell(col, flow, rowNum) {
     case "num":
       return `<td class="col-num" style="color:var(--text-muted)">${rowNum}</td>`;
     case "tls":
-      return `<td class="col-tls">${tlsIcon(flow)}</td>`;
+      return `<td class="col-tls">${tlsLabel(flow)}</td>`;
     case "proto":
       return `<td class="col-proto">${protoTag(flow)}</td>`;
     case "host":
@@ -292,14 +304,13 @@ function renderCell(col, flow, rowNum) {
   }
 }
 
-// ===== Column Order Persistence =====
+// ===== Column Order & Width Persistence =====
 
 function getColumnOrder() {
   try {
     const saved = localStorage.getItem("mitm-proxy-column-order");
     if (saved) {
       const order = JSON.parse(saved);
-      // Validate all columns present
       const ids = COLUMNS.map(c => c.id);
       if (Array.isArray(order) && ids.every(id => order.includes(id)) && order.length === ids.length) {
         return order;
@@ -315,6 +326,87 @@ function saveColumnOrder(order) {
   } catch (_) {}
 }
 
+function loadColumnWidths() {
+  try {
+    const saved = localStorage.getItem("mitm-proxy-column-widths");
+    if (saved) {
+      const w = JSON.parse(saved);
+      if (typeof w === "object") return w;
+    }
+  } catch (_) {}
+  const defaults = {};
+  COLUMNS.forEach(c => { defaults[c.id] = c.width; });
+  return defaults;
+}
+
+function saveColumnWidths() {
+  try {
+    localStorage.setItem("mitm-proxy-column-widths", JSON.stringify(colWidths));
+  } catch (_) {}
+}
+
+// ===== Colgroup Management =====
+
+function buildColgroup() {
+  const colgroup = $("flowTableCols");
+  colgroup.innerHTML = colOrder
+    .map((colId) => {
+      const w = colWidths[colId] || 50;
+      return `<col data-col="${colId}" style="width:${w}px">`;
+    })
+    .join("");
+}
+
+// ===== Column Resize =====
+
+let resizing = null; // { colId, startX, startWidth }
+
+function initResizeHandles() {
+  flowTableHead.querySelectorAll("th").forEach((th) => {
+    // Remove old handles
+    const old = th.querySelector(".resize-handle");
+    if (old) old.remove();
+
+    const handle = document.createElement("div");
+    handle.className = "resize-handle";
+    th.appendChild(handle);
+
+    handle.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const colId = th.dataset.col;
+      resizing = {
+        colId: colId,
+        startX: e.clientX,
+        startWidth: colWidths[colId] || 50,
+      };
+      handle.classList.add("resizing");
+      document.body.style.cursor = "col-resize";
+      document.body.style.userSelect = "none";
+    });
+  });
+}
+
+document.addEventListener("mousemove", (e) => {
+  if (!resizing) return;
+  const delta = e.clientX - resizing.startX;
+  const newWidth = Math.max(28, resizing.startWidth + delta);
+  colWidths[resizing.colId] = newWidth;
+
+  // Live-update colgroup
+  const col = document.querySelector(`#flowTableCols col[data-col="${resizing.colId}"]`);
+  if (col) col.style.width = newWidth + "px";
+});
+
+document.addEventListener("mouseup", () => {
+  if (!resizing) return;
+  document.querySelectorAll(".resize-handle").forEach(h => h.classList.remove("resizing"));
+  document.body.style.cursor = "";
+  document.body.style.userSelect = "";
+  saveColumnWidths();
+  resizing = null;
+});
+
 // ===== Column Drag & Drop =====
 
 let dragSrcCol = null;
@@ -328,7 +420,7 @@ function initDragDrop() {
       e.dataTransfer.setData("text/plain", th.dataset.col);
     });
 
-    th.addEventListener("dragend", (e) => {
+    th.addEventListener("dragend", () => {
       th.classList.remove("dragging");
       flowTableHead.querySelectorAll("th").forEach(t => t.classList.remove("drag-over"));
       dragSrcCol = null;
@@ -343,7 +435,7 @@ function initDragDrop() {
       }
     });
 
-    th.addEventListener("dragleave", (e) => {
+    th.addEventListener("dragleave", () => {
       th.classList.remove("drag-over");
     });
 
@@ -360,30 +452,30 @@ function initDragDrop() {
 }
 
 function reorderColumns(srcId, targetId) {
-  const order = getColumnOrder();
-  const srcIdx = order.indexOf(srcId);
-  const targetIdx = order.indexOf(targetId);
+  const srcIdx = colOrder.indexOf(srcId);
+  const targetIdx = colOrder.indexOf(targetId);
   if (srcIdx === -1 || targetIdx === -1) return;
 
-  order.splice(srcIdx, 1);
-  order.splice(targetIdx, 0, srcId);
-  saveColumnOrder(order);
+  colOrder.splice(srcIdx, 1);
+  colOrder.splice(targetIdx, 0, srcId);
+  saveColumnOrder(colOrder);
 
-  // Rebuild table header
-  rebuildTableHeader(order);
-  // Re-render all rows
+  rebuildTableHeader();
+  buildColgroup();
   renderFlowList();
 }
 
-function rebuildTableHeader(order) {
-  flowTableHead.innerHTML = order
+function rebuildTableHeader() {
+  flowTableHead.innerHTML = colOrder
     .map((colId) => {
       const colDef = COLUMNS.find((c) => c.id === colId);
       if (!colDef) return "";
-      return `<th class="col-${colId}" draggable="true" data-col="${colId}">${colDef.title}</th>`;
+      const w = colWidths[colId] || 50;
+      return `<th class="col-${colId}" draggable="true" data-col="${colId}" style="width:${w}px">${colDef.title}</th>`;
     })
     .join("");
   initDragDrop();
+  initResizeHandles();
 }
 
 // ===== Detail Panel =====
@@ -692,8 +784,10 @@ document.addEventListener("keydown", (e) => {
 
 // ===== Init =====
 
-// Rebuild header with saved column order
-rebuildTableHeader(getColumnOrder());
+colOrder = getColumnOrder();
+colWidths = loadColumnWidths();
+buildColgroup();
+rebuildTableHeader();
 
 footerTime.textContent = new Date().toLocaleString();
 setInterval(() => {
