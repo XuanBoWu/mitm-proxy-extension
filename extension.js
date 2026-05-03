@@ -38,16 +38,16 @@ function mitmwebGet(path) {
   return new Promise((resolve, reject) => {
     const url = `http://127.0.0.1:${webPort}${path}?token=${encodeURIComponent(authToken)}`;
     http.get(url, { timeout: 5000 }, (res) => {
-      let data = "";
-      res.on("data", (chunk) => (data += chunk));
-      res.on("end", () => resolve(data));
+      const chunks = [];
+      res.on("data", (chunk) => chunks.push(chunk));
+      res.on("end", () => resolve(Buffer.concat(chunks)));
       res.on("error", reject);
     }).on("error", reject);
   });
 }
 
 function mitmwebGetJson(path) {
-  return mitmwebGet(path).then((data) => JSON.parse(data));
+  return mitmwebGet(path).then((data) => JSON.parse(data.toString("utf-8")));
 }
 
 // ===== Flow transformation =====
@@ -106,6 +106,8 @@ function transformFlow(f) {
 
   return {
     id: f.id,
+    type: f.type || "http",
+    scheme: scheme,
     url: url,
     method: req.method || "GET",
     host: host,
@@ -525,16 +527,24 @@ async function createPanel() {
           if (!flow._bodyFetched && webPort && authToken) {
             flow._bodyFetched = true;
             try {
-              const reqBody = await mitmwebGet(`/flows/${flow.id}/request/content.data`);
-              flow.req_body = reqBody || "";
+              const buf = await mitmwebGet(`/flows/${flow.id}/request/content.data`);
+              flow.req_body = buf.toString("utf-8");
             } catch (_) {
-              flow.req_body = "(unable to fetch)";
+              flow.req_body = "";
             }
             try {
-              const resBody = await mitmwebGet(`/flows/${flow.id}/response/content.data`);
-              flow.res_body = resBody || "";
+              const buf = await mitmwebGet(`/flows/${flow.id}/response/content.data`);
+              const ct = (flow.content_type || "").toLowerCase();
+              // Pass binary content as base64 so webview can render images etc.
+              if (ct.startsWith("image/") || ct.startsWith("audio/") || ct.startsWith("video/") ||
+                  ct.includes("octet-stream") || ct.includes("protobuf")) {
+                flow.res_body_base64 = buf.toString("base64");
+                flow.res_body = "";
+              } else {
+                flow.res_body = buf.toString("utf-8");
+              }
             } catch (_) {
-              flow.res_body = "(unable to fetch)";
+              flow.res_body = "";
             }
           }
           panel.webview.postMessage({

@@ -83,24 +83,31 @@
 
     <!-- Middle: Request List -->
     <section id="requestList">
-      <table id="flowTable">
-        <thead>
-          <tr>
-            <th class="col-tls">TLS</th>
-            <th class="col-method">Method</th>
-            <th class="col-host">Host</th>
-            <th class="col-path">Path</th>
-            <th class="col-status">Status</th>
-            <th class="col-time">Time</th>
-            <th class="col-size">Size</th>
-          </tr>
-        </thead>
-        <tbody id="flowTableBody">
-          <tr class="empty-state">
-            <td colspan="7">等待抓包数据...</td>
-          </tr>
-        </tbody>
-      </table>
+      <div class="table-wrapper">
+        <table id="flowTable">
+          <thead>
+            <tr id="flowTableHead">
+              <th class="col-num" draggable="true">#</th>
+              <th class="col-tls" draggable="true">TLS</th>
+              <th class="col-proto" draggable="true">Protocol</th>
+              <th class="col-host" draggable="true">Host</th>
+              <th class="col-path" draggable="true">Path</th>
+              <th class="col-method" draggable="true">Method</th>
+              <th class="col-status" draggable="true">Status</th>
+              <th class="col-time" draggable="true">Time</th>
+              <th class="col-size" draggable="true">Size</th>
+              <th class="col-mime" draggable="true">MIME</th>
+              <th class="col-ip" draggable="true">IP</th>
+              <th class="col-port" draggable="true">Port</th>
+            </tr>
+          </thead>
+          <tbody id="flowTableBody">
+            <tr class="empty-state">
+              <td colspan="12">等待抓包数据...</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
     </section>
 
     <!-- Right: Detail Panel -->
@@ -109,51 +116,66 @@
         <p>选择一个请求查看详情</p>
       </div>
 
-      <div id="detailContent" style="display:none;">
-        <div class="tabs">
-          <button class="tab active" data-tab="headers">Headers</button>
-          <button class="tab" data-tab="request">Request</button>
-          <button class="tab" data-tab="response">Response</button>
-          <button class="tab" data-tab="tls">TLS</button>
-          <button class="tab" data-tab="timing">Timing</button>
+      <div id="detailContent" style="display:none; display:flex; flex-direction:column; height:100%;">
+        <!-- Request Section -->
+        <div class="detail-section">
+          <div class="section-header">
+            <span class="section-title">Request</span>
+            <div class="view-toggle">
+              <button class="view-btn active" data-target="req" data-view="formatted">Formatted</button>
+              <button class="view-btn" data-target="req" data-view="raw">Raw</button>
+            </div>
+          </div>
+          <div class="section-scroll">
+            <h5>Headers</h5>
+            <pre id="reqHeaders" class="detail-pre"></pre>
+            <h5>Body</h5>
+            <div id="reqBodyFormatted" class="body-view"></div>
+            <pre id="reqBodyRaw" class="body-raw" style="display:none;"></pre>
+          </div>
         </div>
 
-        <div id="tab-headers" class="tab-content active">
-          <h4>请求头</h4>
-          <pre id="reqHeaders"></pre>
-          <h4>响应头</h4>
-          <pre id="resHeaders"></pre>
+        <!-- Response Section -->
+        <div class="detail-section">
+          <div class="section-header">
+            <span class="section-title">Response</span>
+            <div class="view-toggle">
+              <button class="view-btn active" data-target="res" data-view="formatted">Formatted</button>
+              <button class="view-btn" data-target="res" data-view="raw">Raw</button>
+              <button class="view-btn" data-target="res" data-view="render">Render</button>
+            </div>
+          </div>
+          <div class="section-scroll">
+            <h5>Headers</h5>
+            <pre id="resHeaders" class="detail-pre"></pre>
+            <h5>Body</h5>
+            <div id="resBodyFormatted" class="body-view"></div>
+            <pre id="resBodyRaw" class="body-raw" style="display:none;"></pre>
+            <div id="resBodyRender" class="body-render" style="display:none;"></div>
+          </div>
         </div>
 
-        <div id="tab-request" class="tab-content">
-          <h4>请求体</h4>
-          <div id="reqBody" class="body-view"></div>
-        </div>
-
-        <div id="tab-response" class="tab-content">
-          <h4>响应体</h4>
-          <div id="resBody" class="body-view"></div>
-        </div>
-
-        <div id="tab-tls" class="tab-content">
-          <h4>TLS 信息</h4>
-          <dl>
-            <dt>版本</dt><dd id="tlsVersion">-</dd>
-            <dt>加密套件</dt><dd id="tlsCipher">-</dd>
-            <dt>SNI</dt><dd id="tlsSni">-</dd>
-            <dt>ALPN</dt><dd id="tlsAlpn">-</dd>
-            <dt>服务器 IP</dt><dd id="tlsServerIp">-</dd>
-            <dt>客户端 IP</dt><dd id="tlsClientIp">-</dd>
-          </dl>
-        </div>
-
-        <div id="tab-timing" class="tab-content">
-          <h4>耗时</h4>
-          <dl>
-            <dt>总耗时</dt><dd id="timingTotal">-</dd>
-            <dt>请求时间</dt><dd id="timingReq">-</dd>
-            <dt>响应时间</dt><dd id="timingRes">-</dd>
-          </dl>
+        <!-- TLS & Timing -->
+        <div class="detail-meta">
+          <div class="meta-row">
+            <h4>TLS</h4>
+            <dl class="meta-dl">
+              <dt>版本</dt><dd id="tlsVersion">-</dd>
+              <dt>加密套件</dt><dd id="tlsCipher">-</dd>
+              <dt>SNI</dt><dd id="tlsSni">-</dd>
+              <dt>ALPN</dt><dd id="tlsAlpn">-</dd>
+              <dt>服务器 IP</dt><dd id="tlsServerIp">-</dd>
+              <dt>客户端 IP</dt><dd id="tlsClientIp">-</dd>
+            </dl>
+          </div>
+          <div class="meta-row">
+            <h4>Timing</h4>
+            <dl class="meta-dl">
+              <dt>总耗时</dt><dd id="timingTotal">-</dd>
+              <dt>请求时间</dt><dd id="timingReq">-</dd>
+              <dt>响应时间</dt><dd id="timingRes">-</dd>
+            </dl>
+          </div>
         </div>
       </div>
     </section>
