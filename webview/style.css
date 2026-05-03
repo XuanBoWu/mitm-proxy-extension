@@ -240,6 +240,7 @@ dd { color: var(--text-primary); }
   color: var(--text-secondary);
 }
 
+.col-tls { width: 36px; text-align: center; }
 .col-method { width: 60px; }
 .col-host { width: 30%; }
 .col-path { width: 30%; }
@@ -262,6 +263,10 @@ dd { color: var(--text-primary); }
 .status.s0xx { color: var(--red); }
 
 .time { font-family: var(--font-mono); font-size: 11px; }
+
+.tls-icon { font-size: 12px; }
+.tls-icon.secure { color: var(--green); }
+.tls-icon.insecure { color: var(--orange); }
 
 .empty-state td {
   text-align: center;

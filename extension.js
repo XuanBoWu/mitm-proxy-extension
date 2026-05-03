@@ -3,18 +3,22 @@ const { spawn, exec } = require("child_process");
 const path = require("path");
 const fs = require("fs");
 const os = require("os");
+const http = require("http");
 
 let proxyProcess = null;
 let outputChannel = null;
 let panel = null;
 let capturedFlows = [];
 let deviceInfo = null;
+let webPort = null;
+let authToken = null;
+let pollingTimer = null;
+let knownFlowIds = new Set();
 
 const TOOLS_DIR = path.join(__dirname, "tools");
 const CERT_DIR = path.join(__dirname, "certificate");
 
 function getPythonCmd() {
-  // 优先使用项目虚拟环境中的 Python
   const venvPython = path.join(__dirname, ".venv", "bin", "python3");
   if (fs.existsSync(venvPython)) {
     return venvPython;
@@ -25,6 +29,162 @@ function getPythonCmd() {
 function log(msg) {
   if (outputChannel) {
     outputChannel.appendLine(`[${new Date().toLocaleTimeString()}] ${msg}`);
+  }
+}
+
+// ===== mitmweb REST API helpers =====
+
+function mitmwebGet(path) {
+  return new Promise((resolve, reject) => {
+    const url = `http://127.0.0.1:${webPort}${path}?token=${encodeURIComponent(authToken)}`;
+    http.get(url, { timeout: 5000 }, (res) => {
+      let data = "";
+      res.on("data", (chunk) => (data += chunk));
+      res.on("end", () => resolve(data));
+      res.on("error", reject);
+    }).on("error", reject);
+  });
+}
+
+function mitmwebGetJson(path) {
+  return mitmwebGet(path).then((data) => JSON.parse(data));
+}
+
+// ===== Flow transformation =====
+
+function transformFlow(f) {
+  const req = f.request || {};
+  const res = f.response || {};
+  const srv = f.server_conn || {};
+  const cli = f.client_conn || {};
+
+  // Build URL
+  const scheme = req.scheme || "https";
+  const host = req.host || "";
+  const port = req.port;
+  const reqPath = req.path || "/";
+  const isDefaultPort = (scheme === "https" && port === 443) || (scheme === "http" && port === 80);
+  const url = isDefaultPort
+    ? `${scheme}://${host}${reqPath}`
+    : `${scheme}://${host}:${port}${reqPath}`;
+
+  // Convert headers from [[k,v],...] to {k: v, ...}
+  function headersToObject(headers) {
+    if (!headers) return {};
+    const obj = {};
+    for (const [k, v] of headers) {
+      const key = k.toLowerCase();
+      if (key in obj) {
+        if (Array.isArray(obj[key])) {
+          obj[key].push(v);
+        } else {
+          obj[key] = [obj[key], v];
+        }
+      } else {
+        obj[key] = v;
+      }
+    }
+    return obj;
+  }
+
+  const reqHeaders = headersToObject(req.headers);
+  const resHeaders = headersToObject(res.headers);
+
+  // Content type from response headers
+  let contentType = "";
+  if (res.headers) {
+    for (const [k, v] of res.headers) {
+      if (k.toLowerCase() === "content-type") {
+        contentType = v.split(";")[0].trim();
+        break;
+      }
+    }
+  }
+
+  const reqTs = req.timestamp_start || 0;
+  const resTs = res.timestamp_start || 0;
+
+  return {
+    id: f.id,
+    url: url,
+    method: req.method || "GET",
+    host: host,
+    port: port || 443,
+    path: reqPath,
+    status_code: res.status_code || 0,
+    req_headers: reqHeaders,
+    res_headers: resHeaders,
+    req_body: "",
+    res_body: "",
+    req_timestamp: reqTs,
+    res_timestamp: resTs,
+    duration_ms: resTs ? Math.round((resTs - reqTs) * 1000) : 0,
+    tls_version: srv.tls_version || "",
+    tls_cipher: srv.cipher || "",
+    tls_sni: srv.sni || "",
+    tls_alpn: srv.alpn || "",
+    server_ip: srv.peername ? srv.peername[0] : "",
+    client_ip: cli.peername ? cli.peername[0] : "",
+    content_type: contentType,
+    req_size: req.contentLength || 0,
+    res_size: res.contentLength || 0,
+  };
+}
+
+// ===== Flow polling =====
+
+async function pollFlows() {
+  if (!webPort || !authToken) return;
+
+  try {
+    const flows = await mitmwebGetJson("/flows.json");
+
+    // Detect if flows were cleared (e.g., via clearFlows command)
+    if (flows.length === 0 && capturedFlows.length > 0) {
+      capturedFlows = [];
+      knownFlowIds.clear();
+      if (panel) {
+        panel.webview.postMessage({ command: "flowsCleared" });
+      }
+      return;
+    }
+
+    // Check for new flows
+    const newFlows = [];
+    for (const f of flows) {
+      if (!knownFlowIds.has(f.id)) {
+        knownFlowIds.add(f.id);
+        newFlows.push(f);
+      }
+    }
+
+    // Add new flows (in order from mitmproxy)
+    for (const f of newFlows) {
+      const transformed = transformFlow(f);
+      capturedFlows.push(transformed);
+      if (panel) {
+        panel.webview.postMessage({
+          command: "addFlow",
+          flow: transformed,
+        });
+      }
+    }
+  } catch (_) {
+    // Silently skip polling errors (server might not be ready yet)
+  }
+}
+
+function startFlowPolling() {
+  stopFlowPolling();
+  knownFlowIds.clear();
+  capturedFlows = [];
+  pollingTimer = setInterval(pollFlows, 500);
+}
+
+function stopFlowPolling() {
+  if (pollingTimer) {
+    clearInterval(pollingTimer);
+    pollingTimer = null;
   }
 }
 
@@ -65,7 +225,6 @@ async function ensureRoot() {
         resolve({ success: false, message: "adb root failed" });
         return;
       }
-      // Wait briefly then verify
       setTimeout(async () => {
         const info = await getDeviceInfo();
         resolve({ success: info.isRoot, message: info.isRoot ? "Root access confirmed" : "Root failed" });
@@ -73,8 +232,6 @@ async function ensureRoot() {
     });
   });
 }
-
-// ===== Certificate Management =====
 
 async function getLocalIp() {
   const interfaces = os.networkInterfaces();
@@ -127,46 +284,54 @@ function startProxyEngine(port) {
 
     log(`Starting proxy engine on port ${port}...`);
 
-    proxyProcess = spawn(pythonCmd, [scriptPath, "--port", String(port)], {
+    // Use a random high port for web UI to avoid conflicts
+    const wPort = Math.floor(Math.random() * 1000) + 18080;
+
+    proxyProcess = spawn(pythonCmd, [scriptPath, "--port", String(port), "--web-port", String(wPort)], {
       stdio: ["pipe", "pipe", "pipe"],
     });
 
     let started = false;
+    let stderrBuffer = "";
 
     proxyProcess.stderr.on("data", (data) => {
       const text = data.toString();
+      stderrBuffer += text;
       log(`[proxy] ${text.trim()}`);
 
+      // Parse WEB_PORT and AUTH_TOKEN from accumulated stderr
+      if (!webPort) {
+        const webPortMatch = stderrBuffer.match(/WEB_PORT=(\d+)/);
+        if (webPortMatch) {
+          webPort = parseInt(webPortMatch[1]);
+          log(`Web UI port: ${webPort}`);
+        }
+      }
+      if (!authToken) {
+        const tokenMatch = stderrBuffer.match(/AUTH_TOKEN=([a-f0-9]+)/);
+        if (tokenMatch) {
+          authToken = tokenMatch[1];
+          log(`Auth token: ${authToken}`);
+        }
+      }
+
       // mitmproxy outputs "Proxy server listening" to stderr when ready
-      if (!started && text.includes("listening")) {
+      if (!started && (text.includes("listening") || text.includes("Proxy server listening"))) {
         started = true;
-        resolve({ success: true, message: `Proxy started on port ${port}` });
+        // Start polling flows
+        startFlowPolling();
+        resolve({ success: true, message: `Proxy started on port ${port}`, webPort: wPort });
       }
     });
 
     proxyProcess.stdout.on("data", (data) => {
-      const lines = data.toString().split("\n").filter(Boolean);
-      for (const line of lines) {
-        try {
-          const flowData = JSON.parse(line);
-          capturedFlows.push(flowData);
-
-          if (panel) {
-            panel.webview.postMessage({
-              command: "addFlow",
-              flow: flowData,
-              totalCount: capturedFlows.length,
-            });
-          }
-        } catch (e) {
-          // Skip non-JSON output
-        }
-      }
+      log(`[proxy stdout] ${data.toString().trim()}`);
     });
 
     proxyProcess.on("error", (err) => {
       log(`Proxy engine error: ${err.message}`);
       proxyProcess = null;
+      stopFlowPolling();
       if (!started) {
         reject(err);
       }
@@ -175,6 +340,9 @@ function startProxyEngine(port) {
     proxyProcess.on("close", (code) => {
       log(`Proxy engine exited with code ${code}`);
       proxyProcess = null;
+      stopFlowPolling();
+      webPort = null;
+      authToken = null;
       if (panel) {
         panel.webview.postMessage({
           command: "proxyStatus",
@@ -188,9 +356,10 @@ function startProxyEngine(port) {
     setTimeout(() => {
       if (!started) {
         started = true;
-        resolve({ success: true, message: `Proxy engine spawned on port ${port}` });
+        startFlowPolling();
+        resolve({ success: true, message: `Proxy engine spawned on port ${port}`, webPort: wPort });
       }
-    }, 3000);
+    }, 5000);
   });
 }
 
@@ -201,19 +370,21 @@ function stopProxyEngine() {
       return;
     }
 
+    stopFlowPolling();
+
     proxyProcess.on("close", () => {
       proxyProcess = null;
+      webPort = null;
+      authToken = null;
       resolve({ success: true, message: "Proxy stopped" });
     });
 
-    // Send SIGTERM first for graceful shutdown
     if (process.platform === "win32") {
       spawn("taskkill", ["/pid", String(proxyProcess.pid), "/f", "/t"]);
     } else {
       proxyProcess.kill("SIGTERM");
     }
 
-    // Force kill after 3s if not exiting
     setTimeout(() => {
       if (proxyProcess) {
         try {
@@ -230,7 +401,6 @@ function getWebviewContent(webview) {
   const htmlPath = path.join(__dirname, "webview", "index.html");
   let html = fs.readFileSync(htmlPath, "utf-8");
 
-  // Replace relative resource paths with webview URIs
   const styleUri = webview.asWebviewUri(vscode.Uri.file(path.join(__dirname, "webview", "style.css")));
   const scriptUri = webview.asWebviewUri(vscode.Uri.file(path.join(__dirname, "webview", "app.js")));
 
@@ -350,7 +520,23 @@ async function createPanel() {
 
       case "selectFlow": {
         const flow = capturedFlows.find(f => f.id === message.flowId);
-        if (flow) {
+        if (flow && panel) {
+          // Fetch body content on demand via REST API
+          if (!flow._bodyFetched && webPort && authToken) {
+            flow._bodyFetched = true;
+            try {
+              const reqBody = await mitmwebGet(`/flows/${flow.id}/request/content.data`);
+              flow.req_body = reqBody || "";
+            } catch (_) {
+              flow.req_body = "(unable to fetch)";
+            }
+            try {
+              const resBody = await mitmwebGet(`/flows/${flow.id}/response/content.data`);
+              flow.res_body = resBody || "";
+            } catch (_) {
+              flow.res_body = "(unable to fetch)";
+            }
+          }
           panel.webview.postMessage({
             command: "showDetail",
             flow: flow,
@@ -359,12 +545,20 @@ async function createPanel() {
         break;
       }
 
-      case "clearFlows":
+      case "clearFlows": {
         capturedFlows = [];
+        knownFlowIds.clear();
+        // Also clear flows in mitmproxy via REST API
+        if (webPort && authToken) {
+          try {
+            await mitmwebRequest("POST", "/clear");
+          } catch (_) {}
+        }
         panel.webview.postMessage({
           command: "flowsCleared",
         });
         break;
+      }
 
       case "exportHar":
         await exportHar();
@@ -416,6 +610,22 @@ async function createPanel() {
 
   panel.onDidDispose(() => {
     panel = null;
+  });
+}
+
+// ===== REST API helpers (with method support) =====
+
+function mitmwebRequest(method, path) {
+  return new Promise((resolve, reject) => {
+    const url = `http://127.0.0.1:${webPort}${path}?token=${encodeURIComponent(authToken)}`;
+    const req = http.request(url, { method, timeout: 5000 }, (res) => {
+      let data = "";
+      res.on("data", (chunk) => (data += chunk));
+      res.on("end", () => resolve(data));
+      res.on("error", reject);
+    });
+    req.on("error", reject);
+    req.end();
   });
 }
 
@@ -531,6 +741,12 @@ async function loadSession() {
       return;
     }
 
+    // Track loaded flow IDs
+    knownFlowIds.clear();
+    for (const f of capturedFlows) {
+      knownFlowIds.add(f.id);
+    }
+
     if (panel) {
       panel.webview.postMessage({
         command: "sessionLoaded",
@@ -583,7 +799,6 @@ function activate(context) {
       return;
     }
 
-    // Use cert_manager.py to push
     const scriptPath = path.join(TOOLS_DIR, "cert_manager.py");
     const proc = spawn(getPythonCmd(), [scriptPath, "push", "--cert", caPath]);
     let output = "";
@@ -641,6 +856,7 @@ function activate(context) {
 }
 
 function deactivate() {
+  stopFlowPolling();
   if (proxyProcess) {
     try {
       if (process.platform === "win32") {

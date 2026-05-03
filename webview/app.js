@@ -131,6 +131,19 @@ function methodLabel(m) {
   return `<span class="method ${m}">${m}</span>`;
 }
 
+function tlsIcon(flow) {
+  if (flow.tls_version) {
+    return `<span class="tls-icon secure" title="${escapeHtml(flow.tls_version)}">🔒</span>`;
+  }
+  if (flow.scheme === "https" || (flow.url && flow.url.startsWith("https"))) {
+    return `<span class="tls-icon secure" title="HTTPS">🔒</span>`;
+  }
+  if (flow.scheme === "http" || (flow.url && flow.url.startsWith("http:"))) {
+    return `<span class="tls-icon insecure" title="HTTP">⚠</span>`;
+  }
+  return "";
+}
+
 function formatTime(ms) {
   if (!ms || ms <= 0) return "-";
   if (ms < 1000) return ms + "ms";
@@ -159,7 +172,7 @@ function renderFlowList() {
 
   if (filtered.length === 0) {
     flowTableBody.innerHTML =
-      '<tr class="empty-state"><td colspan="6">' +
+      '<tr class="empty-state"><td colspan="7">' +
       (flows.length === 0 ? "等待抓包数据..." : "无匹配结果") +
       "</td></tr>";
     return;
@@ -169,6 +182,7 @@ function renderFlowList() {
     .map(
       (f, i) => `
     <tr class="${selectedFlowId === f.id ? "selected" : ""}" data-id="${f.id}">
+      <td class="col-tls">${tlsIcon(f)}</td>
       <td class="col-method">${methodLabel(f.method)}</td>
       <td class="col-host" title="${escapeHtml(f.host)}">${escapeHtml(f.host)}</td>
       <td class="col-path" title="${escapeHtml(f.path)}">${escapeHtml(f.path)}</td>
@@ -210,6 +224,8 @@ function renderDetail(flow) {
   // TLS
   $("tlsVersion").textContent = flow.tls_version || "-";
   $("tlsCipher").textContent = flow.tls_cipher || "-";
+  $("tlsSni").textContent = flow.tls_sni || flow.server_name || "-";
+  $("tlsAlpn").textContent = flow.tls_alpn || "-";
   $("tlsServerIp").textContent = flow.server_ip || "-";
   $("tlsClientIp").textContent = flow.client_ip || "-";
 

@@ -6,37 +6,65 @@ VSCodium 插件，用于 Android 设备安全测试，替代 Burp Suite + Set-CA
 
 ```
 Webview UI (HTML/CSS/JS) → vscode.postMessage → extension.js (Node.js)
-                                                      ├── spawn proxy_engine.py (mitmproxy 12.2.2, stdout JSONL)
-                                                      └── spawn cert_manager.py (ADB 证书管理)
+                                                     ├── spawn proxy_engine.py (WebMaster, REST API + WebSocket)
+                                                     ├── poll http://127.0.0.1:{webPort}/flows.json (500ms)
+                                                     └── spawn cert_manager.py (ADB 证书管理)
 ```
 
 ## 关键文件
 
 | 文件 | 用途 |
 |------|------|
-| `extension.js` | 主入口，ADB 管理、代理生命周期、Webview 通信、HAR/JSON 导出 |
-| `tools/proxy_engine.py` | mitmproxy 抓包引擎，CaptureAddon 输出 JSONL 到 stdout |
+| `extension.js` | 主入口，ADB 管理、代理生命周期、REST API 轮询、Webview 通信、HAR/JSON 导出 |
+| `tools/proxy_engine.py` | mitmproxy WebMaster 引擎，输出 WebSocket/REST API 端口和 auth token 到 stderr |
 | `tools/cert_manager.py` | ADB 设备检查、PEM→Android .0 格式转换、证书注入 |
 | `tools/scripts/set_ca_android.sh` | Android <14 CA 注入脚本 |
 | `tools/scripts/set_ca_android14.sh` | Android 14+ CA 注入脚本（APEX/Zygote namespace） |
-| `webview/index.html` | 三栏布局：设备面板 / 请求列表 / 详情 |
-| `webview/app.js` | 前端逻辑，实时 render flow 数据 |
+| `webview/index.html` | 三栏布局：设备面板 / 请求列表（含 TLS 列） / 详情 |
+| `webview/app.js` | 前端逻辑，实时 render flow 数据，TLS 图标、body 格式化 |
 | `webview/style.css` | Catppuccin 暗色主题 |
 
 ## 数据流
 
-1. 用户点击「启动代理」→ extension.js spawn `proxy_engine.py --port 8080`
-2. mitmproxy 拦截流量 → `CaptureAddon.response()` → `print(json.dumps(flow_dict))` → stdout
-3. extension.js 逐行解析 JSONL → `panel.webview.postMessage({command: "addFlow", flow})`
-4. Webview 实时追加请求列表，点击查看详情
+1. 用户点击「启动代理」→ extension.js spawn `proxy_engine.py --port 8080 --web-port {random}`
+2. proxy_engine.py 启动 WebMaster，在 stderr 输出 `WEB_PORT={port}` 和 `AUTH_TOKEN={32-char-hex}`
+3. extension.js 解析 stderr 获取 webPort 和 authToken，启动 500ms 定时轮询
+4. 轮询 `GET http://127.0.0.1:{webPort}/flows.json?token={token}` 获取全部 flow 元数据（不含 body）
+5. extension.js 将 mitmweb flow 格式转换为 webview 格式 → `postMessage({command: "addFlow", flow})`
+6. Webview 实时追加请求列表，点击查看详情
+7. 点击 flow 时，extension.js 按需请求 body：`GET /flows/{id}/request/content.data?token={token}`
+8. Body 内容缓存到 `flow.req_body` / `flow.res_body`，发送 `showDetail` 到 webview
 
 ## mitmproxy 12.x 注意事项
 
-- **必须使用 `DumpMaster` 而非 `Master`**：`Master` 初始化不完整，不会触发 addon hooks（`response`/`error`）。`DumpMaster` 自动加载 `default_addons()` + `KeepServing` + `ErrorCheck`，确保代理功能正常
-- 创建 `DumpMaster` 时使用 `with_dumper=False, with_termlog=False`，避免内置 Dumper 输出混入 JSONL stdout
+- **使用 `WebMaster` 而非 `DumpMaster`**：WebMaster 是 mitmproxy 原生引擎，覆盖所有流量类型（HTTP/HTTPS/WebSocket/TCP/UDP/DNS），比自定义 CaptureAddon 更完整
+- **Web UI 选项注册时机**：`web_host`/`web_port` 由 WebAddon 注册，必须 **在 `WebMaster(opts)` 创建之后** 通过 `master.options.update()` 设置，否则报 `KeyError: Unknown options`
+- **Auth token**：通过 `web_password` 选项设置随机 32-char hex token，作为 REST API 和 WebSocket 的认证凭证（query param `?token=xxx`）
+- **`web_open_browser=False`**：禁用自动打开浏览器，避免无头环境报错
 - CA 证书首次启动自动生成到 `certificate/` 目录
 - `ssl_insecure=True` 接受所有上游证书
 - 启动时输出 CA 证书 SHA-256 指纹到 stderr，用于验证证书匹配
+
+## mitmweb REST API
+
+| 端点 | 方法 | 说明 |
+|------|------|------|
+| `/flows.json` | GET | 所有 flow 元数据（不含 body，只有 contentLength/contentHash） |
+| `/flows/{id}/request/content.data` | GET | 请求体原始内容 |
+| `/flows/{id}/response/content.data` | GET | 响应体原始内容 |
+| `/flows/{id}/request/content/{view}.json` | GET | 请求体经 contentview 格式化 |
+| `/flows/{id}/response/content/{view}.json` | GET | 响应体经 contentview 格式化 |
+| `/clear` | POST | 清空所有 flow |
+| `/state.json` | GET | mitmproxy 版本、contentviews 列表等 |
+| `/updates` | WebSocket | 实时 flow 推送（`flows/add`, `flows/update`, `flows/reset`） |
+
+### flow_to_json 格式
+
+WebSocket 和 REST API 返回的 flow JSON 格式（`mitmproxy/tools/web/app.py:flow_to_json()`）：
+- **不含 body 内容**（减少传输量），仅含 `contentLength` 和 `contentHash`
+- 请求头/响应头为 tuple 数组格式：`[["name", "value"], ...]`（非 object）
+- `client_conn`/`server_conn` 包含 TLS 信息：`tls_version`, `cipher`, `sni`, `alpn`, `peername` 等
+- extension.js `transformFlow()` 负责将此格式转换为 webview 兼容格式
 
 ## 证书注入流程
 
@@ -61,18 +89,18 @@ Webview UI (HTML/CSS/JS) → vscode.postMessage → extension.js (Node.js)
 | UI→JS | `ensureRoot` | 获取 root |
 | UI→JS | `pushCert` | 推送并注入证书 |
 | UI→JS | `setProxy` / `clearProxy` | 设备代理设置 |
-| UI→JS | `selectFlow` | 查看 flow 详情 |
+| UI→JS | `selectFlow` | 查看 flow 详情（触发按需 body 加载） |
 | UI→JS | `exportHar` / `exportJson` | 导出 |
-| JS→UI | `addFlow` | 新抓包 `{flow, totalCount}` |
+| JS→UI | `addFlow` | 新抓包 `{flow}` |
 | JS→UI | `proxyStatus` | 代理状态 `{running, port, message}` |
 | JS→UI | `deviceStatus` | 设备状态 `{connected, info}` |
-| JS→UI | `showDetail` | 显示 flow 详情 |
+| JS→UI | `showDetail` | 显示 flow 详情（含已加载的 body） |
 | JS→UI | `certStatus` | 证书操作结果 `{success, message}` |
 
 ## 依赖
 
 - **Python**: `mitmproxy>=10.0`, `cryptography` (mitmproxy 自带依赖)
-- **Node.js**: 仅 VSCode extension API 内置模块
+- **Node.js**: 仅 VSCode extension API 内置模块（`http` 模块用于 REST API 轮询）
 - **ADB**: 系统 PATH 中需有 `adb` 命令
 - **Android**: 设备需 root，USB 调试开启
 
@@ -83,7 +111,7 @@ Webview UI (HTML/CSS/JS) → vscode.postMessage → extension.js (Node.js)
 
 ## 已知待改进
 
-- 证书注入错误处理不够细化
-- HTTP 请求体过大时可能截断
-- 缺少 WebSocket/HTTP2 流量的特殊处理
+- REST API 轮询在大流量时可能延迟较高（可改为 WebSocket 实时推送）
+- Body 内容仅取原始数据，未使用 contentview 格式化（JSON prettify 由前端 app.js 处理）
+- HTTP 请求体过大时前端可能卡顿
 - 设备代理 IP 需手动确认局域网地址

@@ -86,6 +86,7 @@
       <table id="flowTable">
         <thead>
           <tr>
+            <th class="col-tls">TLS</th>
             <th class="col-method">Method</th>
             <th class="col-host">Host</th>
             <th class="col-path">Path</th>
@@ -96,7 +97,7 @@
         </thead>
         <tbody id="flowTableBody">
           <tr class="empty-state">
-            <td colspan="6">等待抓包数据...</td>
+            <td colspan="7">等待抓包数据...</td>
           </tr>
         </tbody>
       </table>
@@ -139,6 +140,8 @@
           <dl>
             <dt>版本</dt><dd id="tlsVersion">-</dd>
             <dt>加密套件</dt><dd id="tlsCipher">-</dd>
+            <dt>SNI</dt><dd id="tlsSni">-</dd>
+            <dt>ALPN</dt><dd id="tlsAlpn">-</dd>
             <dt>服务器 IP</dt><dd id="tlsServerIp">-</dd>
             <dt>客户端 IP</dt><dd id="tlsClientIp">-</dd>
           </dl>
