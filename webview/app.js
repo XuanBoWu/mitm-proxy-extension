@@ -6,6 +6,7 @@ let flows = [];
 let selectedFlowId = null;
 let proxyRunning = false;
 let filterText = "";
+let nextSeq = 1;
 
 // Column definitions
 const COLUMNS = [
@@ -44,6 +45,7 @@ window.addEventListener("message", (event) => {
   const msg = event.data;
   switch (msg.command) {
     case "addFlow":
+      msg.flow._seq = nextSeq++;
       flows.unshift(msg.flow);
       renderFlowList();
       break;
@@ -76,11 +78,14 @@ window.addEventListener("message", (event) => {
       break;
     case "flowsCleared":
       flows = [];
+      nextSeq = 1;
       renderFlowList();
       renderEmptyDetail();
       break;
     case "sessionLoaded":
       flows = msg.flows;
+      flows.forEach((f, i) => { if (f._seq == null) f._seq = i + 1; });
+      nextSeq = flows.length + 1;
       renderFlowList();
       renderEmptyDetail();
       footerStatus.textContent = `已加载 ${msg.flows.length} 条记录`;
@@ -276,7 +281,7 @@ function renderFlowList() {
 function renderCell(col, flow, rowNum) {
   switch (col) {
     case "num":
-      return `<td class="col-num" style="color:var(--text-muted)">${rowNum}</td>`;
+      return `<td class="col-num" style="color:var(--text-muted)">${flow._seq || rowNum}</td>`;
     case "tls":
       return `<td class="col-tls">${tlsLabel(flow)}</td>`;
     case "proto":
@@ -345,7 +350,11 @@ function saveColumnWidths() {
   } catch (_) {}
 }
 
-// ===== Colgroup Management =====
+// ===== Colgroup & Table Width Management =====
+
+function getTotalColWidth() {
+  return colOrder.reduce((sum, id) => sum + (colWidths[id] || 50), 0);
+}
 
 function buildColgroup() {
   const colgroup = $("flowTableCols");
@@ -355,6 +364,14 @@ function buildColgroup() {
       return `<col data-col="${colId}" style="width:${w}px">`;
     })
     .join("");
+  updateTableWidth();
+}
+
+function updateTableWidth() {
+  const wrapper = document.querySelector(".table-wrapper");
+  const containerW = wrapper ? wrapper.clientWidth : 800;
+  const totalW = getTotalColWidth();
+  $("flowTable").style.width = Math.max(totalW, containerW) + "px";
 }
 
 // ===== Column Resize =====
@@ -369,6 +386,7 @@ function initResizeHandles() {
 
     const handle = document.createElement("div");
     handle.className = "resize-handle";
+    handle.setAttribute("draggable", "false");
     th.appendChild(handle);
 
     handle.addEventListener("mousedown", (e) => {
@@ -393,9 +411,16 @@ document.addEventListener("mousemove", (e) => {
   const newWidth = Math.max(28, resizing.startWidth + delta);
   colWidths[resizing.colId] = newWidth;
 
-  // Live-update colgroup
+  // Live-update colgroup col
   const col = document.querySelector(`#flowTableCols col[data-col="${resizing.colId}"]`);
   if (col) col.style.width = newWidth + "px";
+
+  // Live-update th
+  const th = flowTableHead.querySelector(`th[data-col="${resizing.colId}"]`);
+  if (th) th.style.width = newWidth + "px";
+
+  // Recalculate table total width
+  updateTableWidth();
 });
 
 document.addEventListener("mouseup", () => {
@@ -788,6 +813,9 @@ colOrder = getColumnOrder();
 colWidths = loadColumnWidths();
 buildColgroup();
 rebuildTableHeader();
+
+// Recalculate table width when container resizes
+window.addEventListener("resize", () => updateTableWidth());
 
 footerTime.textContent = new Date().toLocaleString();
 setInterval(() => {

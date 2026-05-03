@@ -196,7 +196,6 @@ dd { color: var(--text-primary); }
 }
 
 #flowTable {
-  min-width: 100%;
   border-collapse: collapse;
   table-layout: fixed;
 }
