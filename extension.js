@@ -14,6 +14,11 @@ const TOOLS_DIR = path.join(__dirname, "tools");
 const CERT_DIR = path.join(__dirname, "certificate");
 
 function getPythonCmd() {
+  // 优先使用项目虚拟环境中的 Python
+  const venvPython = path.join(__dirname, ".venv", "bin", "python3");
+  if (fs.existsSync(venvPython)) {
+    return venvPython;
+  }
   return process.platform === "win32" ? "python" : "python3";
 }
 

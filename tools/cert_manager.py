@@ -38,8 +38,8 @@ def compute_subject_hash_old(cert_pem_path):
     subject_der = cert.subject.public_bytes(Encoding.DER)
     md5 = hashlib.md5(subject_der).digest()
 
-    # OpenSSL 对前 4 字节按大端序解释为 uint32，输出 hex
-    hash_val = (md5[0] << 24) | (md5[1] << 16) | (md5[2] << 8) | md5[3]
+    # OpenSSL -subject_hash_old: 前 4 字节按小端序解释为 uint32，输出 hex
+    hash_val = int.from_bytes(md5[:4], 'little')
     return format(hash_val, "08x")
 
 
@@ -163,12 +163,20 @@ def inject_certificates():
     # Execute the script
     result = run_adb(f"shell {remote_script}", timeout=60)
 
-    return {
-        "success": result.returncode == 0,
-        "message": "Certificate injection completed" if result.returncode == 0 else f"Injection failed: {result.stderr}",
-        "output": result.stdout,
-        "error": result.stderr if result.returncode != 0 else "",
-    }
+    if result.returncode == 0:
+        return {
+            "success": True,
+            "message": "Certificate injection completed",
+            "output": result.stdout,
+        }
+    else:
+        error_detail = result.stderr or result.stdout or "Unknown error"
+        return {
+            "success": False,
+            "message": f"Injection failed: {error_detail.strip()[:500]}",
+            "output": result.stdout,
+            "error": result.stderr,
+        }
 
 
 def main():

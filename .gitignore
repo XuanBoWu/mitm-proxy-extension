@@ -8,3 +8,4 @@ node_modules/
 *.vsix
 certificate/
 *.0
+.venv/

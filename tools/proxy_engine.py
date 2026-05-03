@@ -20,8 +20,7 @@ if sys.platform == "win32":
 
 try:
     from mitmproxy import options, http
-    from mitmproxy.master import Master
-    from mitmproxy.addons import default_addons
+    from mitmproxy.tools.dump import DumpMaster
 except ImportError as e:
     print(json.dumps({"error": f"mitmproxy not installed: {e}"}))
     sys.exit(1)
@@ -191,6 +190,18 @@ def main():
         os.makedirs(cert_dir, exist_ok=True)
         args.confdir = cert_dir
 
+    # Print CA cert fingerprint for verification
+    ca_cert_path = os.path.join(args.confdir, "mitmproxy-ca-cert.pem")
+    if os.path.exists(ca_cert_path):
+        import hashlib
+        with open(ca_cert_path, "rb") as f:
+            cert_der = f.read()
+        fp = hashlib.sha256(cert_der).hexdigest().upper()
+        sys.stderr.write(f"CA cert fingerprint (SHA-256): {':'.join(fp[i:i+2] for i in range(0, len(fp), 2))}\n")
+    else:
+        sys.stderr.write("CA cert not found, mitmproxy will generate a new one on first request\n")
+    sys.stderr.flush()
+
     opts = options.Options(
         listen_host=args.host,
         listen_port=args.port,
@@ -199,9 +210,8 @@ def main():
     )
 
     async def run_proxy():
-        master = Master(opts)
+        master = DumpMaster(opts, with_dumper=False, with_termlog=False)
         master.addons.add(CaptureAddon())
-        master.addons.add(*default_addons())
         sys.stderr.write(f"Proxy server listening on {args.host}:{args.port}\n")
         sys.stderr.write(f"CA cert directory: {args.confdir}\n")
         sys.stderr.flush()

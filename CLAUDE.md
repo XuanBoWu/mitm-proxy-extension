@@ -32,16 +32,24 @@ Webview UI (HTML/CSS/JS) → vscode.postMessage → extension.js (Node.js)
 
 ## mitmproxy 12.x 注意事项
 
-- `Master.__init__()` 必须在 asyncio event loop 中调用，使用 `asyncio.run(run_proxy())`
-- `default_addons` 是函数而不是模块，直接调用 `default_addons()`
+- **必须使用 `DumpMaster` 而非 `Master`**：`Master` 初始化不完整，不会触发 addon hooks（`response`/`error`）。`DumpMaster` 自动加载 `default_addons()` + `KeepServing` + `ErrorCheck`，确保代理功能正常
+- 创建 `DumpMaster` 时使用 `with_dumper=False, with_termlog=False`，避免内置 Dumper 输出混入 JSONL stdout
 - CA 证书首次启动自动生成到 `certificate/` 目录
 - `ssl_insecure=True` 接受所有上游证书
+- 启动时输出 CA 证书 SHA-256 指纹到 stderr，用于验证证书匹配
 
 ## 证书注入流程
 
 1. `proxy_engine.py` 首次运行自动生成 `certificate/mitmproxy-ca-cert.pem`
-2. `cert_manager.py convert --cert` 计算 `subject_hash_old`（MD5 of DER Subject），生成 `<hash>.0`
+2. `cert_manager.py convert --cert` 计算 `subject_hash_old`（MD5 of DER Subject，前 4 字节按**小端序**解释为 uint32），生成 `<hash>.0`
 3. `cert_manager.py push --cert` → convert + adb push .0 文件 + 执行 shell 脚本注入
+
+### 关键注意
+
+- **Hash 字节序**：OpenSSL `-subject_hash_old` 使用**小端序**（`int.from_bytes(md5[:4], 'little')`），不是大端序。错误的字节序会导致证书文件名不对，Android 无法识别
+- **Android Toybox 兼容性**：Android shell 使用 Toybox 而非 GNU coreutils，`ps --ppid` 应写为 `ps -P`，`grep -v PID || exit` 应写为 `tail -n +2`（避免 grep 无匹配时返回错误）
+- **Android 14+ APEX**：系统 CA 实际路径为 `/apex/com.android.conscrypt/cacerts/`，需额外 bind mount 到 Zygote 命名空间
+- **证书匹配验证**：启动代理后对比 stderr 输出的 SHA-256 指纹与设备上 `.0` 文件的指纹
 
 ## Webview message 协议
 
@@ -71,7 +79,7 @@ Webview UI (HTML/CSS/JS) → vscode.postMessage → extension.js (Node.js)
 ## 平台差异
 
 - Windows: `python` + `taskkill /pid /f /t`
-- macOS/Linux: `python3` + `SIGTERM`
+- macOS/Linux: `python3` + `SIGTERM`；优先使用 `.venv/bin/python3`（Homebrew Python 不允许全局 pip install）
 
 ## 已知待改进
 

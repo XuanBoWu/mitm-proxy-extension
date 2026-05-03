@@ -75,7 +75,7 @@ done
 # 获取所有由 Zygote 启动的应用程序的 PID
 APP_PIDS=$(
     for Z_PID in $ZYGOTE_PID $ZYGOTE64_PID; do
-        ps -o 'PID' --ppid "$Z_PID" | grep -v PID
+        ps -P "$Z_PID" -o PID | tail -n +2
     done
 )
 
