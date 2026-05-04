@@ -7,21 +7,23 @@ let selectedFlowId = null;
 let proxyRunning = false;
 let filterText = "";
 let nextSeq = 1;
+let sortState = { colId: null, direction: null }; // null | 'asc' | 'desc'
+let userResizedCols = new Set(); // columns user manually resized — skip auto-fit
 
-// Column definitions
+// Column definitions — sizing: "content" = auto-fit to content, "fixed" = clip at preset width
 const COLUMNS = [
-  { id: "num",    title: "#",       width: 35  },
-  { id: "tls",    title: "TLS",     width: 60  },
-  { id: "proto",  title: "Protocol",width: 72  },
-  { id: "host",   title: "Host",    width: 140 },
-  { id: "path",   title: "Path",    width: 160 },
-  { id: "method", title: "Method",  width: 68  },
-  { id: "status", title: "Status",  width: 55  },
-  { id: "time",   title: "Time",    width: 80  },
-  { id: "size",   title: "Size",    width: 60  },
-  { id: "mime",   title: "MIME",    width: 80  },
-  { id: "ip",     title: "IP",      width: 120 },
-  { id: "port",   title: "Port",    width: 50  },
+  { id: "num",    title: "#",       width: 40,  sizing: "content", minWidth: 32  },
+  { id: "tls",    title: "TLS",     width: 68,  sizing: "content", minWidth: 50  },
+  { id: "proto",  title: "Protocol",width: 68,  sizing: "content", minWidth: 52  },
+  { id: "host",   title: "Host",    width: 160, sizing: "fixed"   },  // ~20 chars
+  { id: "path",   title: "Path",    width: 220, sizing: "fixed"   },  // ~30 chars
+  { id: "method", title: "Method",  width: 68,  sizing: "content", minWidth: 52  },
+  { id: "status", title: "Status",  width: 55,  sizing: "content", minWidth: 42  },
+  { id: "time",   title: "Time",    width: 82,  sizing: "content", minWidth: 68  },
+  { id: "size",   title: "Size",    width: 62,  sizing: "content", minWidth: 48  },
+  { id: "mime",   title: "MIME",    width: 80,  sizing: "content", minWidth: 56  },
+  { id: "ip",     title: "IP",      width: 130, sizing: "content", minWidth: 90  },
+  { id: "port",   title: "Port",    width: 52,  sizing: "content", minWidth: 38  },
 ];
 
 // Column order / width persistence keyed by column id
@@ -49,6 +51,19 @@ window.addEventListener("message", (event) => {
       flows.unshift(msg.flow);
       renderFlowList();
       break;
+    case "updateFlow": {
+      const idx = flows.findIndex(f => f.id === msg.flow.id);
+      if (idx !== -1) {
+        msg.flow._seq = flows[idx]._seq; // preserve sequence number
+        flows[idx] = msg.flow;
+        renderFlowList();
+        // Re-render detail if this flow is currently selected
+        if (selectedFlowId === msg.flow.id) {
+          renderDetail(msg.flow);
+        }
+      }
+      break;
+    }
     case "setStatus":
       proxyRunning = msg.proxyRunning;
       updateProxyIndicator();
@@ -79,6 +94,7 @@ window.addEventListener("message", (event) => {
     case "flowsCleared":
       flows = [];
       nextSeq = 1;
+      userResizedCols.clear();
       renderFlowList();
       renderEmptyDetail();
       break;
@@ -86,6 +102,7 @@ window.addEventListener("message", (event) => {
       flows = msg.flows;
       flows.forEach((f, i) => { if (f._seq == null) f._seq = i + 1; });
       nextSeq = flows.length + 1;
+      userResizedCols.clear();
       renderFlowList();
       renderEmptyDetail();
       footerStatus.textContent = `已加载 ${msg.flows.length} 条记录`;
@@ -249,6 +266,11 @@ function renderFlowList() {
     );
   }
 
+  // Apply sorting
+  if (sortState.colId && sortState.direction) {
+    filtered = sortFlows(filtered);
+  }
+
   flowCount.textContent = flows.length;
 
   if (filtered.length === 0) {
@@ -276,6 +298,8 @@ function renderFlowList() {
       vscode.postMessage({ command: "selectFlow", flowId: id });
     });
   });
+
+  autoFitContentColumns();
 }
 
 function renderCell(col, flow, rowNum) {
@@ -292,8 +316,16 @@ function renderCell(col, flow, rowNum) {
       return `<td class="col-path" title="${escapeHtml(flow.path)}">${escapeHtml(flow.path)}</td>`;
     case "method":
       return `<td class="col-method">${methodLabel(flow.method)}</td>`;
-    case "status":
-      return `<td class="col-status"><span class="status ${statusClass(flow.status_code)}">${flow.status_code || "ERR"}</span></td>`;
+    case "status": {
+      const code = flow.status_code;
+      if (code === 0 && !flow.error) {
+        return `<td class="col-status"><span class="status pending" title="等待响应...">...</span></td>`;
+      }
+      if (code === 0 && flow.error) {
+        return `<td class="col-status"><span class="status s0xx" title="${escapeHtml(flow.error)}">ERR</span></td>`;
+      }
+      return `<td class="col-status"><span class="status ${statusClass(code)}">${code}</span></td>`;
+    }
     case "time":
       return `<td class="col-time time">${formatTimestamp(flow.req_timestamp)}</td>`;
     case "size":
@@ -306,6 +338,56 @@ function renderCell(col, flow, rowNum) {
       return `<td class="col-port">${flow.port || '-'}</td>`;
     default:
       return "<td></td>";
+  }
+}
+
+// ===== Column Sorting =====
+
+function handleSort(colId) {
+  if (sortState.colId === colId) {
+    if (sortState.direction === "asc") {
+      sortState.direction = "desc";
+    } else if (sortState.direction === "desc") {
+      sortState.colId = null;
+      sortState.direction = null;
+    }
+  } else {
+    sortState.colId = colId;
+    sortState.direction = "asc";
+  }
+  rebuildTableHeader();
+  renderFlowList();
+}
+
+function sortFlows(arr) {
+  const sorted = [...arr];
+  const colId = sortState.colId;
+  const dir = sortState.direction === "asc" ? 1 : -1;
+  sorted.sort((a, b) => {
+    const va = getSortValue(a, colId);
+    const vb = getSortValue(b, colId);
+    if (va < vb) return -1 * dir;
+    if (va > vb) return 1 * dir;
+    return 0;
+  });
+  return sorted;
+}
+
+function getSortValue(flow, colId) {
+  switch (colId) {
+    case "num":    return flow._seq || 0;
+    case "tls":    return flow.tls_version || "";
+    case "proto":  return ((flow.url || "").split("://")[0] || flow.scheme || "").toLowerCase();
+    case "host":   return (flow.host || "").toLowerCase();
+    case "path":   return (flow.path || "").toLowerCase();
+    case "method": return flow.method || "";
+    case "status": return flow.status_code;
+    case "time":   return flow.req_timestamp || 0;
+    case "size":   return flow.res_size || 0;
+    case "mime":   return (flow.content_type || "").toLowerCase();
+    case "ip":     return flow.server_ip || "";
+    case "port":   return flow.port || 0;
+    default:       return "";
   }
 }
 
@@ -371,7 +453,52 @@ function updateTableWidth() {
   const wrapper = document.querySelector(".table-wrapper");
   const containerW = wrapper ? wrapper.clientWidth : 800;
   const totalW = getTotalColWidth();
-  $("flowTable").style.width = Math.max(totalW, containerW) + "px";
+  $("flowTable").style.width = totalW + "px";
+}
+
+function autoFitContentColumns() {
+  const measureEl = document.createElement("span");
+  measureEl.style.cssText = "position:absolute;visibility:hidden;font-size:12px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;white-space:nowrap;pointer-events:none;";
+  document.body.appendChild(measureEl);
+
+  let changed = false;
+
+  for (const colDef of COLUMNS) {
+    if (colDef.sizing !== "content") continue;
+    const colId = colDef.id;
+    if (userResizedCols.has(colId)) continue;
+    const colIndex = colOrder.indexOf(colId);
+    if (colIndex === -1) continue;
+
+    let maxWidth = colDef.minWidth || 32;
+
+    // Measure header text (with sort indicator)
+    measureEl.textContent = colDef.title + (sortState.colId === colId ? " ▲" : "");
+    maxWidth = Math.max(maxWidth, measureEl.offsetWidth + 28);
+
+    // Measure all visible cell contents
+    const rows = flowTableBody.querySelectorAll("tr:not(.empty-state)");
+    rows.forEach(row => {
+      const cell = row.children[colIndex];
+      if (cell) {
+        // Use innerText for more accurate rendering width (respects CSS text-transform etc.)
+        measureEl.textContent = cell.textContent.trim();
+        maxWidth = Math.max(maxWidth, measureEl.offsetWidth + 24);
+      }
+    });
+
+    const prev = colWidths[colId] || 0;
+    if (Math.abs(maxWidth - prev) > 2) {
+      colWidths[colId] = maxWidth;
+      changed = true;
+    }
+  }
+
+  document.body.removeChild(measureEl);
+
+  if (changed) {
+    buildColgroup();
+  }
 }
 
 // ===== Column Resize =====
@@ -415,10 +542,6 @@ document.addEventListener("mousemove", (e) => {
   const col = document.querySelector(`#flowTableCols col[data-col="${resizing.colId}"]`);
   if (col) col.style.width = newWidth + "px";
 
-  // Live-update th
-  const th = flowTableHead.querySelector(`th[data-col="${resizing.colId}"]`);
-  if (th) th.style.width = newWidth + "px";
-
   // Recalculate table total width
   updateTableWidth();
 });
@@ -428,6 +551,7 @@ document.addEventListener("mouseup", () => {
   document.querySelectorAll(".resize-handle").forEach(h => h.classList.remove("resizing"));
   document.body.style.cursor = "";
   document.body.style.userSelect = "";
+  userResizedCols.add(resizing.colId);
   saveColumnWidths();
   resizing = null;
 });
@@ -484,6 +608,7 @@ function reorderColumns(srcId, targetId) {
   colOrder.splice(srcIdx, 1);
   colOrder.splice(targetIdx, 0, srcId);
   saveColumnOrder(colOrder);
+  userResizedCols.clear();
 
   rebuildTableHeader();
   buildColgroup();
@@ -495,8 +620,11 @@ function rebuildTableHeader() {
     .map((colId) => {
       const colDef = COLUMNS.find((c) => c.id === colId);
       if (!colDef) return "";
-      const w = colWidths[colId] || 50;
-      return `<th class="col-${colId}" draggable="true" data-col="${colId}" style="width:${w}px">${colDef.title}</th>`;
+      let title = colDef.title;
+      if (sortState.colId === colId) {
+        title += sortState.direction === "asc" ? " ▲" : " ▼";
+      }
+      return `<th class="col-${colId}" draggable="true" data-col="${colId}">${title}</th>`;
     })
     .join("");
   initDragDrop();
@@ -728,6 +856,16 @@ document.addEventListener("click", (e) => {
     $("resBodyRaw").style.display = view === "raw" ? "" : "none";
     $("resBodyRender").style.display = view === "render" ? "" : "none";
   }
+});
+
+// ===== Column Header Sort Click =====
+
+flowTableHead.addEventListener("click", (e) => {
+  if (e.target.closest(".resize-handle")) return;
+  const th = e.target.closest("th");
+  if (!th) return;
+  const colId = th.dataset.col;
+  if (colId) handleSort(colId);
 });
 
 // ===== Button Events =====

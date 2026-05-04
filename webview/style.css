@@ -285,6 +285,7 @@ dd { color: var(--text-primary); }
 .status.s4xx { color: var(--orange); }
 .status.s5xx { color: var(--red); }
 .status.s0xx { color: var(--red); }
+.status.pending { color: var(--text-muted); }
 
 .time { font-family: var(--font-mono); font-size: 11px; }
 .mime-tag {

@@ -130,6 +130,7 @@ function transformFlow(f) {
     content_type: contentType,
     req_size: req.contentLength || 0,
     res_size: res.contentLength || 0,
+    error: f.error ? (f.error.msg || "Connection error") : "",
   };
 }
 
@@ -169,6 +170,35 @@ async function pollFlows() {
           command: "addFlow",
           flow: transformed,
         });
+      }
+    }
+
+    // Check for updates to known flows (e.g. response arrived after initial display)
+    for (const f of flows) {
+      if (!knownFlowIds.has(f.id)) continue;
+      const existing = capturedFlows.find(cf => cf.id === f.id);
+      if (!existing) continue;
+      // Response arrived: status_code changed, res_size appeared, etc.
+      if (existing.status_code !== (f.response?.status_code || 0) ||
+          existing.res_size !== (f.response?.contentLength || 0) ||
+          (!existing.duration_ms && f.response?.timestamp_start)) {
+        const transformed = transformFlow(f);
+        // Preserve already-fetched body data
+        if (existing._bodyFetched) {
+          transformed._bodyFetched = true;
+          transformed.req_body = existing.req_body;
+          transformed.res_body = existing.res_body;
+          transformed.res_body_base64 = existing.res_body_base64;
+        }
+        // Replace in array
+        const idx = capturedFlows.indexOf(existing);
+        capturedFlows[idx] = transformed;
+        if (panel) {
+          panel.webview.postMessage({
+            command: "updateFlow",
+            flow: transformed,
+          });
+        }
       }
     }
   } catch (_) {
