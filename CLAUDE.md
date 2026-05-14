@@ -20,8 +20,8 @@ Webview UI (HTML/CSS/JS) → vscode.postMessage → extension.js (Node.js)
 | `tools/cert_manager.py` | ADB 设备检查、PEM→Android .0 格式转换、证书注入 |
 | `tools/scripts/set_ca_android.sh` | Android <14 CA 注入脚本 |
 | `tools/scripts/set_ca_android14.sh` | Android 14+ CA 注入脚本（APEX/Zygote namespace） |
-| `webview/index.html` | 三栏布局：设备面板 / 请求列表（含 TLS 列） / 详情 |
-| `webview/app.js` | 前端逻辑，实时 render flow 数据，TLS 图标、body 格式化 |
+| `webview/index.html` | 三栏布局：设备面板（可折叠） / 请求列表（12 列可拖拽排序） / 详情（可折叠） |
+| `webview/app.js` | 前端逻辑，实时 render flow 数据，面板拖拽/折叠，列排序，键盘导航 |
 | `webview/style.css` | Catppuccin 暗色主题 |
 
 ## 数据流
@@ -30,10 +30,12 @@ Webview UI (HTML/CSS/JS) → vscode.postMessage → extension.js (Node.js)
 2. proxy_engine.py 启动 WebMaster，在 stderr 输出 `WEB_PORT={port}` 和 `AUTH_TOKEN={32-char-hex}`
 3. extension.js 解析 stderr 获取 webPort 和 authToken，启动 500ms 定时轮询
 4. 轮询 `GET http://127.0.0.1:{webPort}/flows.json?token={token}` 获取全部 flow 元数据（不含 body）
-5. extension.js 将 mitmweb flow 格式转换为 webview 格式 → `postMessage({command: "addFlow", flow})`
-6. Webview 实时追加请求列表，点击查看详情
-7. 点击 flow 时，extension.js 按需请求 body：`GET /flows/{id}/request/content.data?token={token}`
-8. Body 内容缓存到 `flow.req_body` / `flow.res_body`，发送 `showDetail` 到 webview
+5. extension.js 将 mitmweb flow 格式转换为 webview 格式 → 批量发送 `postMessage({command: "addFlows", flows})`
+6. Webview 一次渲染所有新 flow，列表支持上下键导航（不循环）
+7. 检测已知 flow 的 status_code/res_size 变化 → 批量发送 `updateFlows`（响应状态实时更新）
+8. 点击 flow 时，extension.js 按需请求 body：`GET /flows/{id}/request/content.data?token={token}`
+9. Body 内容缓存到 `flow.req_body` / `flow.res_body`，发送 `showDetail` 到 webview
+10. 导出 JSON/HAR 前自动拉取所有未加载的 body，JSON 含 `_num` 序号
 
 ## mitmproxy 12.x 注意事项
 
@@ -88,14 +90,17 @@ WebSocket 和 REST API 返回的 flow JSON 格式（`mitmproxy/tools/web/app.py:
 | UI→JS | `refreshDevice` | 刷新 ADB 设备信息 |
 | UI→JS | `ensureRoot` | 获取 root |
 | UI→JS | `pushCert` | 推送并注入证书 |
-| UI→JS | `setProxy` / `clearProxy` | 设备代理设置 |
+| UI→JS | `setProxy` / `clearProxy` | 设备代理设置 `{port, ip}` |
 | UI→JS | `selectFlow` | 查看 flow 详情（触发按需 body 加载） |
 | UI→JS | `exportHar` / `exportJson` | 导出 |
-| JS→UI | `addFlow` | 新抓包 `{flow}` |
+| UI→JS | `getInterfaces` | 获取可用网卡列表 |
+| JS→UI | `addFlows` | 批量新抓包 `{flows: [...]}` |
+| JS→UI | `updateFlows` | 批量更新 flow 数据 `{flows: [...]}` |
 | JS→UI | `proxyStatus` | 代理状态 `{running, port, message}` |
 | JS→UI | `deviceStatus` | 设备状态 `{connected, info}` |
-| JS→UI | `showDetail` | 显示 flow 详情（含已加载的 body） |
+| JS→UI | `showDetail` | 显示 flow 详情（含已加载的 body，右侧面板自动展开） |
 | JS→UI | `certStatus` | 证书操作结果 `{success, message}` |
+| JS→UI | `interfacesList` | 网卡列表 `{interfaces: [{name, ip}]}` |
 
 ## 依赖
 
@@ -109,9 +114,26 @@ WebSocket 和 REST API 返回的 flow JSON 格式（`mitmproxy/tools/web/app.py:
 - Windows: `python` + `taskkill /pid /f /t`
 - macOS/Linux: `python3` + `SIGTERM`；优先使用 `.venv/bin/python3`（Homebrew Python 不允许全局 pip install）
 
+## Webview UI 功能
+
+- **三栏面板**：左（设备管理）/ 中（请求列表）/ 右（详情），拖拽分割线调节宽度
+- **面板折叠**：左右面板可折叠为 28px 窄边，右侧面板选中数据包时自动展开
+- **列管理**：12 列可拖拽重排，`content` 列自适应宽度 / `fixed` 列固定宽度，手动拖宽不会被 auto-fit 重置
+- **三态排序**：点击列头循环 升序 → 降序 → 原始顺序，th 显示 ▲/▼
+- **响应更新**：检测已知 flow 的 status_code 变化，自动更新列表（灰色 `...` 等待 → 状态码 / 红色 ERR）
+- **请求/响应体**：Headers + Body 合一布局，统一滚动，Headers 高度可拖拽调节
+- **详情折叠**：Request/Response 可折叠，TLS & Timing 可折叠
+- **网卡选择**：代理设置中可选网卡接口，单网卡自动选中，多网卡提示选择
+- **键盘导航**：上下键在列表中切换数据包（不循环），Ctrl+F 聚焦搜索框
+- **导出**：JSON 含 `_num` 序号，导出前自动拉取所有 body 内容
+
+## 性能优化
+
+- addFlow/updateFlow 改为批量消息（`addFlows`/`updateFlows`），减少渲染次数
+- autoFitContentColumns 300ms 防抖，避免高频率 DOM 测量
+
 ## 已知待改进
 
 - REST API 轮询在大流量时可能延迟较高（可改为 WebSocket 实时推送）
-- Body 内容仅取原始数据，未使用 contentview 格式化（JSON prettify 由前端 app.js 处理）
-- HTTP 请求体过大时前端可能卡顿
-- 设备代理 IP 需手动确认局域网地址
+- HTTP 请求体过大时前端可能卡顿（可改为虚拟滚动）
+- 请求体格式化依赖请求头 Content-Type（非响应 Content-Type），支持 contentview API 会更准确
