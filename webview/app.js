@@ -10,6 +10,12 @@ let nextSeq = 1;
 let sortState = { colId: null, direction: null }; // null | 'asc' | 'desc'
 let userResizedCols = new Set(); // columns user manually resized — skip auto-fit
 
+// Panel state
+let leftPanelWidth = 220;
+let leftCollapsed = false;
+let rightPanelWidth = 420;
+let rightCollapsed = false;
+
 // Column definitions — sizing: "content" = auto-fit to content, "fixed" = clip at preset width
 const COLUMNS = [
   { id: "num",    title: "#",       width: 40,  sizing: "content", minWidth: 32  },
@@ -46,21 +52,36 @@ const footerTime = $("footerTime");
 window.addEventListener("message", (event) => {
   const msg = event.data;
   switch (msg.command) {
-    case "addFlow":
+    case "addFlows":
+      for (const f of msg.flows) {
+        f._seq = nextSeq++;
+        flows.unshift(f);
+      }
+      renderFlowList();
+      break;
+    case "addFlow": // kept for backwards compat, not used by current extension.js
       msg.flow._seq = nextSeq++;
       flows.unshift(msg.flow);
       renderFlowList();
       break;
-    case "updateFlow": {
+    case "updateFlows":
+      for (const f of msg.flows) {
+        const idx = flows.findIndex(cf => cf.id === f.id);
+        if (idx !== -1) {
+          f._seq = flows[idx]._seq;
+          flows[idx] = f;
+          if (selectedFlowId === f.id) renderDetail(f);
+        }
+      }
+      renderFlowList();
+      break;
+    case "updateFlow": { // kept for backwards compat
       const idx = flows.findIndex(f => f.id === msg.flow.id);
       if (idx !== -1) {
-        msg.flow._seq = flows[idx]._seq; // preserve sequence number
+        msg.flow._seq = flows[idx]._seq;
         flows[idx] = msg.flow;
         renderFlowList();
-        // Re-render detail if this flow is currently selected
-        if (selectedFlowId === msg.flow.id) {
-          renderDetail(msg.flow);
-        }
+        if (selectedFlowId === msg.flow.id) renderDetail(msg.flow);
       }
       break;
     }
@@ -89,6 +110,7 @@ window.addEventListener("message", (event) => {
       showProxySetupStatus(msg.success ? "success" : "error", msg.message);
       break;
     case "showDetail":
+      autoExpandRightPanel();
       renderDetail(msg.flow);
       break;
     case "flowsCleared":
@@ -106,6 +128,9 @@ window.addEventListener("message", (event) => {
       renderFlowList();
       renderEmptyDetail();
       footerStatus.textContent = `已加载 ${msg.flows.length} 条记录`;
+      break;
+    case "interfacesList":
+      updateInterfaceSelect(msg.interfaces);
       break;
   }
 });
@@ -456,7 +481,18 @@ function updateTableWidth() {
   $("flowTable").style.width = totalW + "px";
 }
 
+let autoFitTimer = null;
+
 function autoFitContentColumns() {
+  // Debounce: only run after a 300ms gap of no render calls
+  if (autoFitTimer) clearTimeout(autoFitTimer);
+  autoFitTimer = setTimeout(() => {
+    autoFitTimer = null;
+    _autoFitContentColumns();
+  }, 300);
+}
+
+function _autoFitContentColumns() {
   const measureEl = document.createElement("span");
   measureEl.style.cssText = "position:absolute;visibility:hidden;font-size:12px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;white-space:nowrap;pointer-events:none;";
   document.body.appendChild(measureEl);
@@ -501,9 +537,54 @@ function autoFitContentColumns() {
   }
 }
 
+// Headers height resize
+function initHeadersResize() {
+  document.querySelectorAll(".headers-resize-handle").forEach((handle) => {
+    handle.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const target = handle.dataset.target;
+      const preId = target === "req" ? "reqHeaders" : "resHeaders";
+      const pre = document.getElementById(preId);
+      if (!pre) return;
+      const currentHeight = pre.offsetHeight;
+      headerResizing = {
+        target,
+        startY: e.clientY,
+        startHeight: currentHeight,
+      };
+      handle.classList.add("resizing");
+      document.body.style.cursor = "ns-resize";
+      document.body.style.userSelect = "none";
+    });
+  });
+}
+
+// Section collapse/expand
+function initSectionCollapse() {
+  document.querySelectorAll(".section-header").forEach((header) => {
+    header.addEventListener("click", (e) => {
+      // Don't collapse when clicking view-toggle buttons
+      if (e.target.closest(".view-btn")) return;
+      const section = header.closest(".detail-section");
+      const scroll = section.querySelector(".section-scroll");
+      const collapsed = scroll.classList.toggle("collapsed");
+      section.classList.toggle("collapsed", collapsed);
+      header.classList.toggle("collapsed", collapsed);
+      // Remember state
+      const key = section.id === "reqSection" ? "mitm-proxy-req-collapsed" : "mitm-proxy-res-collapsed";
+      try {
+        localStorage.setItem(key, collapsed ? "1" : "0");
+      } catch (_) {}
+    });
+  });
+}
+
 // ===== Column Resize =====
 
 let resizing = null; // { colId, startX, startWidth }
+let panelResizing = null; // { gutterId, startX, startWidth, targetId }
+let headerResizing = null; // { target, startY, startHeight }
 
 function initResizeHandles() {
   flowTableHead.querySelectorAll("th").forEach((th) => {
@@ -532,28 +613,185 @@ function initResizeHandles() {
   });
 }
 
+// ===== Panel Resize & Collapse =====
+
+function loadPanelState() {
+  try {
+    const saved = localStorage.getItem("mitm-proxy-panel-state");
+    if (saved) {
+      const state = JSON.parse(saved);
+      leftPanelWidth = state.leftWidth || 220;
+      leftCollapsed = state.leftCollapsed || false;
+      rightPanelWidth = state.rightWidth || 420;
+      rightCollapsed = state.rightCollapsed || false;
+    }
+  } catch (_) {}
+  applyPanelState();
+}
+
+function savePanelState() {
+  try {
+    const state = {
+      leftWidth: leftPanelWidth,
+      leftCollapsed,
+      rightWidth: rightPanelWidth,
+      rightCollapsed,
+    };
+    localStorage.setItem("mitm-proxy-panel-state", JSON.stringify(state));
+  } catch (_) {}
+}
+
+function applyPanelState() {
+  const leftPanel = $("devicePanel");
+  const rightPanel = $("detailPanel");
+  if (leftCollapsed) {
+    leftPanel.classList.add("collapsed");
+    leftPanel.style.width = "";
+    $("toggleLeftBtn").textContent = "▶";
+  } else {
+    leftPanel.classList.remove("collapsed");
+    leftPanel.style.width = leftPanelWidth + "px";
+    $("toggleLeftBtn").textContent = "◀";
+  }
+  if (rightCollapsed) {
+    rightPanel.classList.add("collapsed");
+    rightPanel.style.width = "";
+    $("toggleRightBtn").textContent = "◀";
+  } else {
+    rightPanel.classList.remove("collapsed");
+    rightPanel.style.width = rightPanelWidth + "px";
+    $("toggleRightBtn").textContent = "▶";
+  }
+}
+
+function toggleLeftPanel() {
+  if (leftCollapsed) {
+    leftCollapsed = false;
+  } else {
+    // Save current width before collapsing
+    leftPanelWidth = $("devicePanel").offsetWidth;
+    leftCollapsed = true;
+  }
+  savePanelState();
+  applyPanelState();
+}
+
+function toggleRightPanel() {
+  if (rightCollapsed) {
+    rightCollapsed = false;
+  } else {
+    rightPanelWidth = $("detailPanel").offsetWidth;
+    rightCollapsed = true;
+  }
+  savePanelState();
+  applyPanelState();
+}
+
+function autoExpandRightPanel() {
+  if (rightCollapsed) {
+    rightCollapsed = false;
+    savePanelState();
+    applyPanelState();
+  }
+}
+
+// Gutter mousedown
+function initGutterResize() {
+  document.querySelectorAll(".gutter").forEach((gutter) => {
+    gutter.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      const isLeft = gutter.id === "leftGutter";
+      const targetId = isLeft ? "devicePanel" : "detailPanel";
+      const targetEl = document.getElementById(targetId);
+      panelResizing = {
+        gutterId: gutter.id,
+        startX: e.clientX,
+        startWidth: targetEl.offsetWidth,
+        targetId: targetId,
+      };
+      gutter.classList.add("resizing");
+      document.body.style.cursor = "col-resize";
+      document.body.style.userSelect = "none";
+    });
+  });
+}
+
 document.addEventListener("mousemove", (e) => {
-  if (!resizing) return;
-  const delta = e.clientX - resizing.startX;
-  const newWidth = Math.max(28, resizing.startWidth + delta);
-  colWidths[resizing.colId] = newWidth;
+  if (resizing) {
+    const delta = e.clientX - resizing.startX;
+    const newWidth = Math.max(28, resizing.startWidth + delta);
+    colWidths[resizing.colId] = newWidth;
 
-  // Live-update colgroup col
-  const col = document.querySelector(`#flowTableCols col[data-col="${resizing.colId}"]`);
-  if (col) col.style.width = newWidth + "px";
+    // Live-update colgroup col
+    const col = document.querySelector(`#flowTableCols col[data-col="${resizing.colId}"]`);
+    if (col) col.style.width = newWidth + "px";
 
-  // Recalculate table total width
-  updateTableWidth();
+    // Recalculate table total width
+    updateTableWidth();
+  }
+  if (panelResizing) {
+    const delta = e.clientX - panelResizing.startX;
+    const isLeft = panelResizing.gutterId === "leftGutter";
+    const minW = isLeft ? 28 : 320;
+    const maxW = isLeft ? 500 : 800;
+    const newWidth = Math.max(minW, Math.min(maxW, panelResizing.startWidth + (isLeft ? delta : -delta)));
+    const targetEl = document.getElementById(panelResizing.targetId);
+    if (targetEl) {
+      targetEl.style.transition = "none";
+      targetEl.style.width = newWidth + "px";
+    }
+  }
+  if (headerResizing) {
+    const delta = e.clientY - headerResizing.startY;
+    const newHeight = Math.max(40, Math.min(400, headerResizing.startHeight + delta));
+    const preId = headerResizing.target === "req" ? "reqHeaders" : "resHeaders";
+    const pre = document.getElementById(preId);
+    if (pre) pre.style.maxHeight = newHeight + "px";
+  }
 });
 
 document.addEventListener("mouseup", () => {
-  if (!resizing) return;
-  document.querySelectorAll(".resize-handle").forEach(h => h.classList.remove("resizing"));
-  document.body.style.cursor = "";
-  document.body.style.userSelect = "";
-  userResizedCols.add(resizing.colId);
-  saveColumnWidths();
-  resizing = null;
+  if (resizing) {
+    document.querySelectorAll(".resize-handle").forEach(h => h.classList.remove("resizing"));
+    document.body.style.cursor = "";
+    document.body.style.userSelect = "";
+    userResizedCols.add(resizing.colId);
+    saveColumnWidths();
+    resizing = null;
+  }
+  if (panelResizing) {
+    document.querySelectorAll(".gutter").forEach(g => g.classList.remove("resizing"));
+    document.body.style.cursor = "";
+    document.body.style.userSelect = "";
+    const targetEl = document.getElementById(panelResizing.targetId);
+    if (targetEl) targetEl.style.transition = "";
+    const isLeft = panelResizing.gutterId === "leftGutter";
+    if (isLeft) {
+      leftPanelWidth = parseInt(targetEl.style.width) || 220;
+      leftCollapsed = false;
+      $("toggleLeftBtn").textContent = "◀";
+      targetEl.classList.remove("collapsed");
+    } else {
+      rightPanelWidth = parseInt(targetEl.style.width) || 420;
+      rightCollapsed = false;
+      $("toggleRightBtn").textContent = "▶";
+      targetEl.classList.remove("collapsed");
+    }
+    savePanelState();
+    panelResizing = null;
+  }
+  if (headerResizing) {
+    document.querySelectorAll(".headers-resize-handle").forEach(h => h.classList.remove("resizing"));
+    document.body.style.cursor = "";
+    document.body.style.userSelect = "";
+    const key = "mitm-proxy-headers-height-" + headerResizing.target;
+    const preId = headerResizing.target === "req" ? "reqHeaders" : "resHeaders";
+    const pre = document.getElementById(preId);
+    if (pre) {
+      try { localStorage.setItem(key, pre.style.maxHeight); } catch (_) {}
+    }
+    headerResizing = null;
+  }
 });
 
 // ===== Column Drag & Drop =====
@@ -645,11 +883,12 @@ function renderDetail(flow) {
   // Request headers
   $("reqHeaders").textContent = formatHeaders(flow.req_headers);
 
-  // Request body
+  // Request body — use request Content-Type, not response's
   const reqBody = flow.req_body || "";
+  const reqContentType = (flow.req_headers && flow.req_headers["content-type"]) || "";
   $("reqBodyFormatted").className = "body-view";
   $("reqBodyRaw").textContent = reqBody;
-  renderBody($("reqBodyFormatted"), reqBody, flow.content_type);
+  renderBody($("reqBodyFormatted"), reqBody, reqContentType);
   // Default to formatted view
   $("reqBodyFormatted").style.display = "";
   $("reqBodyRaw").style.display = "none";
@@ -885,6 +1124,11 @@ $("pushCertBtn").addEventListener("click", () => {
 });
 
 $("startProxyBtn").addEventListener("click", () => {
+  const ip = getSelectedInterface();
+  if (availableInterfaces.length > 1 && !ip) {
+    showProxySetupStatus("error", "请先选择网卡接口");
+    return;
+  }
   const port = parseInt($("proxyPort").value) || 8080;
   vscode.postMessage({ command: "startProxy", port: port });
 });
@@ -894,12 +1138,39 @@ $("stopProxyBtn").addEventListener("click", () => {
 });
 
 $("setDeviceProxyBtn").addEventListener("click", () => {
+  const ip = getSelectedInterface();
+  if (availableInterfaces.length > 1 && !ip) {
+    showProxySetupStatus("error", "请先选择网卡接口");
+    return;
+  }
   const port = parseInt($("proxyPort").value) || 8080;
-  vscode.postMessage({ command: "setProxy", port: port });
+  vscode.postMessage({ command: "setProxy", port: port, ip: ip });
+});
+
+$("refreshInterfaceBtn").addEventListener("click", () => {
+  vscode.postMessage({ command: "getInterfaces" });
 });
 
 $("clearDeviceProxyBtn").addEventListener("click", () => {
   vscode.postMessage({ command: "clearProxy" });
+});
+
+$("toggleLeftBtn").addEventListener("click", () => {
+  toggleLeftPanel();
+});
+
+$("toggleRightBtn").addEventListener("click", () => {
+  toggleRightPanel();
+});
+
+$("tlsTimingToggle").addEventListener("click", () => {
+  const header = $("tlsTimingToggle");
+  const content = document.querySelector(".meta-content");
+  const collapsed = content.classList.toggle("collapsed");
+  header.classList.toggle("collapsed", collapsed);
+  try {
+    localStorage.setItem("mitm-proxy-meta-collapsed", collapsed ? "1" : "0");
+  } catch (_) {}
 });
 
 $("clearBtn").addEventListener("click", () => {
@@ -922,6 +1193,52 @@ $("loadSessionBtn").addEventListener("click", () => {
   vscode.postMessage({ command: "loadSession" });
 });
 
+// ===== Network Interface Selection =====
+
+let availableInterfaces = [];
+let selectedInterface = "";
+
+function updateInterfaceSelect(interfaces) {
+  availableInterfaces = interfaces;
+  const sel = $("interfaceSelect");
+  const saved = localStorage.getItem("mitm-proxy-selected-interface") || "";
+
+  if (interfaces.length === 0) {
+    sel.innerHTML = '<option value="">无可用网卡</option>';
+    return;
+  }
+
+  if (interfaces.length === 1) {
+    selectedInterface = interfaces[0].ip;
+    sel.innerHTML = `<option value="${interfaces[0].ip}">${interfaces[0].name} — ${interfaces[0].ip}</option>`;
+    return;
+  }
+
+  sel.innerHTML = '<option value="">请选择网卡...</option>' +
+    interfaces.map((iface) => {
+      const selAttr = iface.ip === saved ? " selected" : "";
+      return `<option value="${iface.ip}"${selAttr}>${iface.name} — ${iface.ip}</option>`;
+    }).join("");
+
+  if (saved && interfaces.some(f => f.ip === saved)) {
+    selectedInterface = saved;
+    sel.value = saved;
+  } else {
+    selectedInterface = "";
+  }
+}
+
+function getSelectedInterface() {
+  if (availableInterfaces.length === 1) return availableInterfaces[0].ip;
+  const sel = $("interfaceSelect");
+  const val = sel ? sel.value : "";
+  if (val) {
+    selectedInterface = val;
+    localStorage.setItem("mitm-proxy-selected-interface", val);
+  }
+  return val || "";
+}
+
 // Filter
 $("filterInput").addEventListener("input", (e) => {
   filterText = e.target.value.trim();
@@ -939,9 +1256,63 @@ $("clearFilterBtn").addEventListener("click", () => {
 
 // ===== Keyboard =====
 document.addEventListener("keydown", (e) => {
+  // Ctrl/Cmd+F: focus filter
   if ((e.ctrlKey || e.metaKey) && e.key === "f") {
     e.preventDefault();
     $("filterInput").focus();
+    return;
+  }
+
+  // ArrowUp/ArrowDown: navigate flows
+  if ((e.key === "ArrowUp" || e.key === "ArrowDown") && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    // Don't navigate if user is typing in an input
+    const tag = document.activeElement ? document.activeElement.tagName.toLowerCase() : "";
+    if (tag === "input" || tag === "textarea" || tag === "select") return;
+
+    e.preventDefault();
+
+    // Build current filtered list
+    let filtered = flows;
+    if (filterText) {
+      const q = filterText.toLowerCase();
+      filtered = flows.filter((f) =>
+        f.url.toLowerCase().includes(q) ||
+        f.host.toLowerCase().includes(q) ||
+        String(f.status_code).includes(q)
+      );
+    }
+    if (sortState.colId && sortState.direction) {
+      filtered = sortFlows(filtered);
+    }
+
+    if (filtered.length === 0) return;
+
+    // Find current index
+    let idx = -1;
+    if (selectedFlowId) {
+      idx = filtered.findIndex(f => f.id === selectedFlowId);
+    }
+
+    // Move (no wrap)
+    if (e.key === "ArrowUp") {
+      if (idx <= 0) return;
+      idx = idx - 1;
+    } else {
+      if (idx >= filtered.length - 1) return;
+      idx = idx + 1;
+    }
+
+    const flow = filtered[idx];
+    if (!flow) return;
+
+    selectedFlowId = flow.id;
+    renderFlowList();
+
+    // Scroll selected row into view
+    const row = flowTableBody.querySelector(`tr[data-id="${flow.id}"]`);
+    if (row) row.scrollIntoView({ block: "nearest", behavior: "smooth" });
+
+    vscode.postMessage({ command: "selectFlow", flowId: flow.id });
   }
 });
 
@@ -949,8 +1320,37 @@ document.addEventListener("keydown", (e) => {
 
 colOrder = getColumnOrder();
 colWidths = loadColumnWidths();
+loadPanelState();
+// Restore TLS/Timing collapsed state
+if (localStorage.getItem("mitm-proxy-meta-collapsed") === "1") {
+  $("tlsTimingToggle").classList.add("collapsed");
+  document.querySelector(".meta-content").classList.add("collapsed");
+}
 buildColgroup();
 rebuildTableHeader();
+initGutterResize();
+initHeadersResize();
+initSectionCollapse();
+
+// Restore section collapse state
+["req", "res"].forEach(target => {
+  const key = "mitm-proxy-" + target + "-collapsed";
+  if (localStorage.getItem(key) === "1") {
+    const section = document.getElementById(target + "Section");
+    const scroll = section ? section.querySelector(".section-scroll") : null;
+    const header = section ? section.querySelector(".section-header") : null;
+    if (scroll) scroll.classList.add("collapsed");
+    if (section) section.classList.add("collapsed");
+    if (header) header.classList.add("collapsed");
+  }
+  // Restore headers height
+  const hKey = "mitm-proxy-headers-height-" + target;
+  const saved = localStorage.getItem(hKey);
+  if (saved) {
+    const pre = document.getElementById(target + "Headers");
+    if (pre) pre.style.maxHeight = saved;
+  }
+});
 
 // Recalculate table width when container resizes
 window.addEventListener("resize", () => updateTableWidth());
@@ -963,3 +1363,4 @@ setInterval(() => {
 // Request initial status
 vscode.postMessage({ command: "getStatus" });
 vscode.postMessage({ command: "refreshDevice" });
+vscode.postMessage({ command: "getInterfaces" });

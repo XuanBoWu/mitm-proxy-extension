@@ -34,7 +34,11 @@
   <div id="main">
     <!-- Left: Device Panel -->
     <aside id="devicePanel">
-      <h3>设备管理</h3>
+        <div class="panel-header">
+          <span class="panel-title">设备管理</span>
+          <button id="toggleLeftBtn" class="collapse-btn" title="折叠面板">◀</button>
+        </div>
+        <div class="panel-body">
 
       <div class="card">
         <div class="card-title">ADB 状态</div>
@@ -67,6 +71,13 @@
           <label>端口</label>
           <input type="number" id="proxyPort" value="8080" min="1024" max="65535" />
         </div>
+        <div class="input-row">
+          <label>网卡</label>
+          <select id="interfaceSelect">
+            <option value="">加载中...</option>
+          </select>
+          <button id="refreshInterfaceBtn" class="btn btn-sm btn-outline" title="刷新网卡列表">↻</button>
+        </div>
         <button id="startProxyBtn" class="btn btn-block btn-primary">启动代理</button>
         <button id="stopProxyBtn" class="btn btn-block btn-danger" style="display:none;">停止代理</button>
         <button id="setDeviceProxyBtn" class="btn btn-block btn-sm">设置设备代理</button>
@@ -79,7 +90,10 @@
         <button id="saveSessionBtn" class="btn btn-block btn-sm">保存会话</button>
         <button id="loadSessionBtn" class="btn btn-block btn-sm">加载会话</button>
       </div>
+        </div><!-- .panel-body -->
     </aside>
+
+    <div id="leftGutter" class="gutter gutter-left"></div>
 
     <!-- Middle: Request List -->
     <section id="requestList">
@@ -111,34 +125,43 @@
       </div>
     </section>
 
+    <div id="rightGutter" class="gutter gutter-right"></div>
+
     <!-- Right: Detail Panel -->
     <section id="detailPanel">
+      <div class="panel-header">
+        <span class="panel-title">详情</span>
+        <button id="toggleRightBtn" class="collapse-btn" title="折叠面板">▶</button>
+      </div>
+      <div class="panel-body">
       <div id="detailPlaceholder" class="placeholder">
         <p>选择一个请求查看详情</p>
       </div>
 
       <div id="detailContent" style="display:none; display:flex; flex-direction:column; height:100%;">
         <!-- Request Section -->
-        <div class="detail-section">
-          <div class="section-header">
+        <div class="detail-section" id="reqSection">
+          <div class="section-header" id="reqSectionToggle">
+            <span class="section-collapse-icon">▼</span>
             <span class="section-title">Request</span>
             <div class="view-toggle">
               <button class="view-btn active" data-target="req" data-view="formatted">Formatted</button>
               <button class="view-btn" data-target="req" data-view="raw">Raw</button>
             </div>
           </div>
-          <div class="section-scroll">
-            <h5>Headers</h5>
+          <div class="section-scroll" id="reqSectionScroll">
             <pre id="reqHeaders" class="detail-pre"></pre>
-            <h5>Body</h5>
+            <div class="headers-resize-handle" data-target="req"></div>
+            <div class="body-separator"></div>
             <div id="reqBodyFormatted" class="body-view"></div>
             <pre id="reqBodyRaw" class="body-raw" style="display:none;"></pre>
           </div>
         </div>
 
         <!-- Response Section -->
-        <div class="detail-section">
-          <div class="section-header">
+        <div class="detail-section" id="resSection">
+          <div class="section-header" id="resSectionToggle">
+            <span class="section-collapse-icon">▼</span>
             <span class="section-title">Response</span>
             <div class="view-toggle">
               <button class="view-btn active" data-target="res" data-view="formatted">Formatted</button>
@@ -146,10 +169,10 @@
               <button class="view-btn" data-target="res" data-view="render">Render</button>
             </div>
           </div>
-          <div class="section-scroll">
-            <h5>Headers</h5>
+          <div class="section-scroll" id="resSectionScroll">
             <pre id="resHeaders" class="detail-pre"></pre>
-            <h5>Body</h5>
+            <div class="headers-resize-handle" data-target="res"></div>
+            <div class="body-separator"></div>
             <div id="resBodyFormatted" class="body-view"></div>
             <pre id="resBodyRaw" class="body-raw" style="display:none;"></pre>
             <div id="resBodyRender" class="body-render" style="display:none;"></div>
@@ -158,6 +181,11 @@
 
         <!-- TLS & Timing -->
         <div class="detail-meta">
+          <div class="meta-header" id="tlsTimingToggle">
+            <span>TLS &amp; Timing</span>
+            <span class="meta-toggle-icon">▼</span>
+          </div>
+          <div class="meta-content">
           <div class="meta-row">
             <h4>TLS</h4>
             <dl class="meta-dl">
@@ -177,8 +205,10 @@
               <dt>响应时间</dt><dd id="timingRes">-</dd>
             </dl>
           </div>
-        </div>
+        </div><!-- .meta-content -->
+        </div><!-- .detail-meta -->
       </div>
+        </div><!-- .panel-body -->
     </section>
   </div>
 

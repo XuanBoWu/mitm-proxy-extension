@@ -161,45 +161,42 @@ async function pollFlows() {
       }
     }
 
-    // Add new flows (in order from mitmproxy)
-    for (const f of newFlows) {
-      const transformed = transformFlow(f);
-      capturedFlows.push(transformed);
-      if (panel) {
-        panel.webview.postMessage({
-          command: "addFlow",
-          flow: transformed,
-        });
-      }
+    // Add new flows (in order from mitmproxy) — batch into single message
+    if (newFlows.length > 0 && panel) {
+      const transformedFlows = newFlows.map(f => transformFlow(f));
+      transformedFlows.forEach(f => capturedFlows.push(f));
+      panel.webview.postMessage({
+        command: "addFlows",
+        flows: transformedFlows,
+      });
     }
 
     // Check for updates to known flows (e.g. response arrived after initial display)
+    const updatedFlows = [];
     for (const f of flows) {
       if (!knownFlowIds.has(f.id)) continue;
       const existing = capturedFlows.find(cf => cf.id === f.id);
       if (!existing) continue;
-      // Response arrived: status_code changed, res_size appeared, etc.
       if (existing.status_code !== (f.response?.status_code || 0) ||
           existing.res_size !== (f.response?.contentLength || 0) ||
           (!existing.duration_ms && f.response?.timestamp_start)) {
         const transformed = transformFlow(f);
-        // Preserve already-fetched body data
         if (existing._bodyFetched) {
           transformed._bodyFetched = true;
           transformed.req_body = existing.req_body;
           transformed.res_body = existing.res_body;
           transformed.res_body_base64 = existing.res_body_base64;
         }
-        // Replace in array
         const idx = capturedFlows.indexOf(existing);
         capturedFlows[idx] = transformed;
-        if (panel) {
-          panel.webview.postMessage({
-            command: "updateFlow",
-            flow: transformed,
-          });
-        }
+        updatedFlows.push(transformed);
       }
+    }
+    if (updatedFlows.length > 0 && panel) {
+      panel.webview.postMessage({
+        command: "updateFlows",
+        flows: updatedFlows,
+      });
     }
   } catch (_) {
     // Silently skip polling errors (server might not be ready yet)
@@ -530,8 +527,26 @@ async function createPanel() {
         break;
       }
 
+      case "getInterfaces": {
+        const interfaces = [];
+        const nets = os.networkInterfaces();
+        for (const [name, addrs] of Object.entries(nets)) {
+          for (const addr of addrs) {
+            if (addr.family === "IPv4" && !addr.internal) {
+              interfaces.push({ name, ip: addr.address });
+              break;
+            }
+          }
+        }
+        panel.webview.postMessage({
+          command: "interfacesList",
+          interfaces,
+        });
+        break;
+      }
+
       case "setProxy": {
-        const localIp = await getLocalIp();
+        const localIp = message.ip || await getLocalIp();
         const port = message.port || 8080;
         const result = await setDeviceProxy(localIp, port);
         panel.webview.postMessage({
@@ -553,30 +568,7 @@ async function createPanel() {
       case "selectFlow": {
         const flow = capturedFlows.find(f => f.id === message.flowId);
         if (flow && panel) {
-          // Fetch body content on demand via REST API
-          if (!flow._bodyFetched && webPort && authToken) {
-            flow._bodyFetched = true;
-            try {
-              const buf = await mitmwebGet(`/flows/${flow.id}/request/content.data`);
-              flow.req_body = buf.toString("utf-8");
-            } catch (_) {
-              flow.req_body = "";
-            }
-            try {
-              const buf = await mitmwebGet(`/flows/${flow.id}/response/content.data`);
-              const ct = (flow.content_type || "").toLowerCase();
-              // Pass binary content as base64 so webview can render images etc.
-              if (ct.startsWith("image/") || ct.startsWith("audio/") || ct.startsWith("video/") ||
-                  ct.includes("octet-stream") || ct.includes("protobuf")) {
-                flow.res_body_base64 = buf.toString("base64");
-                flow.res_body = "";
-              } else {
-                flow.res_body = buf.toString("utf-8");
-              }
-            } catch (_) {
-              flow.res_body = "";
-            }
-          }
+          await fetchFlowBodies(flow);
           panel.webview.postMessage({
             command: "showDetail",
             flow: flow,
@@ -671,6 +663,30 @@ function mitmwebRequest(method, path) {
 
 // ===== Export Functions =====
 
+async function fetchFlowBodies(flow) {
+  if (flow._bodyFetched || !webPort || !authToken) return;
+  flow._bodyFetched = true;
+  try {
+    const buf = await mitmwebGet(`/flows/${flow.id}/request/content.data`);
+    flow.req_body = buf.toString("utf-8");
+  } catch (_) {
+    flow.req_body = "";
+  }
+  try {
+    const buf = await mitmwebGet(`/flows/${flow.id}/response/content.data`);
+    const ct = (flow.content_type || "").toLowerCase();
+    if (ct.startsWith("image/") || ct.startsWith("audio/") || ct.startsWith("video/") ||
+        ct.includes("octet-stream") || ct.includes("protobuf")) {
+      flow.res_body_base64 = buf.toString("base64");
+      flow.res_body = "";
+    } else {
+      flow.res_body = buf.toString("utf-8");
+    }
+  } catch (_) {
+    flow.res_body = "";
+  }
+}
+
 async function exportHar() {
   if (capturedFlows.length === 0) {
     vscode.window.showWarningMessage("No flows to export");
@@ -683,6 +699,11 @@ async function exportHar() {
   });
 
   if (!result) return;
+
+  // Fetch bodies for all flows not yet loaded
+  for (const f of capturedFlows) {
+    await fetchFlowBodies(f);
+  }
 
   const har = {
     log: {
@@ -735,7 +756,13 @@ async function exportJson() {
 
   if (!result) return;
 
-  fs.writeFileSync(result.fsPath, JSON.stringify(capturedFlows, null, 2));
+  // Fetch bodies for all flows not yet loaded
+  for (const f of capturedFlows) {
+    await fetchFlowBodies(f);
+  }
+
+  const flowsWithSeq = capturedFlows.map((f, i) => ({ _num: i + 1, ...f }));
+  fs.writeFileSync(result.fsPath, JSON.stringify(flowsWithSeq, null, 2));
   vscode.window.showInformationMessage(`Exported ${capturedFlows.length} flows to ${result.fsPath}`);
 }
 
