@@ -131,6 +131,11 @@
     <section id="detailPanel">
       <div class="panel-header">
         <span class="panel-title">详情</span>
+        <div class="search-group" id="detailSearchGroup" style="display:none;">
+          <button id="detailRegexBtn" class="search-btn-left" title="使用正则表达式">.*</button>
+          <input type="text" id="detailSearchInput" class="detail-search-input" placeholder="搜索请求/响应..." />
+          <button id="detailClearSearchBtn" class="search-btn-right" title="清除搜索">&times;</button>
+        </div>
         <button id="toggleRightBtn" class="collapse-btn" title="折叠面板">▶</button>
       </div>
       <div class="panel-body">
@@ -144,6 +149,7 @@
           <div class="section-header" id="reqSectionToggle">
             <span class="section-collapse-icon">▼</span>
             <span class="section-title">Request</span>
+            <span id="reqSearchCount" class="search-count"></span>
             <div class="view-toggle">
               <button class="view-btn active" data-target="req" data-view="formatted">Formatted</button>
               <button class="view-btn" data-target="req" data-view="raw">Raw</button>
@@ -163,6 +169,7 @@
           <div class="section-header" id="resSectionToggle">
             <span class="section-collapse-icon">▼</span>
             <span class="section-title">Response</span>
+            <span id="resSearchCount" class="search-count"></span>
             <div class="view-toggle">
               <button class="view-btn active" data-target="res" data-view="formatted">Formatted</button>
               <button class="view-btn" data-target="res" data-view="raw">Raw</button>

@@ -10,6 +10,13 @@ let nextSeq = 1;
 let sortState = { colId: null, direction: null }; // null | 'asc' | 'desc'
 let userResizedCols = new Set(); // columns user manually resized — skip auto-fit
 
+// Search state
+let _searchTerm = "";
+let _searchRegex = false;
+let _searchMatches = []; // flat array of {el, idx} — req matches first, then res
+let _searchCurrentIdx = -1;
+let _searchSavedTexts = new Map(); // element → original textContent
+
 // Panel state
 let leftPanelWidth = 220;
 let leftCollapsed = false;
@@ -278,6 +285,21 @@ function escapeHtml(str) {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
+}
+
+// Build case-insensitive regex from a search term.
+// When isRegex=false, special chars are escaped. Returns {regex} or {error}.
+function buildSearchPattern(term, isRegex) {
+  if (!term) return { error: "empty" };
+  try {
+    if (isRegex) {
+      return { regex: new RegExp(term, "gi") };
+    }
+    var escaped = term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return { regex: new RegExp(escaped, "gi") };
+  } catch (_) {
+    return { error: "invalid regex" };
+  }
 }
 
 function renderFlowList() {
@@ -874,11 +896,18 @@ function rebuildTableHeader() {
 function renderEmptyDetail() {
   $("detailPlaceholder").style.display = "flex";
   $("detailContent").style.display = "none";
+  $("detailSearchGroup").style.display = "none";
+  clearSearch();
 }
 
 function renderDetail(flow) {
   $("detailPlaceholder").style.display = "none";
   $("detailContent").style.display = "flex";
+  $("detailSearchGroup").style.display = "";
+  // Preserve search state across flows
+  clearHighlights();
+  _searchMatches = [];
+  _searchCurrentIdx = -1;
 
   // Request headers
   $("reqHeaders").textContent = formatHeaders(flow.req_headers);
@@ -930,6 +959,10 @@ function renderDetail(flow) {
   $("timingRes").textContent = flow.res_timestamp
     ? new Date(flow.res_timestamp * 1000).toLocaleTimeString()
     : "-";
+
+  // Cache text for search
+  cacheSearchTexts();
+  if (_searchTerm) performSearch(_searchTerm);
 }
 
 function formatHeaders(headers) {
@@ -946,8 +979,20 @@ function renderBody(el, body, contentType) {
     return;
   }
 
-  // Try to format JSON
   const ct = (contentType || "").toLowerCase();
+
+  // Sniff JSON by first non-whitespace char — catches mismatched Content-Type
+  const firstChar = body[body.search(/\S/)] || "";
+  if (firstChar === "{" || firstChar === "[") {
+    try {
+      const parsed = JSON.parse(body);
+      el.textContent = JSON.stringify(parsed, null, 2);
+      el.classList.add("json");
+      return;
+    } catch (_) {}
+  }
+
+  // Explicit JSON/JS content type
   if (ct.includes("json") || ct.includes("javascript")) {
     try {
       const parsed = JSON.parse(body);
@@ -957,7 +1002,7 @@ function renderBody(el, body, contentType) {
     } catch (_) {}
   }
 
-  // HTML
+  // HTML / XML
   if (ct.includes("html") || ct.includes("xml")) {
     el.textContent = body;
     el.classList.add("html");
@@ -1067,6 +1112,170 @@ function renderRenderView(flow, body, base64) {
   </p>`;
 }
 
+// ===== Detail Search =====
+
+function getSearchableElements() {
+  const els = [];
+  els.push({ el: $("reqHeaders"), section: "req" });
+  if ($("reqBodyFormatted").style.display !== "none") {
+    els.push({ el: $("reqBodyFormatted"), section: "req" });
+  }
+  if ($("reqBodyRaw").style.display !== "none") {
+    els.push({ el: $("reqBodyRaw"), section: "req" });
+  }
+  els.push({ el: $("resHeaders"), section: "res" });
+  if ($("resBodyFormatted").style.display !== "none") {
+    els.push({ el: $("resBodyFormatted"), section: "res" });
+  }
+  if ($("resBodyRaw").style.display !== "none") {
+    els.push({ el: $("resBodyRaw"), section: "res" });
+  }
+  return els;
+}
+
+function performSearch(term) {
+  // Restore original text from cache (but keep cache alive for re-search)
+  for (const [el, text] of _searchSavedTexts) {
+    el.textContent = text;
+  }
+
+  if (!term || term.length < 1) {
+    _searchTerm = "";
+    _searchMatches = [];
+    _searchCurrentIdx = -1;
+    updateSearchCounts();
+    return;
+  }
+
+  _searchTerm = term;
+  _searchMatches = [];
+  _searchCurrentIdx = -1;
+
+  var pattern = buildSearchPattern(term, _searchRegex);
+  if (pattern.error) {
+    $("reqSearchCount").classList.add("visible");
+    $("reqSearchCount").classList.remove("has-matches");
+    $("reqSearchCount").textContent = "(" + pattern.error + ")";
+    $("resSearchCount").classList.add("visible");
+    $("resSearchCount").classList.remove("has-matches");
+    $("resSearchCount").textContent = "(" + pattern.error + ")";
+    return;
+  }
+  var regex = pattern.regex;
+
+  const els = getSearchableElements();
+
+  for (const { el, section } of els) {
+    const text = _searchSavedTexts.get(el);
+    if (!text || text.length > 500000) continue;
+
+    regex.lastIndex = 0;
+    const matches = [...text.matchAll(regex)];
+    if (matches.length === 0) continue;
+
+    let html = "";
+    let lastIdx = 0;
+    for (const m of matches) {
+      html += escapeHtml(text.slice(lastIdx, m.index));
+      html += `<mark class="search-highlight">${escapeHtml(m[0])}</mark>`;
+      lastIdx = m.index + m[0].length;
+    }
+    html += escapeHtml(text.slice(lastIdx));
+    el.innerHTML = html;
+
+    const marks = el.querySelectorAll("mark.search-highlight");
+    for (const mark of marks) {
+      _searchMatches.push({ el: mark, section: section });
+    }
+  }
+
+  updateSearchCounts();
+}
+
+function clearHighlights() {
+  for (const [el, text] of _searchSavedTexts) {
+    el.textContent = text;
+  }
+  _searchSavedTexts.clear();
+}
+
+function clearSearch() {
+  clearHighlights();
+  _searchTerm = "";
+  _searchRegex = false;
+  _searchMatches = [];
+  _searchCurrentIdx = -1;
+  $("detailSearchInput").value = "";
+  $("detailRegexBtn").classList.remove("active");
+  updateSearchCounts();
+}
+
+function updateSearchCounts() {
+  const reqCount = _searchMatches.filter(function(m) { return m.section === "req"; }).length;
+  const resCount = _searchMatches.filter(function(m) { return m.section === "res"; }).length;
+  const total = _searchMatches.length;
+
+  function apply(el, count) {
+    if (_searchTerm) {
+      el.classList.add("visible");
+      el.classList.toggle("has-matches", count > 0);
+    } else {
+      el.classList.remove("visible", "has-matches");
+    }
+  }
+
+  if (_searchTerm) {
+    $("reqSearchCount").textContent = reqCount > 0 ? "(" + reqCount + ")" : "(0)";
+    $("resSearchCount").textContent = resCount > 0 ? "(" + resCount + ")" : "(0)";
+  }
+  apply($("reqSearchCount"), reqCount);
+  apply($("resSearchCount"), resCount);
+}
+
+function navigateSearch(forward) {
+  if (_searchMatches.length === 0) return;
+
+  if (_searchCurrentIdx >= 0 && _searchCurrentIdx < _searchMatches.length) {
+    _searchMatches[_searchCurrentIdx].el.classList.remove("current");
+  }
+
+  if (forward) {
+    _searchCurrentIdx = (_searchCurrentIdx + 1) % _searchMatches.length;
+  } else {
+    _searchCurrentIdx = (_searchCurrentIdx - 1 + _searchMatches.length) % _searchMatches.length;
+  }
+
+  const match = _searchMatches[_searchCurrentIdx];
+  match.el.classList.add("current");
+  match.el.scrollIntoView({ block: "center", behavior: "smooth" });
+
+  const reqCount = _searchMatches.filter(function(m) { return m.section === "req"; }).length;
+  const total = _searchMatches.length;
+  const currentIsReq = match.section === "req";
+  const idxInSection = currentIsReq
+    ? _searchMatches.slice(0, _searchCurrentIdx + 1).filter(function(m) { return m.section === "req"; }).length
+    : _searchMatches.slice(0, _searchCurrentIdx + 1).filter(function(m) { return m.section === "res"; }).length;
+  const sectionTotal = currentIsReq ? reqCount : total - reqCount;
+
+  if (currentIsReq) {
+    $("reqSearchCount").textContent = "(" + idxInSection + "/" + sectionTotal + ")";
+    $("resSearchCount").textContent = "(" + (total - reqCount) + ")";
+  } else {
+    $("reqSearchCount").textContent = "(" + reqCount + ")";
+    $("resSearchCount").textContent = "(" + idxInSection + "/" + sectionTotal + ")";
+  }
+  $("reqSearchCount").classList.toggle("has-matches", reqCount > 0);
+  $("resSearchCount").classList.toggle("has-matches", total - reqCount > 0);
+}
+
+function cacheSearchTexts() {
+  _searchSavedTexts.clear();
+  const els = getSearchableElements();
+  for (const entry of els) {
+    _searchSavedTexts.set(entry.el, entry.el.textContent || "");
+  }
+}
+
 function resetViewButtons(target, activeView) {
   document.querySelectorAll(`.view-btn[data-target="${target}"]`).forEach((btn) => {
     btn.classList.toggle("active", btn.dataset.view === activeView);
@@ -1095,6 +1304,48 @@ document.addEventListener("click", (e) => {
     $("resBodyRaw").style.display = view === "raw" ? "" : "none";
     $("resBodyRender").style.display = view === "render" ? "" : "none";
   }
+
+  cacheSearchTexts();
+  if (_searchTerm) performSearch(_searchTerm);
+});
+
+// ===== Detail Search Input =====
+
+$("detailSearchInput").addEventListener("input", function() {
+  const term = this.value.trim();
+  if (term) {
+    cacheSearchTexts();
+    performSearch(term);
+  } else {
+    clearSearch();
+  }
+});
+
+$("detailSearchInput").addEventListener("keydown", function(e) {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    if (_searchMatches.length === 0) {
+      const term = this.value.trim();
+      if (term) { cacheSearchTexts(); performSearch(term); }
+    }
+    if (_searchMatches.length > 0) navigateSearch(true);
+  } else if (e.key === "Escape") {
+    e.preventDefault();
+    clearSearch();
+  }
+});
+
+$("detailRegexBtn").addEventListener("click", function() {
+  _searchRegex = !_searchRegex;
+  this.classList.toggle("active", _searchRegex);
+  if (_searchTerm) {
+    cacheSearchTexts();
+    performSearch(_searchTerm);
+  }
+});
+
+$("detailClearSearchBtn").addEventListener("click", function() {
+  clearSearch();
 });
 
 // ===== Column Header Sort Click =====

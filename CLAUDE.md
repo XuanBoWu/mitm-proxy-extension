@@ -137,3 +137,4 @@ WebSocket 和 REST API 返回的 flow JSON 格式（`mitmproxy/tools/web/app.py:
 - REST API 轮询在大流量时可能延迟较高（可改为 WebSocket 实时推送）
 - HTTP 请求体过大时前端可能卡顿（可改为虚拟滚动）
 - 请求体格式化依赖请求头 Content-Type（非响应 Content-Type），支持 contentview API 会更准确
+- 详情搜索的正则表达式按钮（`.*`）仅切换 UI 状态，未实现正则搜索功能。实现时复用 `buildSearchPattern()` 公共函数
