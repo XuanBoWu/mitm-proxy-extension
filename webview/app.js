@@ -13,15 +13,17 @@ let userResizedCols = new Set(); // columns user manually resized — skip auto-
 // Search state
 let _searchTerm = "";
 let _searchRegex = false;
-let _searchMatches = []; // flat array of {el, idx} — req matches first, then res
+let _searchMatches = []; // flat array of highlighted mark elements, grouped by section
 let _searchCurrentIdx = -1;
-let _searchSavedTexts = new Map(); // element → original textContent
+let _searchSavedTexts = new Map(); // element → searchable editor text
+const BODY_TEXT_LIMIT = 256 * 1024;
 
 // Panel state
 let leftPanelWidth = 220;
 let leftCollapsed = false;
 let rightPanelWidth = 420;
 let rightCollapsed = false;
+let wrapState = { req: true, res: true };
 
 // Column definitions — sizing: "content" = auto-fit to content, "fixed" = clip at preset width
 const COLUMNS = [
@@ -285,6 +287,146 @@ function escapeHtml(str) {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
+}
+
+function setEditorText(el, text) {
+  if (!el) return;
+  el.textContent = text == null ? "" : String(text);
+  updateLineNumbers(el);
+}
+
+function getEditorText(el) {
+  if (!el) return "";
+  return el.textContent || "";
+}
+
+function setBodyTextareaClass(el, extraClass) {
+  if (!el) return;
+  el.className = "message-textarea message-full " + (extraClass || "body-view");
+}
+
+function setMessageClass(el, bodyClass) {
+  setBodyTextareaClass(el, bodyClass);
+}
+
+function getEditorPane(el) {
+  return el ? el.closest(".message-pane") : null;
+}
+
+function setEditorVisible(id, visible) {
+  const el = $(id);
+  const pane = getEditorPane(el);
+  if (pane) pane.style.display = visible ? "flex" : "none";
+  if (visible) updateLineNumbers(el);
+}
+
+function updateLineNumbers(editor) {
+  const pane = getEditorPane(editor);
+  if (!pane) return;
+  const gutter = pane.querySelector(".line-numbers");
+  if (!gutter) return;
+  const text = getEditorText(editor);
+  const lines = text.split("\n");
+  const section = editor.closest(".message-editor");
+  const wrapping = section ? !section.classList.contains("no-wrap") : true;
+  const style = window.getComputedStyle(editor);
+  const lineHeight = parseFloat(style.lineHeight) || (parseFloat(style.fontSize) * 1.45) || 16;
+  const paddingLeft = parseFloat(style.paddingLeft) || 0;
+  const paddingRight = parseFloat(style.paddingRight) || 0;
+  const gutterWidth = gutter ? gutter.offsetWidth : 0;
+  const paneWidth = pane.clientWidth;
+  const contentWidth = Math.max(1, paneWidth - gutterWidth - paddingLeft - paddingRight);
+  const measure = document.createElement("div");
+  measure.style.cssText = [
+    "position:absolute",
+    "visibility:hidden",
+    "left:-99999px",
+    "top:0",
+    `width:${contentWidth}px`,
+    `font:${style.font}`,
+    `font-size:${style.fontSize}`,
+    `font-family:${style.fontFamily}`,
+    `font-weight:${style.fontWeight}`,
+    `line-height:${style.lineHeight}`,
+    `letter-spacing:${style.letterSpacing}`,
+    `tab-size:${style.tabSize}`,
+    wrapping ? "white-space:pre-wrap" : "white-space:pre",
+    wrapping ? "overflow-wrap:anywhere" : "overflow-wrap:normal",
+    wrapping ? "word-break:break-word" : "word-break:normal",
+    "padding:0",
+    "border:0",
+  ].join(";");
+  document.body.appendChild(measure);
+  const gutterLines = [];
+  const separatorIndex = lines.findIndex((line, index) => index > 0 && line === "");
+
+  for (let i = 0; i < Math.max(1, lines.length); i++) {
+    const line = lines[i] || "";
+    const isSeparator = i === separatorIndex;
+    measure.textContent = line || " ";
+    const rowHeight = Math.max(lineHeight, measure.scrollHeight);
+    gutterLines.push(
+      `<span class="line-number${isSeparator ? " separator" : ""}" style="height:${rowHeight}px;line-height:${lineHeight}px">${i + 1}</span>`
+    );
+  }
+  document.body.removeChild(measure);
+  gutter.innerHTML = gutterLines.join("");
+  requestAnimationFrame(() => {
+    gutter.style.height = Math.max(editor.offsetHeight, pane.clientHeight) + "px";
+  });
+}
+
+function updateAllLineNumbers() {
+  document.querySelectorAll(".message-textarea").forEach((editor) => updateLineNumbers(editor));
+}
+
+function truncateBodyText(text, totalBytes) {
+  const value = text == null ? "" : String(text);
+  if (value.length <= BODY_TEXT_LIMIT) return value;
+  const total = totalBytes || value.length;
+  return value.slice(0, BODY_TEXT_LIMIT) +
+    `\n\n[Truncated: showing first ${formatSize(BODY_TEXT_LIMIT)} of ${formatSize(total)}]`;
+}
+
+function decodeBase64Body(base64, totalBytes) {
+  if (!base64) return "";
+  try {
+    const byteLimit = Math.min(Math.ceil(BODY_TEXT_LIMIT * 1.5), totalBytes || Number.MAX_SAFE_INTEGER);
+    const base64Limit = Math.ceil(byteLimit / 3) * 4;
+    const binary = atob(base64.slice(0, base64Limit));
+    const sliceLen = Math.min(binary.length, byteLimit);
+    const bytes = new Uint8Array(sliceLen);
+    for (let i = 0; i < sliceLen; i++) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    let text = "";
+    try {
+      text = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+    } catch (_) {
+      text = Array.from(bytes, b => String.fromCharCode(b)).join("");
+    }
+    return truncateBodyText(text, totalBytes || Math.floor(base64.length * 0.75));
+  } catch (_) {
+    return "[Unable to decode binary body]";
+  }
+}
+
+function requestStartLine(flow) {
+  const method = flow.method || "GET";
+  const target = flow.path || "/";
+  return `${method} ${target} HTTP/1.1`;
+}
+
+function responseStartLine(flow) {
+  if (flow.error) return `HTTP/1.1 0 ${flow.error}`;
+  if (!flow.status_code) return "HTTP/1.1 ...";
+  return `HTTP/1.1 ${flow.status_code}`;
+}
+
+function composeHttpMessage(startLine, headersText, bodyText) {
+  const headers = headersText && headersText !== "(empty)" ? headersText : "";
+  const body = bodyText || "";
+  return `${startLine}\n${headers}\n\n${body}`;
 }
 
 // Build case-insensitive regex from a search term.
@@ -559,35 +701,12 @@ function _autoFitContentColumns() {
   }
 }
 
-// Headers height resize
-function initHeadersResize() {
-  document.querySelectorAll(".headers-resize-handle").forEach((handle) => {
-    handle.addEventListener("mousedown", (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      const target = handle.dataset.target;
-      const preId = target === "req" ? "reqHeaders" : "resHeaders";
-      const pre = document.getElementById(preId);
-      if (!pre) return;
-      const currentHeight = pre.offsetHeight;
-      headerResizing = {
-        target,
-        startY: e.clientY,
-        startHeight: currentHeight,
-      };
-      handle.classList.add("resizing");
-      document.body.style.cursor = "ns-resize";
-      document.body.style.userSelect = "none";
-    });
-  });
-}
-
 // Section collapse/expand
 function initSectionCollapse() {
   document.querySelectorAll(".section-header").forEach((header) => {
     header.addEventListener("click", (e) => {
-      // Don't collapse when clicking view-toggle buttons
-      if (e.target.closest(".view-btn")) return;
+      // Don't collapse when clicking header controls.
+      if (e.target.closest(".view-btn") || e.target.closest(".wrap-btn")) return;
       const section = header.closest(".detail-section");
       const scroll = section.querySelector(".section-scroll");
       const collapsed = scroll.classList.toggle("collapsed");
@@ -606,7 +725,6 @@ function initSectionCollapse() {
 
 let resizing = null; // { colId, startX, startWidth }
 let panelResizing = null; // { gutterId, startX, startWidth, targetId }
-let headerResizing = null; // { target, startY, startHeight }
 
 function initResizeHandles() {
   flowTableHead.querySelectorAll("th").forEach((th) => {
@@ -763,13 +881,6 @@ document.addEventListener("mousemove", (e) => {
       targetEl.style.width = newWidth + "px";
     }
   }
-  if (headerResizing) {
-    const delta = e.clientY - headerResizing.startY;
-    const newHeight = Math.max(40, Math.min(400, headerResizing.startHeight + delta));
-    const preId = headerResizing.target === "req" ? "reqHeaders" : "resHeaders";
-    const pre = document.getElementById(preId);
-    if (pre) pre.style.maxHeight = newHeight + "px";
-  }
 });
 
 document.addEventListener("mouseup", () => {
@@ -801,18 +912,6 @@ document.addEventListener("mouseup", () => {
     }
     savePanelState();
     panelResizing = null;
-  }
-  if (headerResizing) {
-    document.querySelectorAll(".headers-resize-handle").forEach(h => h.classList.remove("resizing"));
-    document.body.style.cursor = "";
-    document.body.style.userSelect = "";
-    const key = "mitm-proxy-headers-height-" + headerResizing.target;
-    const preId = headerResizing.target === "req" ? "reqHeaders" : "resHeaders";
-    const pre = document.getElementById(preId);
-    if (pre) {
-      try { localStorage.setItem(key, pre.style.maxHeight); } catch (_) {}
-    }
-    headerResizing = null;
   }
 });
 
@@ -909,37 +1008,41 @@ function renderDetail(flow) {
   _searchMatches = [];
   _searchCurrentIdx = -1;
 
-  // Request headers
-  $("reqHeaders").textContent = formatHeaders(flow.req_headers);
+  const reqHeadersText = formatHeaders(flow.req_headers);
 
   // Request body — use request Content-Type, not response's
   const reqBody = flow.req_body || "";
   const reqContentType = (flow.req_headers && flow.req_headers["content-type"]) || "";
-  $("reqBodyFormatted").className = "body-view";
-  $("reqBodyRaw").textContent = reqBody;
-  renderBody($("reqBodyFormatted"), reqBody, reqContentType);
+  const reqFormatted = formatBodyForEditor(reqBody, reqContentType, flow.req_size);
+  const reqRaw = truncateBodyText(reqBody || "(empty)", flow.req_size);
+  setMessageClass($("reqMessageFormatted"), reqFormatted.className);
+  setEditorText($("reqMessageFormatted"), composeHttpMessage(requestStartLine(flow), reqHeadersText, reqFormatted.text));
+  setMessageClass($("reqMessageRaw"), "body-raw");
+  setEditorText($("reqMessageRaw"), composeHttpMessage(requestStartLine(flow), reqHeadersText, reqRaw));
   // Default to formatted view
-  $("reqBodyFormatted").style.display = "";
-  $("reqBodyRaw").style.display = "none";
+  setEditorVisible("reqMessageFormatted", true);
+  setEditorVisible("reqMessageRaw", false);
   resetViewButtons("req", "formatted");
 
-  // Response headers
-  $("resHeaders").textContent = formatHeaders(flow.res_headers);
+  const resHeadersText = formatHeaders(flow.res_headers);
 
   // Response body
   const resBody = flow.res_body || "";
   const resBase64 = flow.res_body_base64 || "";
-  const resDisplayBody = resBody || (resBase64 ? `[Binary data: ${flow.res_size || resBase64.length} bytes]` : "");
-  $("resBodyFormatted").className = "body-view";
-  $("resBodyRaw").textContent = resDisplayBody;
-  renderBody($("resBodyFormatted"), resBody, flow.content_type);
+  const resDisplayBody = resBody || (resBase64 ? decodeBase64Body(resBase64, flow.res_size) : "");
+  const resFormatted = formatBodyForEditor(resDisplayBody, flow.content_type, flow.res_size);
+  const resRaw = truncateBodyText(resDisplayBody || "(empty)", flow.res_size);
+  setMessageClass($("resMessageFormatted"), resFormatted.className);
+  setEditorText($("resMessageFormatted"), composeHttpMessage(responseStartLine(flow), resHeadersText, resFormatted.text));
+  setMessageClass($("resMessageRaw"), "body-raw");
+  setEditorText($("resMessageRaw"), composeHttpMessage(responseStartLine(flow), resHeadersText, resRaw));
   if (resBase64 && !resBody) {
-    $("resBodyFormatted").textContent = resDisplayBody;
-    $("resBodyFormatted").classList.add("binary");
+    $("resMessageFormatted").classList.add("binary");
   }
   renderRenderView(flow, resBody, resBase64);
-  $("resBodyFormatted").style.display = "";
-  $("resBodyRaw").style.display = "none";
+  $("resMessageEditor").style.display = "flex";
+  setEditorVisible("resMessageFormatted", true);
+  setEditorVisible("resMessageRaw", false);
   $("resBodyRender").style.display = "none";
   resetViewButtons("res", "formatted");
 
@@ -972,23 +1075,23 @@ function formatHeaders(headers) {
     .join("\n");
 }
 
-function renderBody(el, body, contentType) {
-  el.className = "body-view";
+function formatBodyForEditor(body, contentType, totalBytes) {
   if (!body) {
-    el.textContent = "(empty)";
-    return;
+    return { text: "(empty)", className: "body-view" };
   }
 
   const ct = (contentType || "").toLowerCase();
+  const displayBody = truncateBodyText(body, totalBytes);
 
   // Sniff JSON by first non-whitespace char — catches mismatched Content-Type
   const firstChar = body[body.search(/\S/)] || "";
   if (firstChar === "{" || firstChar === "[") {
     try {
       const parsed = JSON.parse(body);
-      el.textContent = JSON.stringify(parsed, null, 2);
-      el.classList.add("json");
-      return;
+      return {
+        text: truncateBodyText(JSON.stringify(parsed, null, 2), totalBytes),
+        className: "body-view json",
+      };
     } catch (_) {}
   }
 
@@ -996,27 +1099,24 @@ function renderBody(el, body, contentType) {
   if (ct.includes("json") || ct.includes("javascript")) {
     try {
       const parsed = JSON.parse(body);
-      el.textContent = JSON.stringify(parsed, null, 2);
-      el.classList.add("json");
-      return;
+      return {
+        text: truncateBodyText(JSON.stringify(parsed, null, 2), totalBytes),
+        className: "body-view json",
+      };
     } catch (_) {}
   }
 
   // HTML / XML
   if (ct.includes("html") || ct.includes("xml")) {
-    el.textContent = body;
-    el.classList.add("html");
-    return;
+    return { text: displayBody, className: "body-view html" };
   }
 
-  // Binary indicator
+  // Binary-looking text stays visible, similar to Burp's raw message viewer.
   if (/[^\x20-\x7e\n\r\t一-鿿　-〿]/.test(body.substring(0, 200))) {
-    el.textContent = "[Binary data: " + body.length + " bytes]";
-    el.classList.add("binary");
-    return;
+    return { text: displayBody, className: "body-view binary" };
   }
 
-  el.textContent = body;
+  return { text: displayBody, className: "body-view" };
 }
 
 function renderRenderView(flow, body, base64) {
@@ -1116,25 +1216,25 @@ function renderRenderView(flow, body, base64) {
 
 function getSearchableElements() {
   const els = [];
-  els.push({ el: $("reqHeaders"), section: "req" });
-  if ($("reqBodyFormatted").style.display !== "none") {
-    els.push({ el: $("reqBodyFormatted"), section: "req" });
+  if (getEditorPane($("reqMessageFormatted"))?.style.display !== "none") {
+    els.push({ el: $("reqMessageFormatted"), section: "req" });
   }
-  if ($("reqBodyRaw").style.display !== "none") {
-    els.push({ el: $("reqBodyRaw"), section: "req" });
+  if (getEditorPane($("reqMessageRaw"))?.style.display !== "none") {
+    els.push({ el: $("reqMessageRaw"), section: "req" });
   }
-  els.push({ el: $("resHeaders"), section: "res" });
-  if ($("resBodyFormatted").style.display !== "none") {
-    els.push({ el: $("resBodyFormatted"), section: "res" });
-  }
-  if ($("resBodyRaw").style.display !== "none") {
-    els.push({ el: $("resBodyRaw"), section: "res" });
+  if ($("resMessageEditor").style.display !== "none") {
+    if (getEditorPane($("resMessageFormatted"))?.style.display !== "none") {
+      els.push({ el: $("resMessageFormatted"), section: "res" });
+    }
+    if (getEditorPane($("resMessageRaw"))?.style.display !== "none") {
+      els.push({ el: $("resMessageRaw"), section: "res" });
+    }
   }
   return els;
 }
 
 function performSearch(term) {
-  // Restore original text from cache (but keep cache alive for re-search)
+  // Restore original text from cache before rebuilding mark highlights.
   for (const [el, text] of _searchSavedTexts) {
     el.textContent = text;
   }
@@ -1176,16 +1276,21 @@ function performSearch(term) {
     let html = "";
     let lastIdx = 0;
     for (const m of matches) {
-      html += escapeHtml(text.slice(lastIdx, m.index));
-      html += `<mark class="search-highlight">${escapeHtml(m[0])}</mark>`;
-      lastIdx = m.index + m[0].length;
+      const start = m.index || 0;
+      const end = start + m[0].length;
+      if (end > start) {
+        html += escapeHtml(text.slice(lastIdx, start));
+        html += `<mark class="search-highlight">${escapeHtml(m[0])}</mark>`;
+        lastIdx = end;
+      }
     }
     html += escapeHtml(text.slice(lastIdx));
     el.innerHTML = html;
+    updateLineNumbers(el);
 
     const marks = el.querySelectorAll("mark.search-highlight");
     for (const mark of marks) {
-      _searchMatches.push({ el: mark, section: section });
+      _searchMatches.push({ el: mark, section });
     }
   }
 
@@ -1195,6 +1300,7 @@ function performSearch(term) {
 function clearHighlights() {
   for (const [el, text] of _searchSavedTexts) {
     el.textContent = text;
+    updateLineNumbers(el);
   }
   _searchSavedTexts.clear();
 }
@@ -1232,6 +1338,36 @@ function updateSearchCounts() {
   apply($("resSearchCount"), resCount);
 }
 
+function scrollMatchIntoPane(mark) {
+  const pane = mark.closest(".message-pane");
+  if (!pane) return;
+
+  const paneRect = pane.getBoundingClientRect();
+  const markRect = mark.getBoundingClientRect();
+  const verticalPadding = 32;
+  const horizontalPadding = 24;
+  let nextTop = pane.scrollTop;
+  let nextLeft = pane.scrollLeft;
+
+  if (markRect.top < paneRect.top + verticalPadding) {
+    nextTop -= (paneRect.top + verticalPadding) - markRect.top;
+  } else if (markRect.bottom > paneRect.bottom - verticalPadding) {
+    nextTop += markRect.bottom - (paneRect.bottom - verticalPadding);
+  }
+
+  if (markRect.left < paneRect.left + horizontalPadding) {
+    nextLeft -= (paneRect.left + horizontalPadding) - markRect.left;
+  } else if (markRect.right > paneRect.right - horizontalPadding) {
+    nextLeft += markRect.right - (paneRect.right - horizontalPadding);
+  }
+
+  pane.scrollTo({
+    top: Math.max(0, nextTop),
+    left: Math.max(0, nextLeft),
+    behavior: "auto",
+  });
+}
+
 function navigateSearch(forward) {
   if (_searchMatches.length === 0) return;
 
@@ -1247,7 +1383,7 @@ function navigateSearch(forward) {
 
   const match = _searchMatches[_searchCurrentIdx];
   match.el.classList.add("current");
-  match.el.scrollIntoView({ block: "center", behavior: "smooth" });
+  scrollMatchIntoPane(match.el);
 
   const reqCount = _searchMatches.filter(function(m) { return m.section === "req"; }).length;
   const total = _searchMatches.length;
@@ -1272,13 +1408,76 @@ function cacheSearchTexts() {
   _searchSavedTexts.clear();
   const els = getSearchableElements();
   for (const entry of els) {
-    _searchSavedTexts.set(entry.el, entry.el.textContent || "");
+    _searchSavedTexts.set(entry.el, getEditorText(entry.el));
   }
 }
 
 function resetViewButtons(target, activeView) {
   document.querySelectorAll(`.view-btn[data-target="${target}"]`).forEach((btn) => {
     btn.classList.toggle("active", btn.dataset.view === activeView);
+  });
+}
+
+function loadWrapState() {
+  ["req", "res"].forEach((target) => {
+    try {
+      const saved = localStorage.getItem("mitm-proxy-wrap-" + target);
+      wrapState[target] = saved == null ? true : saved === "1";
+    } catch (_) {
+      wrapState[target] = true;
+    }
+  });
+}
+
+function applyWrapState(target) {
+  const enabled = wrapState[target] !== false;
+  const scroll = target === "req" ? $("reqSectionScroll") : $("resSectionScroll");
+  const btn = document.querySelector(`.wrap-btn[data-target="${target}"]`);
+  if (scroll) scroll.classList.toggle("no-wrap", !enabled);
+  if (btn) {
+    btn.classList.toggle("active", enabled);
+    btn.title = enabled ? "自动换行已开启" : "自动换行已关闭";
+    btn.setAttribute("aria-pressed", enabled ? "true" : "false");
+  }
+  updateAllLineNumbers();
+}
+
+function setWrapState(target, enabled) {
+  wrapState[target] = enabled;
+  try {
+    localStorage.setItem("mitm-proxy-wrap-" + target, enabled ? "1" : "0");
+  } catch (_) {}
+  applyWrapState(target);
+}
+
+function applyAllWrapStates() {
+  applyWrapState("req");
+  applyWrapState("res");
+}
+
+function initReadOnlyEditors() {
+  document.querySelectorAll(".message-textarea").forEach((editor) => {
+    editor.addEventListener("beforeinput", (e) => e.preventDefault());
+    editor.addEventListener("paste", (e) => e.preventDefault());
+    editor.addEventListener("drop", (e) => e.preventDefault());
+    editor.addEventListener("cut", (e) => e.preventDefault());
+    editor.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && _searchTerm && _searchMatches.length > 0) {
+        e.preventDefault();
+        navigateSearch(!e.shiftKey);
+        return;
+      }
+      const allowedKeys = new Set([
+        "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight",
+        "Home", "End", "PageUp", "PageDown",
+        "Shift", "Control", "Meta", "Alt", "Escape",
+      ]);
+      if (e.ctrlKey || e.metaKey || e.altKey || allowedKeys.has(e.key)) return;
+      if (e.key.length === 1 || e.key === "Backspace" || e.key === "Delete" ||
+          e.key === "Enter" || e.key === "Tab") {
+        e.preventDefault();
+      }
+    });
   });
 }
 
@@ -1297,16 +1496,28 @@ document.addEventListener("click", (e) => {
 
   // Show/hide content
   if (target === "req") {
-    $("reqBodyFormatted").style.display = view === "formatted" ? "" : "none";
-    $("reqBodyRaw").style.display = view === "raw" ? "" : "none";
+    setEditorVisible("reqMessageFormatted", view === "formatted");
+    setEditorVisible("reqMessageRaw", view === "raw");
   } else if (target === "res") {
-    $("resBodyFormatted").style.display = view === "formatted" ? "" : "none";
-    $("resBodyRaw").style.display = view === "raw" ? "" : "none";
-    $("resBodyRender").style.display = view === "render" ? "" : "none";
+    const isRender = view === "render";
+    $("resMessageEditor").style.display = isRender ? "none" : "flex";
+    setEditorVisible("resMessageFormatted", view === "formatted");
+    setEditorVisible("resMessageRaw", view === "raw");
+    $("resBodyRender").style.display = isRender ? "" : "none";
   }
 
   cacheSearchTexts();
   if (_searchTerm) performSearch(_searchTerm);
+});
+
+document.addEventListener("click", (e) => {
+  const btn = e.target.closest(".wrap-btn");
+  if (!btn) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const target = btn.dataset.target;
+  if (target !== "req" && target !== "res") return;
+  setWrapState(target, !(wrapState[target] !== false));
 });
 
 // ===== Detail Search Input =====
@@ -1518,7 +1729,8 @@ document.addEventListener("keydown", (e) => {
   if ((e.key === "ArrowUp" || e.key === "ArrowDown") && !e.ctrlKey && !e.metaKey && !e.altKey) {
     // Don't navigate if user is typing in an input
     const tag = document.activeElement ? document.activeElement.tagName.toLowerCase() : "";
-    if (tag === "input" || tag === "textarea" || tag === "select") return;
+    if (tag === "input" || tag === "textarea" || tag === "select" ||
+        document.activeElement?.classList?.contains("message-textarea")) return;
 
     e.preventDefault();
 
@@ -1572,6 +1784,7 @@ document.addEventListener("keydown", (e) => {
 colOrder = getColumnOrder();
 colWidths = loadColumnWidths();
 loadPanelState();
+loadWrapState();
 // Restore TLS/Timing collapsed state
 if (localStorage.getItem("mitm-proxy-meta-collapsed") === "1") {
   $("tlsTimingToggle").classList.add("collapsed");
@@ -1580,8 +1793,9 @@ if (localStorage.getItem("mitm-proxy-meta-collapsed") === "1") {
 buildColgroup();
 rebuildTableHeader();
 initGutterResize();
-initHeadersResize();
 initSectionCollapse();
+initReadOnlyEditors();
+applyAllWrapStates();
 
 // Restore section collapse state
 ["req", "res"].forEach(target => {
@@ -1594,17 +1808,13 @@ initSectionCollapse();
     if (section) section.classList.add("collapsed");
     if (header) header.classList.add("collapsed");
   }
-  // Restore headers height
-  const hKey = "mitm-proxy-headers-height-" + target;
-  const saved = localStorage.getItem(hKey);
-  if (saved) {
-    const pre = document.getElementById(target + "Headers");
-    if (pre) pre.style.maxHeight = saved;
-  }
 });
 
-// Recalculate table width when container resizes
-window.addEventListener("resize", () => updateTableWidth());
+// Recalculate table width and wrapped line numbers when container resizes
+window.addEventListener("resize", () => {
+  updateTableWidth();
+  updateAllLineNumbers();
+});
 
 footerTime.textContent = new Date().toLocaleString();
 setInterval(() => {

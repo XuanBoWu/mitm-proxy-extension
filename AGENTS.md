@@ -17,12 +17,10 @@ Webview UI (HTML/CSS/JS) → vscode.postMessage → extension.js (Node.js)
 |------|------|
 | `extension.js` | 主入口，ADB 管理、代理生命周期、REST API 轮询、Webview 通信、HAR/JSON 导出 |
 | `tools/proxy_engine.py` | mitmproxy WebMaster 引擎，输出 WebSocket/REST API 端口和 auth token 到 stderr |
-| `tools/cert_manager.py` | ADB 设备检查、PEM→Android .0 格式转换、证书注入 |
-| `tools/scripts/set_ca_android.sh` | Android <14 CA 注入脚本 |
-| `tools/scripts/set_ca_android14.sh` | Android 14+ CA 注入脚本（APEX/Zygote namespace） |
+| `tools/cert_manager.py` | ADB 设备检查、PEM→Android .0 格式转换、纯 Python adb shell 证书注入（无 .sh 脚本依赖） |
 | `webview/index.html` | 三栏布局：设备面板（可折叠） / 请求列表（12 列可拖拽排序） / 详情（可折叠） |
 | `webview/app.js` | 前端逻辑，实时 render flow 数据，面板拖拽/折叠，列排序，键盘导航 |
-| `webview/style.css` | Catppuccin 暗色主题 |
+| `webview/style.css` | VS Code 原生暗色主题 |
 
 ## 数据流
 
@@ -72,14 +70,17 @@ WebSocket 和 REST API 返回的 flow JSON 格式（`mitmproxy/tools/web/app.py:
 
 1. `proxy_engine.py` 首次运行自动生成 `certificate/mitmproxy-ca-cert.pem`
 2. `cert_manager.py convert --cert` 计算 `subject_hash_old`（MD5 of DER Subject，前 4 字节按**小端序**解释为 uint32），生成 `<hash>.0`
-3. `cert_manager.py push --cert` → convert + adb push .0 文件 + 执行 shell 脚本注入
+3. `cert_manager.py push --cert` → convert + adb push .0 文件 + `inject_certificates()`
+4. `inject_certificates()` 纯 Python adb shell 编排（无 .sh 脚本依赖）：
+   - 清理并创建临时目录 → 复制现有证书 → 挂载 tmpfs → 恢复证书 → 复制新 .0 证书 → 修正权限/SELinux → 注入 Zygote + App namespace（批量 20 个并行）
 
 ### 关键注意
 
-- **Hash 字节序**：OpenSSL `-subject_hash_old` 使用**小端序**（`int.from_bytes(md5[:4], 'little')`），不是大端序。错误的字节序会导致证书文件名不对，Android 无法识别
-- **Android Toybox 兼容性**：Android shell 使用 Toybox 而非 GNU coreutils，`ps --ppid` 应写为 `ps -P`，`grep -v PID || exit` 应写为 `tail -n +2`（避免 grep 无匹配时返回错误）
+- **Hash 字节序**：OpenSSL `-subject_hash_old` 使用**小端序**（`int.from_bytes(md5[:4], 'little')`），不是大端序
+- **无 shell 脚本依赖**：注入逻辑已从 .sh 脚本完全迁移至 `cert_manager.py`，通过 `adb_shell()` 逐步执行，彻底消除 Windows CRLF 行尾导致的 `/system/bin/sh\r` 执行失败
+- **命令执行**：`run_cmd()` 使用 list 传参（`["adb", "shell", "cmd"]`），不用 `shell=True`，避免 Windows 路径空格问题
 - **Android 14+ APEX**：系统 CA 实际路径为 `/apex/com.android.conscrypt/cacerts/`，需额外 bind mount 到 Zygote 命名空间
-- **证书匹配验证**：启动代理后对比 stderr 输出的 SHA-256 指纹与设备上 `.0` 文件的指纹
+- **Toybox 兼容**：`ps -o PID --ppid` 替代 `ps -P`；`pidof` 替代 GNU `pidof`；子进程 PID 在 Python 侧过滤非数字行
 
 ## Webview message 协议
 
@@ -121,7 +122,12 @@ WebSocket 和 REST API 返回的 flow JSON 格式（`mitmproxy/tools/web/app.py:
 - **列管理**：12 列可拖拽重排，`content` 列自适应宽度 / `fixed` 列固定宽度，手动拖宽不会被 auto-fit 重置
 - **三态排序**：点击列头循环 升序 → 降序 → 原始顺序，th 显示 ▲/▼
 - **响应更新**：检测已知 flow 的 status_code 变化，自动更新列表（灰色 `...` 等待 → 状态码 / 红色 ERR）
-- **请求/响应体**：Headers + Body 合一布局，统一滚动，Headers 高度可拖拽调节
+- **请求/响应详情**：Burp 风格 message editor，显示请求行/响应行 + Headers + 空行 + Body，支持 Formatted/Raw 切换
+- **详情行号**：Request/Response 的 Formatted/Raw 均显示行号，自动换行时按真实折行高度对齐，Headers/Body 分隔空行的行号高亮
+- **自动换行**：Request/Response 独立自动换行开关，默认开启，状态持久化，SVG 图标按钮
+- **详情搜索**：请求/响应内搜索高亮，Enter / Shift+Enter 跳转匹配项，跳转只滚动当前 message pane
+- **Response Render**：响应切换 Render 时隐藏 message editor，渲染视图占满 Response 区域
+- **二进制内容**：二进制响应在 message editor 中显示可见解码文本，过长内容截断显示
 - **详情折叠**：Request/Response 可折叠，TLS & Timing 可折叠
 - **网卡选择**：代理设置中可选网卡接口，单网卡自动选中，多网卡提示选择
 - **键盘导航**：上下键在列表中切换数据包（不循环），Ctrl+F 聚焦搜索框

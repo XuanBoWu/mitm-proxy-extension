@@ -150,17 +150,25 @@
             <span class="section-collapse-icon">▼</span>
             <span class="section-title">Request</span>
             <span id="reqSearchCount" class="search-count"></span>
+            <button class="wrap-btn active" data-target="req" title="自动换行已开启" aria-label="切换请求自动换行">
+              <svg viewBox="0 0 1024 1024" aria-hidden="true" focusable="false">
+                <path d="M640 768h64a106.752 106.752 0 0 0 0-213.312H170.688a42.688 42.688 0 0 1 0-85.376H704a192 192 0 0 1 0 384h-64V896a21.312 21.312 0 0 1-34.112 17.088L514.88 844.8a42.624 42.624 0 0 1 0-68.288l91.008-68.224a21.248 21.248 0 0 1 34.112 17.024V768zM170.688 170.688h682.624a42.688 42.688 0 0 1 0 85.312H170.688a42.688 42.688 0 1 1 0-85.312z m213.312 640a42.688 42.688 0 0 1-42.688 42.624H170.688a42.624 42.624 0 1 1 0-85.312h170.624a42.624 42.624 0 0 1 42.688 42.688z"></path>
+              </svg>
+            </button>
             <div class="view-toggle">
               <button class="view-btn active" data-target="req" data-view="formatted">Formatted</button>
               <button class="view-btn" data-target="req" data-view="raw">Raw</button>
             </div>
           </div>
-          <div class="section-scroll" id="reqSectionScroll">
-            <pre id="reqHeaders" class="detail-pre"></pre>
-            <div class="headers-resize-handle" data-target="req"></div>
-            <div class="body-separator"></div>
-            <div id="reqBodyFormatted" class="body-view"></div>
-            <pre id="reqBodyRaw" class="body-raw" style="display:none;"></pre>
+          <div class="section-scroll message-editor" id="reqSectionScroll">
+            <div class="message-pane">
+              <div class="line-numbers" aria-hidden="true"></div>
+              <div id="reqMessageFormatted" class="message-textarea message-full body-view" contenteditable="true" role="textbox" aria-readonly="true" spellcheck="false" tabindex="0"></div>
+            </div>
+            <div class="message-pane" style="display:none;">
+              <div class="line-numbers" aria-hidden="true"></div>
+              <div id="reqMessageRaw" class="message-textarea message-full body-raw" contenteditable="true" role="textbox" aria-readonly="true" spellcheck="false" tabindex="0"></div>
+            </div>
           </div>
         </div>
 
@@ -170,19 +178,29 @@
             <span class="section-collapse-icon">▼</span>
             <span class="section-title">Response</span>
             <span id="resSearchCount" class="search-count"></span>
+            <button class="wrap-btn active" data-target="res" title="自动换行已开启" aria-label="切换响应自动换行">
+              <svg viewBox="0 0 1024 1024" aria-hidden="true" focusable="false">
+                <path d="M640 768h64a106.752 106.752 0 0 0 0-213.312H170.688a42.688 42.688 0 0 1 0-85.376H704a192 192 0 0 1 0 384h-64V896a21.312 21.312 0 0 1-34.112 17.088L514.88 844.8a42.624 42.624 0 0 1 0-68.288l91.008-68.224a21.248 21.248 0 0 1 34.112 17.024V768zM170.688 170.688h682.624a42.688 42.688 0 0 1 0 85.312H170.688a42.688 42.688 0 1 1 0-85.312z m213.312 640a42.688 42.688 0 0 1-42.688 42.624H170.688a42.624 42.624 0 1 1 0-85.312h170.624a42.624 42.624 0 0 1 42.688 42.688z"></path>
+              </svg>
+            </button>
             <div class="view-toggle">
               <button class="view-btn active" data-target="res" data-view="formatted">Formatted</button>
               <button class="view-btn" data-target="res" data-view="raw">Raw</button>
               <button class="view-btn" data-target="res" data-view="render">Render</button>
             </div>
           </div>
-          <div class="section-scroll" id="resSectionScroll">
-            <pre id="resHeaders" class="detail-pre"></pre>
-            <div class="headers-resize-handle" data-target="res"></div>
-            <div class="body-separator"></div>
-            <div id="resBodyFormatted" class="body-view"></div>
-            <pre id="resBodyRaw" class="body-raw" style="display:none;"></pre>
-            <div id="resBodyRender" class="body-render" style="display:none;"></div>
+          <div class="section-scroll message-editor" id="resSectionScroll">
+            <div id="resMessageEditor" class="message-editor-stack">
+              <div class="message-pane">
+                <div class="line-numbers" aria-hidden="true"></div>
+                <div id="resMessageFormatted" class="message-textarea message-full body-view" contenteditable="true" role="textbox" aria-readonly="true" spellcheck="false" tabindex="0"></div>
+              </div>
+              <div class="message-pane" style="display:none;">
+                <div class="line-numbers" aria-hidden="true"></div>
+                <div id="resMessageRaw" class="message-textarea message-full body-raw" contenteditable="true" role="textbox" aria-readonly="true" spellcheck="false" tabindex="0"></div>
+              </div>
+            </div>
+            <div id="resBodyRender" class="body-render full-render" style="display:none;"></div>
           </div>
         </div>
 

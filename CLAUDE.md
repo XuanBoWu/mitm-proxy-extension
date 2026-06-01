@@ -20,7 +20,7 @@ Webview UI (HTML/CSS/JS) → vscode.postMessage → extension.js (Node.js)
 | `tools/cert_manager.py` | ADB 设备检查、PEM→Android .0 格式转换、纯 Python adb shell 证书注入（无 .sh 脚本依赖） |
 | `webview/index.html` | 三栏布局：设备面板（可折叠） / 请求列表（12 列可拖拽排序） / 详情（可折叠） |
 | `webview/app.js` | 前端逻辑，实时 render flow 数据，面板拖拽/折叠，列排序，键盘导航 |
-| `webview/style.css` | Catppuccin 暗色主题 |
+| `webview/style.css` | VS Code 原生暗色主题 |
 
 ## 数据流
 
@@ -122,7 +122,12 @@ WebSocket 和 REST API 返回的 flow JSON 格式（`mitmproxy/tools/web/app.py:
 - **列管理**：12 列可拖拽重排，`content` 列自适应宽度 / `fixed` 列固定宽度，手动拖宽不会被 auto-fit 重置
 - **三态排序**：点击列头循环 升序 → 降序 → 原始顺序，th 显示 ▲/▼
 - **响应更新**：检测已知 flow 的 status_code 变化，自动更新列表（灰色 `...` 等待 → 状态码 / 红色 ERR）
-- **请求/响应体**：Headers + Body 合一布局，统一滚动，Headers 高度可拖拽调节
+- **请求/响应详情**：Burp 风格 message editor，显示请求行/响应行 + Headers + 空行 + Body，支持 Formatted/Raw 切换
+- **详情行号**：Request/Response 的 Formatted/Raw 均显示行号，自动换行时按真实折行高度对齐，Headers/Body 分隔空行的行号高亮
+- **自动换行**：Request/Response 独立自动换行开关，默认开启，状态持久化，SVG 图标按钮
+- **详情搜索**：请求/响应内搜索高亮，Enter / Shift+Enter 跳转匹配项，跳转只滚动当前 message pane
+- **Response Render**：响应切换 Render 时隐藏 message editor，渲染视图占满 Response 区域
+- **二进制内容**：二进制响应在 message editor 中显示可见解码文本，过长内容截断显示
 - **详情折叠**：Request/Response 可折叠，TLS & Timing 可折叠
 - **网卡选择**：代理设置中可选网卡接口，单网卡自动选中，多网卡提示选择
 - **键盘导航**：上下键在列表中切换数据包（不循环），Ctrl+F 聚焦搜索框
@@ -138,4 +143,3 @@ WebSocket 和 REST API 返回的 flow JSON 格式（`mitmproxy/tools/web/app.py:
 - REST API 轮询在大流量时可能延迟较高（可改为 WebSocket 实时推送）
 - HTTP 请求体过大时前端可能卡顿（可改为虚拟滚动）
 - 请求体格式化依赖请求头 Content-Type（非响应 Content-Type），支持 contentview API 会更准确
-- 详情搜索的正则表达式按钮（`.*`）仅切换 UI 状态，未实现正则搜索功能。实现时复用 `buildSearchPattern()` 公共函数
