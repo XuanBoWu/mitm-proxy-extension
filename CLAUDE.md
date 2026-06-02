@@ -32,8 +32,9 @@ Webview UI (HTML/CSS/JS) → vscode.postMessage → extension.js (Node.js)
 6. Webview 一次渲染所有新 flow，列表支持上下键导航（不循环）
 7. 检测已知 flow 的 status_code/res_size 变化 → 批量发送 `updateFlows`（响应状态实时更新）
 8. 点击 flow 时，extension.js 按需请求 body：`GET /flows/{id}/request/content.data?token={token}`
-9. Body 内容缓存到 `flow.req_body` / `flow.res_body`，发送 `showDetail` 到 webview
-10. 导出 JSON/HAR 前自动拉取所有未加载的 body，JSON 含 `_num` 序号
+9. Body 内容分别缓存到 `flow.req_body` / `flow.res_body`，并以 `_reqBodyFetched` / `_resBodyFetched` 标记请求体和响应体加载状态，发送 `showDetail` 到 webview
+10. 内容过滤勾选请求体/响应体时，webview 发送 `prepareFilterContent`，extension.js 按过滤范围拉取所有所需 body 后返回进度和完整过滤数据
+11. 导出 JSON/HAR 前自动拉取所有未加载的 body，JSON 含 `_num` 序号
 
 ## mitmproxy 12.x 注意事项
 
@@ -93,6 +94,7 @@ WebSocket 和 REST API 返回的 flow JSON 格式（`mitmproxy/tools/web/app.py:
 | UI→JS | `pushCert` | 推送并注入证书 |
 | UI→JS | `setProxy` / `clearProxy` | 设备代理设置 `{port, ip}` |
 | UI→JS | `selectFlow` | 查看 flow 详情（触发按需 body 加载） |
+| UI→JS | `prepareFilterContent` | 为可信内容过滤拉取所需 body `{requestId, scopes: {reqBody, resBody}}` |
 | UI→JS | `exportHar` / `exportJson` | 导出 |
 | UI→JS | `getInterfaces` | 获取可用网卡列表 |
 | JS→UI | `addFlows` | 批量新抓包 `{flows: [...]}` |
@@ -100,6 +102,8 @@ WebSocket 和 REST API 返回的 flow JSON 格式（`mitmproxy/tools/web/app.py:
 | JS→UI | `proxyStatus` | 代理状态 `{running, port, message}` |
 | JS→UI | `deviceStatus` | 设备状态 `{connected, info}` |
 | JS→UI | `showDetail` | 显示 flow 详情（含已加载的 body，右侧面板自动展开） |
+| JS→UI | `filterContentProgress` | 内容过滤 body 拉取进度 `{requestId, completed, total}` |
+| JS→UI | `filterContentReady` | 内容过滤 body 拉取完成 `{requestId, flows, failed}` |
 | JS→UI | `certStatus` | 证书操作结果 `{success, message}` |
 | JS→UI | `interfacesList` | 网卡列表 `{interfaces: [{name, ip}]}` |
 
@@ -122,13 +126,17 @@ WebSocket 和 REST API 返回的 flow JSON 格式（`mitmproxy/tools/web/app.py:
 - **列管理**：12 列可拖拽重排，`content` 列自适应宽度 / `fixed` 列固定宽度，手动拖宽不会被 auto-fit 重置
 - **三态排序**：点击列头循环 升序 → 降序 → 原始顺序，th 显示 ▲/▼
 - **响应更新**：检测已知 flow 的 status_code 变化，自动更新列表（灰色 `...` 等待 → 状态码 / 红色 ERR）
-- **请求/响应详情**：Burp 风格 message editor，显示请求行/响应行 + Headers + 空行 + Body，支持 Formatted/Raw 切换
+- **请求/响应详情**：Burp 风格 message editor，显示请求行/响应行 + Headers + 空行 + Body，支持 Formatted/Raw/Render 切换；Request/Response 视图模式会话内独立记忆
+- **Host 展示补全**：Request 展示时如果原始请求头缺少 `Host`，根据 `flow.host`/`flow.port`/`flow.scheme` 在展示层合成 `Host` 行，不修改原始 header 数据
 - **Formatted 高亮**：Headers 按 name/value 分色，JSON body 按 key、string/number、true、false/null 分色；Raw 保持纯文本
-- **详情行号**：Request/Response 的 Formatted/Raw 均显示行号，自动换行时按真实折行高度对齐，Headers/Body 分隔空行的行号高亮
+- **详情行号**：Request/Response 的 Formatted/Raw 均显示行号，自动换行时按真实 DOM 折行高度对齐，Headers/Body 分隔空行的行号高亮；二进制控制字符会规范化，避免破坏排版
 - **自动换行**：Request/Response 独立自动换行开关，默认开启，状态持久化，SVG 图标按钮
-- **详情搜索**：请求/响应内搜索高亮，搜索框内置清除按钮，↑/↓ 导航按钮，Enter / Shift+Enter 跳转匹配项，跳转只滚动当前 message pane
+- **详情搜索**：请求/响应内搜索高亮，搜索框内置清除按钮，↑/↓ 导航按钮，Enter / Shift+Enter 跳转匹配项，支持 JavaScript 正则模式；正则开关会话内保持，`\n` 匹配显示低调换行标记，跳转只滚动当前 message pane
+- **过滤器**：顶部过滤器采用“编辑后应用”模式，关键词范围默认全选 URL/请求头/请求体/响应头/响应体；支持状态码、方法、类型、协议点选过滤，点击应用后生效并自动收起，外部点击收起时若有未应用修改会确认
+- **可信内容过滤**：过滤范围包含请求体/响应体时先由 extension.js 拉取所需 body 后再过滤；首次应用显示进度，后续新抓包后台补齐 body，匹配后增量进入列表
+- **列表增量渲染**：过滤列表按 `flow.id` 复用行，新匹配数据包动态插入，避免持续抓包时整表闪烁；计数显示为 `过滤数 / 总数`，header 布局固定避免计数变化导致控件抖动
 - **Response Render**：响应切换 Render 时隐藏 message editor，渲染视图占满 Response 区域
-- **二进制内容**：二进制响应在 message editor 中显示可见解码文本，过长内容截断显示
+- **二进制内容**：二进制响应在 message editor 中显示可见解码文本，二进制展示/解码上限为 10KB，文本/JSON body 展示上限为 256KB
 - **详情折叠**：Request/Response 可折叠，TLS & Timing 可折叠
 - **网卡选择**：代理设置中可选网卡接口，单网卡自动选中，多网卡提示选择
 - **键盘导航**：上下键在列表中切换数据包（不循环），Ctrl+F 聚焦搜索框
@@ -138,9 +146,12 @@ WebSocket 和 REST API 返回的 flow JSON 格式（`mitmproxy/tools/web/app.py:
 
 - addFlow/updateFlow 改为批量消息（`addFlows`/`updateFlows`），减少渲染次数
 - autoFitContentColumns 300ms 防抖，避免高频率 DOM 测量
+- 过滤后的请求列表按 `flow.id` 增量复用 DOM 行，避免持续抓包时整表重建
+- 内容过滤仅在点击应用后触发；持续抓包期间新 flow 的 body 过滤准备在后台执行，不阻塞已有过滤结果展示
 
 ## 已知待改进
 
 - REST API 轮询在大流量时可能延迟较高（可改为 WebSocket 实时推送）
 - HTTP 请求体过大时前端可能卡顿（可改为虚拟滚动）
 - 请求体格式化依赖请求头 Content-Type（非响应 Content-Type），支持 contentview API 会更准确
+- Host 过滤后续适合做到请求列表表头筛选中，类似表格列筛选

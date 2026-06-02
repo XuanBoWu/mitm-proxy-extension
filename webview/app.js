@@ -5,7 +5,31 @@ const vscode = acquireVsCodeApi();
 let flows = [];
 let selectedFlowId = null;
 let proxyRunning = false;
+let filterTextDraft = "";
 let filterText = "";
+const DEFAULT_FILTER_SCOPES = ["url", "reqHeaders", "reqBody", "resHeaders", "resBody"];
+function createFilterConfig() {
+  return {
+    scopes: new Set(DEFAULT_FILTER_SCOPES),
+    status: new Set(),
+    method: new Set(),
+    type: new Set(),
+    protocol: new Set(),
+  };
+}
+let filterDraftState = createFilterConfig();
+let filterState = createFilterConfig();
+let filterPanelOpen = false;
+let filterContentState = {
+  ready: false,
+  preparing: false,
+  blocking: false,
+  refreshQueued: false,
+  requestId: 0,
+  completed: 0,
+  total: 0,
+  failed: 0,
+};
 let nextSeq = 1;
 let sortState = { colId: null, direction: null }; // null | 'asc' | 'desc'
 let userResizedCols = new Set(); // columns user manually resized — skip auto-fit
@@ -17,6 +41,7 @@ let _searchMatches = []; // flat array of highlighted mark elements, grouped by 
 let _searchCurrentIdx = -1;
 let _searchSavedTexts = new Map(); // element → searchable editor text
 const BODY_TEXT_LIMIT = 256 * 1024;
+const BINARY_TEXT_LIMIT = 10 * 1024;
 
 // Panel state
 let leftPanelWidth = 220;
@@ -24,6 +49,7 @@ let leftCollapsed = false;
 let rightPanelWidth = 420;
 let rightCollapsed = false;
 let wrapState = { req: true, res: true };
+let detailViewState = { req: "formatted", res: "formatted" };
 
 // Column definitions — sizing: "content" = auto-fit to content, "fixed" = clip at preset width
 const COLUMNS = [
@@ -66,11 +92,13 @@ window.addEventListener("message", (event) => {
         f._seq = nextSeq++;
         flows.unshift(f);
       }
+      handleFlowsChanged();
       renderFlowList();
       break;
     case "addFlow": // kept for backwards compat, not used by current extension.js
       msg.flow._seq = nextSeq++;
       flows.unshift(msg.flow);
+      handleFlowsChanged();
       renderFlowList();
       break;
     case "updateFlows":
@@ -82,6 +110,7 @@ window.addEventListener("message", (event) => {
           if (selectedFlowId === f.id) renderDetail(f);
         }
       }
+      handleFlowsChanged();
       renderFlowList();
       break;
     case "updateFlow": { // kept for backwards compat
@@ -89,6 +118,7 @@ window.addEventListener("message", (event) => {
       if (idx !== -1) {
         msg.flow._seq = flows[idx]._seq;
         flows[idx] = msg.flow;
+        handleFlowsChanged();
         renderFlowList();
         if (selectedFlowId === msg.flow.id) renderDetail(msg.flow);
       }
@@ -98,7 +128,7 @@ window.addEventListener("message", (event) => {
       proxyRunning = msg.proxyRunning;
       updateProxyIndicator();
       if (msg.flowCount != null) {
-        flowCount.textContent = msg.flowCount;
+        renderFlowList();
       }
       break;
     case "proxyStatus":
@@ -126,6 +156,7 @@ window.addEventListener("message", (event) => {
       flows = [];
       nextSeq = 1;
       userResizedCols.clear();
+      resetFilterContentState();
       renderFlowList();
       renderEmptyDetail();
       break;
@@ -134,9 +165,38 @@ window.addEventListener("message", (event) => {
       flows.forEach((f, i) => { if (f._seq == null) f._seq = i + 1; });
       nextSeq = flows.length + 1;
       userResizedCols.clear();
+      resetFilterContentState();
       renderFlowList();
       renderEmptyDetail();
       footerStatus.textContent = `已加载 ${msg.flows.length} 条记录`;
+      break;
+    case "filterContentProgress":
+      if (msg.requestId !== filterContentState.requestId) break;
+      filterContentState.preparing = true;
+      filterContentState.completed = msg.completed || 0;
+      filterContentState.total = msg.total || 0;
+      updateFilterUi();
+      if (filterContentState.blocking) renderFlowList();
+      break;
+    case "filterContentReady":
+      if (msg.requestId !== filterContentState.requestId) break;
+      mergeUpdatedFlows(msg.flows || []);
+      if (selectedFlowId) {
+        const selected = flows.find((flow) => flow.id === selectedFlowId);
+        if (selected) renderDetail(selected);
+      }
+      filterContentState.ready = true;
+      filterContentState.preparing = false;
+      filterContentState.blocking = false;
+      filterContentState.completed = msg.flows ? msg.flows.length : 0;
+      filterContentState.total = msg.flows ? msg.flows.length : 0;
+      filterContentState.failed = msg.failed || 0;
+      updateFilterUi();
+      renderFlowList();
+      if (filterContentState.refreshQueued) {
+        filterContentState.refreshQueued = false;
+        ensureFilterContentIfNeeded({ force: true, blocking: false });
+      }
       break;
     case "interfacesList":
       updateInterfaceSelect(msg.interfaces);
@@ -291,7 +351,7 @@ function escapeHtml(str) {
 
 function setEditorText(el, text) {
   if (!el) return;
-  const value = text == null ? "" : String(text);
+  const value = normalizeEditorText(text);
   el.textContent = value;
   el.dataset.plainText = value;
   el.dataset.baseHtml = escapeHtml(value);
@@ -300,7 +360,7 @@ function setEditorText(el, text) {
 
 function setEditorHtml(el, plainText, html) {
   if (!el) return;
-  const value = plainText == null ? "" : String(plainText);
+  const value = normalizeEditorText(plainText);
   el.innerHTML = html || escapeHtml(value);
   el.dataset.plainText = value;
   el.dataset.baseHtml = el.innerHTML;
@@ -310,6 +370,10 @@ function setEditorHtml(el, plainText, html) {
 function getEditorText(el) {
   if (!el) return "";
   return el.dataset.plainText || el.textContent || "";
+}
+
+function normalizeEditorText(text) {
+  return String(text == null ? "" : text).replace(/\r\n?/g, "\n");
 }
 
 function setBodyTextareaClass(el, extraClass) {
@@ -343,49 +407,91 @@ function updateLineNumbers(editor) {
   const wrapping = section ? !section.classList.contains("no-wrap") : true;
   const style = window.getComputedStyle(editor);
   const lineHeight = parseFloat(style.lineHeight) || (parseFloat(style.fontSize) * 1.45) || 16;
-  const paddingLeft = parseFloat(style.paddingLeft) || 0;
-  const paddingRight = parseFloat(style.paddingRight) || 0;
-  const gutterWidth = gutter ? gutter.offsetWidth : 0;
-  const paneWidth = pane.clientWidth;
-  const contentWidth = Math.max(1, paneWidth - gutterWidth - paddingLeft - paddingRight);
-  const measure = document.createElement("div");
-  measure.style.cssText = [
-    "position:absolute",
-    "visibility:hidden",
-    "left:-99999px",
-    "top:0",
-    `width:${contentWidth}px`,
-    `font:${style.font}`,
-    `font-size:${style.fontSize}`,
-    `font-family:${style.fontFamily}`,
-    `font-weight:${style.fontWeight}`,
-    `line-height:${style.lineHeight}`,
-    `letter-spacing:${style.letterSpacing}`,
-    `tab-size:${style.tabSize}`,
-    wrapping ? "white-space:pre-wrap" : "white-space:pre",
-    wrapping ? "overflow-wrap:anywhere" : "overflow-wrap:normal",
-    wrapping ? "word-break:break-word" : "word-break:normal",
-    "padding:0",
-    "border:0",
-  ].join(";");
-  document.body.appendChild(measure);
+  const textIndex = buildTextNodeIndex(editor);
   const gutterLines = [];
   const separatorIndex = lines.findIndex((line, index) => index > 0 && line === "");
+  let offset = 0;
 
   for (let i = 0; i < Math.max(1, lines.length); i++) {
     const line = lines[i] || "";
     const isSeparator = i === separatorIndex;
-    measure.textContent = line || " ";
-    const rowHeight = Math.max(lineHeight, measure.scrollHeight);
+    const rowHeight = wrapping
+      ? measureRenderedLineHeight(textIndex, offset, offset + line.length, lineHeight)
+      : lineHeight;
     gutterLines.push(
       `<span class="line-number${isSeparator ? " separator" : ""}" style="height:${rowHeight}px;line-height:${lineHeight}px">${i + 1}</span>`
     );
+    offset += line.length + 1;
   }
-  document.body.removeChild(measure);
   gutter.innerHTML = gutterLines.join("");
   requestAnimationFrame(() => {
     gutter.style.height = Math.max(editor.offsetHeight, pane.clientHeight) + "px";
   });
+}
+
+function buildTextNodeIndex(root) {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const index = [];
+  let offset = 0;
+  let node = walker.nextNode();
+  while (node) {
+    const length = node.nodeValue.length;
+    index.push({ node, start: offset, end: offset + length });
+    offset += length;
+    node = walker.nextNode();
+  }
+  return { nodes: index, length: offset };
+}
+
+function findTextPosition(index, offset) {
+  if (index.nodes.length === 0) return null;
+  const clamped = Math.max(0, Math.min(offset, index.length));
+  for (const item of index.nodes) {
+    if (clamped <= item.end) {
+      return { node: item.node, offset: Math.max(0, clamped - item.start) };
+    }
+  }
+  const last = index.nodes[index.nodes.length - 1];
+  return { node: last.node, offset: last.node.nodeValue.length };
+}
+
+function measureRenderedLineHeight(index, start, end, lineHeight) {
+  if (end <= start || index.nodes.length === 0) return lineHeight;
+  const startPos = findTextPosition(index, start);
+  const endPos = findTextPosition(index, end);
+  if (!startPos || !endPos) return lineHeight;
+
+  const range = document.createRange();
+  try {
+    range.setStart(startPos.node, startPos.offset);
+    range.setEnd(endPos.node, endPos.offset);
+    return Math.max(lineHeight, countVisualRows(range.getClientRects(), lineHeight) * lineHeight);
+  } catch (_) {
+    return lineHeight;
+  } finally {
+    range.detach();
+  }
+}
+
+function countVisualRows(rects, lineHeight) {
+  const tops = [];
+  for (const rect of rects) {
+    if (rect.height <= 0 || rect.width <= 0) continue;
+    tops.push(rect.top);
+  }
+  if (tops.length === 0) return 1;
+
+  tops.sort((a, b) => a - b);
+  let rows = 1;
+  let currentTop = tops[0];
+  const threshold = Math.max(2, lineHeight * 0.55);
+  for (let i = 1; i < tops.length; i++) {
+    if (Math.abs(tops[i] - currentTop) > threshold) {
+      rows += 1;
+      currentTop = tops[i];
+    }
+  }
+  return rows;
 }
 
 function updateAllLineNumbers() {
@@ -403,7 +509,7 @@ function truncateBodyText(text, totalBytes) {
 function decodeBase64Body(base64, totalBytes) {
   if (!base64) return "";
   try {
-    const byteLimit = Math.min(Math.ceil(BODY_TEXT_LIMIT * 1.5), totalBytes || Number.MAX_SAFE_INTEGER);
+    const byteLimit = Math.min(BINARY_TEXT_LIMIT, totalBytes || Number.MAX_SAFE_INTEGER);
     const base64Limit = Math.ceil(byteLimit / 3) * 4;
     const binary = atob(base64.slice(0, base64Limit));
     const sliceLen = Math.min(binary.length, byteLimit);
@@ -417,10 +523,15 @@ function decodeBase64Body(base64, totalBytes) {
     } catch (_) {
       text = Array.from(bytes, b => String.fromCharCode(b)).join("");
     }
-    return truncateBodyText(text, totalBytes || Math.floor(base64.length * 0.75));
+    return truncateBodyText(sanitizeBinaryText(text), totalBytes || Math.floor(base64.length * 0.75));
   } catch (_) {
     return "[Unable to decode binary body]";
   }
+}
+
+function sanitizeBinaryText(text) {
+  return normalizeEditorText(text)
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, "\uFFFD");
 }
 
 function requestStartLine(flow) {
@@ -495,51 +606,164 @@ function buildSearchPattern(term, isRegex) {
   }
 }
 
+function renderSearchMatchHtml(matchText) {
+  return escapeHtml(matchText);
+}
+
+function getSearchHighlightClass(matchText) {
+  return /[\r\n]/.test(matchText)
+    ? "search-highlight has-newline"
+    : "search-highlight";
+}
+
 function renderFlowList() {
-  let filtered = flows;
-  if (filterText) {
-    const q = filterText.toLowerCase();
-    filtered = flows.filter((f) =>
-      f.url.toLowerCase().includes(q) ||
-      f.host.toLowerCase().includes(q) ||
-      String(f.status_code).includes(q)
-    );
-  }
+  const waitingForContent = isFilterContentPending();
+  let filtered = waitingForContent ? [] : getVisibleFlows();
 
-  // Apply sorting
-  if (sortState.colId && sortState.direction) {
-    filtered = sortFlows(filtered);
-  }
+  flowCount.textContent = `${filtered.length} / ${flows.length}`;
+  updateFilterUi();
 
-  flowCount.textContent = flows.length;
-
-  if (filtered.length === 0) {
+  if (waitingForContent || filtered.length === 0) {
     flowTableBody.innerHTML =
       '<tr class="empty-state"><td colspan="' + COLUMNS.length + '">' +
-      (flows.length === 0 ? "等待抓包数据..." : "无匹配结果") +
+      (waitingForContent ? filterContentMessage() : (flows.length === 0 ? "等待抓包数据..." : "无匹配结果")) +
       "</td></tr>";
     return;
   }
 
-  flowTableBody.innerHTML = filtered
-    .map((f) => {
-      const rowNum = flows.indexOf(f) + 1;
-      const cells = colOrder.map(col => renderCell(col, f, rowNum)).join("");
-      return `<tr class="${selectedFlowId === f.id ? "selected" : ""}" data-id="${f.id}">${cells}</tr>`;
-    })
-    .join("");
-
-  // Click handler
-  flowTableBody.querySelectorAll("tr").forEach((tr) => {
-    tr.addEventListener("click", () => {
-      const id = tr.dataset.id;
-      selectedFlowId = id;
-      renderFlowList();
-      vscode.postMessage({ command: "selectFlow", flowId: id });
-    });
-  });
+  renderFlowRows(filtered);
 
   autoFitContentColumns();
+}
+
+function renderFlowRows(filtered) {
+  flowTableBody.querySelectorAll("tr:not([data-id])").forEach((row) => row.remove());
+  const existingRows = new Map();
+  flowTableBody.querySelectorAll("tr[data-id]").forEach((row) => {
+    existingRows.set(row.dataset.id, row);
+  });
+
+  let cursor = flowTableBody.firstElementChild;
+  for (const flow of filtered) {
+    let row = existingRows.get(flow.id);
+    if (!row) {
+      row = document.createElement("tr");
+      row.dataset.id = flow.id;
+      row.addEventListener("click", () => {
+        selectedFlowId = row.dataset.id;
+        renderFlowList();
+        vscode.postMessage({ command: "selectFlow", flowId: row.dataset.id });
+      });
+    }
+
+    const rowNum = flows.indexOf(flow) + 1;
+    const cells = colOrder.map(col => renderCell(col, flow, rowNum)).join("");
+    const rowKey = `${selectedFlowId === flow.id ? "1" : "0"}|${cells}`;
+    if (row.dataset.renderKey !== rowKey) {
+      row.className = selectedFlowId === flow.id ? "selected" : "";
+      row.innerHTML = cells;
+      row.dataset.renderKey = rowKey;
+    }
+
+    if (row !== cursor) {
+      flowTableBody.insertBefore(row, cursor);
+    } else {
+      cursor = cursor.nextElementSibling;
+    }
+    existingRows.delete(flow.id);
+  }
+
+  for (const row of existingRows.values()) {
+    row.remove();
+  }
+}
+
+function getVisibleFlows() {
+  let filtered = flows.filter(matchesFlowFilters);
+  if (sortState.colId && sortState.direction) {
+    filtered = sortFlows(filtered);
+  }
+  return filtered;
+}
+
+function matchesFlowFilters(flow) {
+  if (!matchesKeywordFilter(flow)) return false;
+  if (!matchesSetFilter(filterState.status, getStatusBucket(flow))) return false;
+  if (!matchesSetFilter(filterState.method, getMethodBucket(flow))) return false;
+  if (!matchesSetFilter(filterState.type, getTypeBucket(flow))) return false;
+  if (!matchesSetFilter(filterState.protocol, getProtocolBucket(flow))) return false;
+  return true;
+}
+
+function matchesSetFilter(set, value) {
+  return set.size === 0 || set.has(value);
+}
+
+function matchesKeywordFilter(flow) {
+  const term = filterText.toLowerCase();
+  if (!term) return true;
+
+  const scopes = filterState.scopes.size > 0 ? filterState.scopes : new Set(["url"]);
+  if (scopes.has("url") && [
+    flow.url,
+    flow.host,
+    flow.path,
+    flow.method,
+    String(flow.status_code || ""),
+    flow.content_type,
+    flow.server_ip,
+    String(flow.port || ""),
+  ].some((value) => includesLower(value, term))) {
+    return true;
+  }
+  if (scopes.has("reqHeaders") && includesLower(formatRequestHeaders(flow), term)) return true;
+  if (scopes.has("resHeaders") && includesLower(formatHeaders(flow.res_headers), term)) return true;
+  if (scopes.has("reqBody") && includesLower(flow.req_body || "", term)) return true;
+  if (scopes.has("resBody") && includesLower(getResponseBodyForFilter(flow), term)) return true;
+  return false;
+}
+
+function includesLower(value, term) {
+  return String(value || "").toLowerCase().includes(term);
+}
+
+function getResponseBodyForFilter(flow) {
+  if (flow.res_body) return flow.res_body;
+  if (flow.res_body_base64) return decodeBase64Body(flow.res_body_base64, flow.res_size);
+  return "";
+}
+
+function getStatusBucket(flow) {
+  const code = flow.status_code || 0;
+  if (code === 0 && flow.error) return "err";
+  if (code === 0) return "pending";
+  if (code >= 200 && code < 300) return "2xx";
+  if (code >= 300 && code < 400) return "3xx";
+  if (code >= 400 && code < 500) return "4xx";
+  if (code >= 500 && code < 600) return "5xx";
+  return "other";
+}
+
+function getMethodBucket(flow) {
+  const method = (flow.method || "").toUpperCase();
+  return ["GET", "POST", "PUT", "DELETE", "PATCH"].includes(method) ? method : "other";
+}
+
+function getTypeBucket(flow) {
+  const ct = (flow.content_type || "").toLowerCase();
+  if (ct.includes("json")) return "json";
+  if (ct.includes("html")) return "html";
+  if (ct.includes("javascript") || ct.includes("ecmascript") || ct.includes("/js")) return "js";
+  if (ct.includes("css")) return "css";
+  if (ct.startsWith("image/")) return "image";
+  if (ct.includes("octet-stream") || ct.includes("protobuf") || ct.includes("binary")) return "binary";
+  return "other";
+}
+
+function getProtocolBucket(flow) {
+  return (flow.scheme || (flow.url || "").split("://")[0] || "https").toLowerCase() === "http"
+    ? "http"
+    : "https";
 }
 
 function renderCell(col, flow, rowNum) {
@@ -1059,7 +1283,7 @@ function renderDetail(flow) {
   _searchMatches = [];
   _searchCurrentIdx = -1;
 
-  const reqHeadersText = formatHeaders(flow.req_headers);
+  const reqHeadersText = formatRequestHeaders(flow);
 
   // Request body — use request Content-Type, not response's
   const reqBody = flow.req_body || "";
@@ -1075,10 +1299,7 @@ function renderDetail(flow) {
   );
   setMessageClass($("reqMessageRaw"), "body-raw");
   setEditorText($("reqMessageRaw"), composeHttpMessage(requestStartLine(flow), reqHeadersText, reqRaw));
-  // Default to formatted view
-  setEditorVisible("reqMessageFormatted", true);
-  setEditorVisible("reqMessageRaw", false);
-  resetViewButtons("req", "formatted");
+  applyDetailView("req", detailViewState.req);
 
   const resHeadersText = formatHeaders(flow.res_headers);
 
@@ -1101,11 +1322,7 @@ function renderDetail(flow) {
     $("resMessageFormatted").classList.add("binary");
   }
   renderRenderView(flow, resBody, resBase64);
-  $("resMessageEditor").style.display = "flex";
-  setEditorVisible("resMessageFormatted", true);
-  setEditorVisible("resMessageRaw", false);
-  $("resBodyRender").style.display = "none";
-  resetViewButtons("res", "formatted");
+  applyDetailView("res", detailViewState.res);
 
   // TLS
   $("tlsVersion").textContent = flow.tls_version || "-";
@@ -1134,6 +1351,27 @@ function formatHeaders(headers) {
   return Object.entries(headers)
     .map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(", ") : v}`)
     .join("\n");
+}
+
+function formatRequestHeaders(flow) {
+  const headers = flow.req_headers || {};
+  const hasHost = Object.keys(headers).some((key) => key.toLowerCase() === "host");
+  const lines = [];
+
+  if (!hasHost && flow.host) {
+    const scheme = flow.scheme || "https";
+    const port = Number(flow.port);
+    const isDefaultPort = (scheme === "https" && port === 443) || (scheme === "http" && port === 80);
+    const hostValue = port && !isDefaultPort ? `${flow.host}:${port}` : flow.host;
+    lines.push(`Host: ${hostValue}`);
+  }
+
+  const headerText = formatHeaders(headers);
+  if (headerText && headerText !== "(empty)") {
+    lines.push(headerText);
+  }
+
+  return lines.length > 0 ? lines.join("\n") : "(empty)";
 }
 
 function formatBodyForEditor(body, contentType, totalBytes) {
@@ -1347,7 +1585,7 @@ function performSearch(term) {
       const end = start + m[0].length;
       if (end > start) {
         html += escapeHtml(text.slice(lastIdx, start));
-        html += `<mark class="search-highlight">${escapeHtml(m[0])}</mark>`;
+        html += `<mark class="${getSearchHighlightClass(m[0])}">${renderSearchMatchHtml(m[0])}</mark>`;
         lastIdx = end;
       }
     }
@@ -1376,12 +1614,20 @@ function clearHighlights() {
 function clearSearch() {
   clearHighlights();
   _searchTerm = "";
-  _searchRegex = false;
   _searchMatches = [];
   _searchCurrentIdx = -1;
   $("detailSearchInput").value = "";
-  $("detailRegexBtn").classList.remove("active");
   updateSearchCounts();
+}
+
+function setSearchRegexEnabled(enabled) {
+  _searchRegex = !!enabled;
+  const btn = $("detailRegexBtn");
+  if (!btn) return;
+  btn.classList.toggle("active", _searchRegex);
+  btn.setAttribute("aria-pressed", _searchRegex ? "true" : "false");
+  btn.title = _searchRegex ? "正则搜索已开启" : "启用正则搜索";
+  btn.setAttribute("aria-label", btn.title);
 }
 
 function updateSearchCounts() {
@@ -1486,6 +1732,31 @@ function resetViewButtons(target, activeView) {
   });
 }
 
+function normalizeDetailView(target, view) {
+  if (target === "req") {
+    return view === "raw" ? "raw" : "formatted";
+  }
+  return view === "raw" || view === "render" ? view : "formatted";
+}
+
+function applyDetailView(target, view) {
+  const activeView = normalizeDetailView(target, view);
+  detailViewState[target] = activeView;
+  resetViewButtons(target, activeView);
+
+  if (target === "req") {
+    setEditorVisible("reqMessageFormatted", activeView === "formatted");
+    setEditorVisible("reqMessageRaw", activeView === "raw");
+    return;
+  }
+
+  const isRender = activeView === "render";
+  $("resMessageEditor").style.display = isRender ? "none" : "flex";
+  setEditorVisible("resMessageFormatted", activeView === "formatted");
+  setEditorVisible("resMessageRaw", activeView === "raw");
+  $("resBodyRender").style.display = isRender ? "" : "none";
+}
+
 function loadWrapState() {
   ["req", "res"].forEach((target) => {
     try {
@@ -1556,23 +1827,7 @@ document.addEventListener("click", (e) => {
 
   const target = e.target.dataset.target;
   const view = e.target.dataset.view;
-
-  // Update button active state
-  document.querySelectorAll(`.view-btn[data-target="${target}"]`).forEach((btn) => {
-    btn.classList.toggle("active", btn.dataset.view === view);
-  });
-
-  // Show/hide content
-  if (target === "req") {
-    setEditorVisible("reqMessageFormatted", view === "formatted");
-    setEditorVisible("reqMessageRaw", view === "raw");
-  } else if (target === "res") {
-    const isRender = view === "render";
-    $("resMessageEditor").style.display = isRender ? "none" : "flex";
-    setEditorVisible("resMessageFormatted", view === "formatted");
-    setEditorVisible("resMessageRaw", view === "raw");
-    $("resBodyRender").style.display = isRender ? "" : "none";
-  }
+  applyDetailView(target, view);
 
   cacheSearchTexts();
   if (_searchTerm) performSearch(_searchTerm);
@@ -1615,11 +1870,11 @@ $("detailSearchInput").addEventListener("keydown", function(e) {
 });
 
 $("detailRegexBtn").addEventListener("click", function() {
-  _searchRegex = !_searchRegex;
-  this.classList.toggle("active", _searchRegex);
-  if (_searchTerm) {
+  setSearchRegexEnabled(!_searchRegex);
+  const term = $("detailSearchInput").value.trim();
+  if (term) {
     cacheSearchTexts();
-    performSearch(_searchTerm);
+    performSearch(term);
   }
 });
 
@@ -1788,19 +2043,268 @@ function getSelectedInterface() {
   return val || "";
 }
 
+function needsFilterContent() {
+  return !!filterText && (filterState.scopes.has("reqBody") || filterState.scopes.has("resBody"));
+}
+
+function isFilterContentPending() {
+  return needsFilterContent() && filterContentState.blocking && !filterContentState.ready;
+}
+
+function filterContentMessage() {
+  if (filterContentState.preparing) {
+    return `正在加载全部内容用于过滤... ${filterContentState.completed}/${filterContentState.total}`;
+  }
+  return "正在准备内容过滤...";
+}
+
+function resetFilterContentState(blocking = false) {
+  filterContentState.ready = false;
+  filterContentState.preparing = false;
+  filterContentState.blocking = blocking;
+  filterContentState.refreshQueued = false;
+  filterContentState.completed = 0;
+  filterContentState.total = 0;
+  filterContentState.failed = 0;
+}
+
+function ensureFilterContentIfNeeded(options = {}) {
+  if (!needsFilterContent()) {
+    filterContentState.preparing = false;
+    filterContentState.blocking = false;
+    updateFilterUi();
+    return;
+  }
+  if (filterContentState.preparing) return;
+  if (filterContentState.ready && !options.force) return;
+  filterContentState.requestId += 1;
+  filterContentState.preparing = true;
+  filterContentState.blocking = !!options.blocking;
+  if (options.blocking) {
+    filterContentState.ready = false;
+  }
+  filterContentState.completed = 0;
+  filterContentState.total = flows.length;
+  filterContentState.failed = 0;
+  vscode.postMessage({
+    command: "prepareFilterContent",
+    requestId: filterContentState.requestId,
+    scopes: {
+      reqBody: filterState.scopes.has("reqBody"),
+      resBody: filterState.scopes.has("resBody"),
+    },
+  });
+  updateFilterUi();
+}
+
+function handleFlowsChanged() {
+  if (needsFilterContent()) {
+    if (filterContentState.preparing) {
+      filterContentState.refreshQueued = true;
+      return;
+    }
+    ensureFilterContentIfNeeded({ force: true, blocking: false });
+  }
+}
+
+function mergeUpdatedFlows(updatedFlows) {
+  for (const next of updatedFlows) {
+    const idx = flows.findIndex((flow) => flow.id === next.id);
+    if (idx === -1) continue;
+    next._seq = flows[idx]._seq;
+    flows[idx] = next;
+  }
+}
+
+function updateFilterUi() {
+  document.querySelectorAll(".filter-chip").forEach((btn) => {
+    const group = btn.dataset.filterGroup;
+    const value = btn.dataset.filterValue;
+    btn.classList.toggle("active", !!filterDraftState[group]?.has(value));
+  });
+
+  document.querySelectorAll(".filter-scope").forEach((input) => {
+    input.checked = filterDraftState.scopes.has(input.value);
+  });
+
+  $("filterPanel").style.display = filterPanelOpen ? "" : "none";
+  $("filterPanelBtn").setAttribute("aria-expanded", filterPanelOpen ? "true" : "false");
+
+  const activeCount = getActiveFilterCount();
+  $("filterPanelBtn").classList.toggle("active", activeCount > 0);
+  $("filterPanelBtn").textContent = activeCount > 0 ? `过滤器 ${activeCount}` : "过滤器";
+  $("applyFilterBtn").classList.toggle("pending", hasDraftFilterChanges());
+
+  const status = $("filterStatusText");
+  if (!status) return;
+  if (needsFilterContent() && filterContentState.preparing) {
+    status.textContent = `正在加载全部请求/响应内容用于过滤 ${filterContentState.completed}/${filterContentState.total}`;
+  } else if (needsFilterContent() && filterContentState.failed > 0) {
+    status.textContent = `内容过滤已完成，${filterContentState.failed} 条内容加载失败`;
+  } else if (needsFilterContent() && filterContentState.ready) {
+    status.textContent = "内容过滤已就绪";
+  } else if (hasDraftFilterChanges()) {
+    status.textContent = "过滤条件已修改，点击“应用”后生效";
+  } else {
+    status.textContent = "关键词范围默认全选；应用请求体或响应体过滤时会先加载全部内容";
+  }
+}
+
+function getActiveFilterCount() {
+  return getFilterCount(filterState);
+}
+
+function getFilterCount(config) {
+  let count = 0;
+  count += config.status.size;
+  count += config.method.size;
+  count += config.type.size;
+  count += config.protocol.size;
+  if (!setsEqual(config.scopes, new Set(DEFAULT_FILTER_SCOPES))) count += 1;
+  if (filterText) count += 1;
+  return count;
+}
+
+function cloneFilterConfig(config) {
+  return {
+    scopes: new Set(config.scopes),
+    status: new Set(config.status),
+    method: new Set(config.method),
+    type: new Set(config.type),
+    protocol: new Set(config.protocol),
+  };
+}
+
+function setsEqual(a, b) {
+  if (a.size !== b.size) return false;
+  for (const value of a) {
+    if (!b.has(value)) return false;
+  }
+  return true;
+}
+
+function filterConfigsEqual(a, b) {
+  return setsEqual(a.scopes, b.scopes) &&
+    setsEqual(a.status, b.status) &&
+    setsEqual(a.method, b.method) &&
+    setsEqual(a.type, b.type) &&
+    setsEqual(a.protocol, b.protocol);
+}
+
+function hasDraftFilterChanges() {
+  return filterTextDraft !== filterText || !filterConfigsEqual(filterDraftState, filterState);
+}
+
+function applyFilters() {
+  filterTextDraft = $("filterInput").value.trim();
+  filterText = filterTextDraft;
+  filterState = cloneFilterConfig(filterDraftState);
+  filterPanelOpen = false;
+  resetFilterContentState(needsFilterContent());
+  ensureFilterContentIfNeeded({ blocking: needsFilterContent(), force: true });
+  updateFilterUi();
+  renderFlowList();
+}
+
+function discardDraftFilterChanges() {
+  filterTextDraft = filterText;
+  filterDraftState = cloneFilterConfig(filterState);
+  $("filterInput").value = filterTextDraft;
+  updateFilterUi();
+}
+
+function closeFilterPanel(options = {}) {
+  if (!filterPanelOpen) return true;
+  if (!options.force && hasDraftFilterChanges()) {
+    const shouldClose = window.confirm("过滤条件已修改但尚未应用，关闭后会放弃这些修改。确定关闭吗？");
+    if (!shouldClose) return false;
+    discardDraftFilterChanges();
+  }
+  filterPanelOpen = false;
+  updateFilterUi();
+  return true;
+}
+
+function clearAllFilters() {
+  filterTextDraft = "";
+  filterText = "";
+  filterDraftState = createFilterConfig();
+  filterState = createFilterConfig();
+  $("filterInput").value = "";
+  resetFilterContentState();
+  updateFilterUi();
+  renderFlowList();
+}
+
 // Filter
 $("filterInput").addEventListener("input", (e) => {
-  filterText = e.target.value.trim();
-  renderFlowList();
+  filterTextDraft = e.target.value.trim();
+  updateFilterUi();
 });
-$("filterBtn").addEventListener("click", () => {
-  filterText = $("filterInput").value.trim();
-  renderFlowList();
+
+$("filterInput").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    applyFilters();
+  }
 });
+
+$("filterPanelBtn").addEventListener("click", () => {
+  if (filterPanelOpen) {
+    closeFilterPanel();
+    return;
+  }
+  filterPanelOpen = true;
+  updateFilterUi();
+});
+
+$("applyFilterBtn").addEventListener("click", () => {
+  applyFilters();
+});
+
+document.addEventListener("click", (e) => {
+  if (!filterPanelOpen) return;
+  const target = e.target;
+  if (target.closest("#filterPanel") ||
+      target.closest("#filterPanelBtn") ||
+      target.closest("#applyFilterBtn") ||
+      target.closest("#clearFilterBtn")) {
+    return;
+  }
+  closeFilterPanel();
+});
+
+$("filterPanel").addEventListener("click", (e) => {
+  const chip = e.target.closest(".filter-chip");
+  if (!chip) return;
+  const group = chip.dataset.filterGroup;
+  const value = chip.dataset.filterValue;
+  const set = filterDraftState[group];
+  if (!set) return;
+  if (set.has(value)) {
+    set.delete(value);
+  } else {
+    set.add(value);
+  }
+  updateFilterUi();
+});
+
+document.querySelectorAll(".filter-scope").forEach((input) => {
+  input.addEventListener("change", () => {
+    if (input.checked) {
+      filterDraftState.scopes.add(input.value);
+    } else {
+      filterDraftState.scopes.delete(input.value);
+    }
+    if (filterDraftState.scopes.size === 0) {
+      filterDraftState.scopes.add("url");
+    }
+    updateFilterUi();
+  });
+});
+
 $("clearFilterBtn").addEventListener("click", () => {
-  filterText = "";
-  $("filterInput").value = "";
-  renderFlowList();
+  clearAllFilters();
 });
 
 // ===== Keyboard =====
@@ -1821,19 +2325,7 @@ document.addEventListener("keydown", (e) => {
 
     e.preventDefault();
 
-    // Build current filtered list
-    let filtered = flows;
-    if (filterText) {
-      const q = filterText.toLowerCase();
-      filtered = flows.filter((f) =>
-        f.url.toLowerCase().includes(q) ||
-        f.host.toLowerCase().includes(q) ||
-        String(f.status_code).includes(q)
-      );
-    }
-    if (sortState.colId && sortState.direction) {
-      filtered = sortFlows(filtered);
-    }
+    const filtered = isFilterContentPending() ? [] : getVisibleFlows();
 
     if (filtered.length === 0) return;
 
@@ -1883,6 +2375,7 @@ initGutterResize();
 initSectionCollapse();
 initReadOnlyEditors();
 applyAllWrapStates();
+updateFilterUi();
 
 // Restore section collapse state
 ["req", "res"].forEach(target => {

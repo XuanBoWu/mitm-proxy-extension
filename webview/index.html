@@ -17,9 +17,54 @@
     </div>
     <div class="header-center">
       <div class="filter-bar">
-        <input type="text" id="filterInput" placeholder="搜索 URL / Host / 状态码..." />
-        <button id="filterBtn" class="btn btn-sm">过滤</button>
+        <input type="text" id="filterInput" placeholder="关键词过滤..." />
+        <button id="filterPanelBtn" class="btn btn-sm btn-outline" aria-expanded="false">过滤器</button>
+        <button id="applyFilterBtn" class="btn btn-sm">应用</button>
         <button id="clearFilterBtn" class="btn btn-sm btn-outline">清除</button>
+      </div>
+      <div id="filterPanel" class="filter-panel" style="display:none;">
+        <div class="filter-row">
+          <span class="filter-label">关键词范围</span>
+          <label><input type="checkbox" class="filter-scope" value="url" checked> URL</label>
+          <label><input type="checkbox" class="filter-scope" value="reqHeaders" checked> 请求头</label>
+          <label><input type="checkbox" class="filter-scope" value="reqBody" checked> 请求体</label>
+          <label><input type="checkbox" class="filter-scope" value="resHeaders" checked> 响应头</label>
+          <label><input type="checkbox" class="filter-scope" value="resBody" checked> 响应体</label>
+        </div>
+        <div class="filter-row">
+          <span class="filter-label">状态码</span>
+          <button class="filter-chip" data-filter-group="status" data-filter-value="2xx">2xx</button>
+          <button class="filter-chip" data-filter-group="status" data-filter-value="3xx">3xx</button>
+          <button class="filter-chip" data-filter-group="status" data-filter-value="4xx">4xx</button>
+          <button class="filter-chip" data-filter-group="status" data-filter-value="5xx">5xx</button>
+          <button class="filter-chip" data-filter-group="status" data-filter-value="pending">Pending</button>
+          <button class="filter-chip" data-filter-group="status" data-filter-value="err">ERR</button>
+        </div>
+        <div class="filter-row">
+          <span class="filter-label">方法</span>
+          <button class="filter-chip" data-filter-group="method" data-filter-value="GET">GET</button>
+          <button class="filter-chip" data-filter-group="method" data-filter-value="POST">POST</button>
+          <button class="filter-chip" data-filter-group="method" data-filter-value="PUT">PUT</button>
+          <button class="filter-chip" data-filter-group="method" data-filter-value="DELETE">DELETE</button>
+          <button class="filter-chip" data-filter-group="method" data-filter-value="PATCH">PATCH</button>
+          <button class="filter-chip" data-filter-group="method" data-filter-value="other">其他</button>
+        </div>
+        <div class="filter-row">
+          <span class="filter-label">类型</span>
+          <button class="filter-chip" data-filter-group="type" data-filter-value="json">JSON</button>
+          <button class="filter-chip" data-filter-group="type" data-filter-value="html">HTML</button>
+          <button class="filter-chip" data-filter-group="type" data-filter-value="js">JS</button>
+          <button class="filter-chip" data-filter-group="type" data-filter-value="css">CSS</button>
+          <button class="filter-chip" data-filter-group="type" data-filter-value="image">图片</button>
+          <button class="filter-chip" data-filter-group="type" data-filter-value="binary">二进制</button>
+          <button class="filter-chip" data-filter-group="type" data-filter-value="other">其他</button>
+        </div>
+        <div class="filter-row">
+          <span class="filter-label">协议</span>
+          <button class="filter-chip" data-filter-group="protocol" data-filter-value="http">HTTP</button>
+          <button class="filter-chip" data-filter-group="protocol" data-filter-value="https">HTTPS</button>
+        </div>
+        <div id="filterStatusText" class="filter-status-text"></div>
       </div>
     </div>
     <div class="header-right">
@@ -132,7 +177,7 @@
       <div class="panel-header">
         <span class="panel-title">详情</span>
         <div class="search-group" id="detailSearchGroup" style="display:none;">
-          <button id="detailRegexBtn" class="search-btn-left" title="使用正则表达式">.*</button>
+          <button id="detailRegexBtn" class="search-btn-left" title="启用正则搜索" aria-label="启用正则搜索" aria-pressed="false">.*</button>
           <div class="detail-search-box">
             <input type="text" id="detailSearchInput" class="detail-search-input" placeholder="搜索请求/响应..." />
             <button id="detailClearSearchBtn" class="search-clear-inline" title="清除搜索">&times;</button>

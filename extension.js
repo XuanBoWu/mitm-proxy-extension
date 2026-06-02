@@ -181,12 +181,16 @@ async function pollFlows() {
           existing.res_size !== (f.response?.contentLength || 0) ||
           (!existing.duration_ms && f.response?.timestamp_start)) {
         const transformed = transformFlow(f);
-        if (existing._bodyFetched) {
-          transformed._bodyFetched = true;
+        if (existing._reqBodyFetched || existing._bodyFetched) {
+          transformed._reqBodyFetched = true;
           transformed.req_body = existing.req_body;
+        }
+        if (existing._resBodyFetched || existing._bodyFetched) {
+          transformed._resBodyFetched = true;
           transformed.res_body = existing.res_body;
           transformed.res_body_base64 = existing.res_body_base64;
         }
+        transformed._bodyFetched = !!(transformed._reqBodyFetched && transformed._resBodyFetched);
         const idx = capturedFlows.indexOf(existing);
         capturedFlows[idx] = transformed;
         updatedFlows.push(transformed);
@@ -577,6 +581,10 @@ async function createPanel() {
         break;
       }
 
+      case "prepareFilterContent":
+        await prepareFilterContent(message.requestId, message.scopes || {});
+        break;
+
       case "clearFlows": {
         capturedFlows = [];
         knownFlowIds.clear();
@@ -663,27 +671,99 @@ function mitmwebRequest(method, path) {
 
 // ===== Export Functions =====
 
-async function fetchFlowBodies(flow) {
-  if (flow._bodyFetched || !webPort || !authToken) return;
-  flow._bodyFetched = true;
-  try {
-    const buf = await mitmwebGet(`/flows/${flow.id}/request/content.data`);
-    flow.req_body = buf.toString("utf-8");
-  } catch (_) {
-    flow.req_body = "";
+async function fetchFlowBodies(flow, scopes = { request: true, response: true }) {
+  const fetchRequest = scopes.request !== false;
+  const fetchResponse = scopes.response !== false;
+  if (flow._bodyFetched) {
+    return { requestOk: true, responseOk: true };
   }
-  try {
-    const buf = await mitmwebGet(`/flows/${flow.id}/response/content.data`);
-    const ct = (flow.content_type || "").toLowerCase();
-    if (ct.startsWith("image/") || ct.startsWith("audio/") || ct.startsWith("video/") ||
-        ct.includes("octet-stream") || ct.includes("protobuf")) {
-      flow.res_body_base64 = buf.toString("base64");
-      flow.res_body = "";
-    } else {
-      flow.res_body = buf.toString("utf-8");
+  if (!webPort || !authToken) {
+    return {
+      requestOk: !fetchRequest || !!flow.req_body || !flow.req_size,
+      responseOk: !fetchResponse || !!flow.res_body || !!flow.res_body_base64 || !flow.res_size,
+    };
+  }
+  let requestOk = true;
+  let responseOk = true;
+  if (fetchRequest && !flow._reqBodyFetched) {
+    try {
+      const buf = await mitmwebGet(`/flows/${flow.id}/request/content.data`);
+      flow.req_body = buf.toString("utf-8");
+      flow._reqBodyFetched = true;
+    } catch (_) {
+      flow.req_body = "";
+      requestOk = false;
     }
-  } catch (_) {
-    flow.res_body = "";
+  }
+  if (fetchResponse && !flow._resBodyFetched) {
+    try {
+      const buf = await mitmwebGet(`/flows/${flow.id}/response/content.data`);
+      const ct = (flow.content_type || "").toLowerCase();
+      if (ct.startsWith("image/") || ct.startsWith("audio/") || ct.startsWith("video/") ||
+          ct.includes("octet-stream") || ct.includes("protobuf")) {
+        flow.res_body_base64 = buf.toString("base64");
+        flow.res_body = "";
+      } else {
+        flow.res_body = buf.toString("utf-8");
+      }
+      flow._resBodyFetched = true;
+    } catch (_) {
+      flow.res_body = "";
+      responseOk = false;
+    }
+  }
+  flow._bodyFetched = !!(flow._reqBodyFetched && flow._resBodyFetched);
+  return { requestOk, responseOk };
+}
+
+async function prepareFilterContent(requestId, scopes) {
+  if (!panel) return;
+  if (capturedFlows.length === 0) {
+    panel.webview.postMessage({
+      command: "filterContentReady",
+      requestId,
+      flows: [],
+      failed: 0,
+    });
+    return;
+  }
+
+  let completed = 0;
+  let failed = 0;
+  const total = capturedFlows.length;
+  panel.webview.postMessage({
+    command: "filterContentProgress",
+    requestId,
+    completed,
+    total,
+  });
+
+  for (const flow of capturedFlows) {
+    const result = await fetchFlowBodies(flow, {
+      request: !!scopes.reqBody,
+      response: !!scopes.resBody,
+    });
+    if (!result.requestOk || !result.responseOk) {
+      failed += 1;
+    }
+    completed += 1;
+    if (panel && (completed === total || completed % 5 === 0)) {
+      panel.webview.postMessage({
+        command: "filterContentProgress",
+        requestId,
+        completed,
+        total,
+      });
+    }
+  }
+
+  if (panel) {
+    panel.webview.postMessage({
+      command: "filterContentReady",
+      requestId,
+      flows: capturedFlows,
+      failed,
+    });
   }
 }
 
