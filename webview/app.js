@@ -291,13 +291,25 @@ function escapeHtml(str) {
 
 function setEditorText(el, text) {
   if (!el) return;
-  el.textContent = text == null ? "" : String(text);
+  const value = text == null ? "" : String(text);
+  el.textContent = value;
+  el.dataset.plainText = value;
+  el.dataset.baseHtml = escapeHtml(value);
+  updateLineNumbers(el);
+}
+
+function setEditorHtml(el, plainText, html) {
+  if (!el) return;
+  const value = plainText == null ? "" : String(plainText);
+  el.innerHTML = html || escapeHtml(value);
+  el.dataset.plainText = value;
+  el.dataset.baseHtml = el.innerHTML;
   updateLineNumbers(el);
 }
 
 function getEditorText(el) {
   if (!el) return "";
-  return el.textContent || "";
+  return el.dataset.plainText || el.textContent || "";
 }
 
 function setBodyTextareaClass(el, extraClass) {
@@ -427,6 +439,45 @@ function composeHttpMessage(startLine, headersText, bodyText) {
   const headers = headersText && headersText !== "(empty)" ? headersText : "";
   const body = bodyText || "";
   return `${startLine}\n${headers}\n\n${body}`;
+}
+
+function composeHttpMessageHtml(startLine, headersText, bodyHtml) {
+  const headers = headersText && headersText !== "(empty)" ? headersText : "";
+  return `${escapeHtml(startLine)}\n${highlightHeadersText(headers)}\n\n${bodyHtml || ""}`;
+}
+
+function highlightHeadersText(headersText) {
+  if (!headersText) return "";
+  return headersText.split("\n").map((line) => {
+    const idx = line.indexOf(":");
+    if (idx <= 0) return escapeHtml(line);
+    const key = line.slice(0, idx);
+    const value = line.slice(idx + 1);
+    return `<span class="header-key">${escapeHtml(key)}</span>:<span class="header-value">${escapeHtml(value)}</span>`;
+  }).join("\n");
+}
+
+function highlightJsonText(jsonText) {
+  const tokenRe = /("(?:\\.|[^"\\])*")(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/g;
+  let html = "";
+  let lastIdx = 0;
+  let match;
+  while ((match = tokenRe.exec(jsonText)) !== null) {
+    html += escapeHtml(jsonText.slice(lastIdx, match.index));
+    const [token, stringToken, keySuffix, literalToken] = match;
+    if (stringToken) {
+      const cls = keySuffix ? "json-key" : "json-string";
+      html += `<span class="${cls}">${escapeHtml(stringToken)}</span>${escapeHtml(keySuffix || "")}`;
+    } else if (literalToken) {
+      const cls = literalToken === "true" ? "json-true" : "json-literal";
+      html += `<span class="${cls}">${escapeHtml(literalToken)}</span>`;
+    } else {
+      html += `<span class="json-number">${escapeHtml(token)}</span>`;
+    }
+    lastIdx = match.index + token.length;
+  }
+  html += escapeHtml(jsonText.slice(lastIdx));
+  return html;
 }
 
 // Build case-insensitive regex from a search term.
@@ -1015,8 +1066,13 @@ function renderDetail(flow) {
   const reqContentType = (flow.req_headers && flow.req_headers["content-type"]) || "";
   const reqFormatted = formatBodyForEditor(reqBody, reqContentType, flow.req_size);
   const reqRaw = truncateBodyText(reqBody || "(empty)", flow.req_size);
+  const reqFormattedMessage = composeHttpMessage(requestStartLine(flow), reqHeadersText, reqFormatted.text);
   setMessageClass($("reqMessageFormatted"), reqFormatted.className);
-  setEditorText($("reqMessageFormatted"), composeHttpMessage(requestStartLine(flow), reqHeadersText, reqFormatted.text));
+  setEditorHtml(
+    $("reqMessageFormatted"),
+    reqFormattedMessage,
+    composeHttpMessageHtml(requestStartLine(flow), reqHeadersText, reqFormatted.html || escapeHtml(reqFormatted.text))
+  );
   setMessageClass($("reqMessageRaw"), "body-raw");
   setEditorText($("reqMessageRaw"), composeHttpMessage(requestStartLine(flow), reqHeadersText, reqRaw));
   // Default to formatted view
@@ -1032,8 +1088,13 @@ function renderDetail(flow) {
   const resDisplayBody = resBody || (resBase64 ? decodeBase64Body(resBase64, flow.res_size) : "");
   const resFormatted = formatBodyForEditor(resDisplayBody, flow.content_type, flow.res_size);
   const resRaw = truncateBodyText(resDisplayBody || "(empty)", flow.res_size);
+  const resFormattedMessage = composeHttpMessage(responseStartLine(flow), resHeadersText, resFormatted.text);
   setMessageClass($("resMessageFormatted"), resFormatted.className);
-  setEditorText($("resMessageFormatted"), composeHttpMessage(responseStartLine(flow), resHeadersText, resFormatted.text));
+  setEditorHtml(
+    $("resMessageFormatted"),
+    resFormattedMessage,
+    composeHttpMessageHtml(responseStartLine(flow), resHeadersText, resFormatted.html || escapeHtml(resFormatted.text))
+  );
   setMessageClass($("resMessageRaw"), "body-raw");
   setEditorText($("resMessageRaw"), composeHttpMessage(responseStartLine(flow), resHeadersText, resRaw));
   if (resBase64 && !resBody) {
@@ -1088,8 +1149,10 @@ function formatBodyForEditor(body, contentType, totalBytes) {
   if (firstChar === "{" || firstChar === "[") {
     try {
       const parsed = JSON.parse(body);
+      const text = truncateBodyText(JSON.stringify(parsed, null, 2), totalBytes);
       return {
-        text: truncateBodyText(JSON.stringify(parsed, null, 2), totalBytes),
+        text,
+        html: highlightJsonText(text),
         className: "body-view json",
       };
     } catch (_) {}
@@ -1099,8 +1162,10 @@ function formatBodyForEditor(body, contentType, totalBytes) {
   if (ct.includes("json") || ct.includes("javascript")) {
     try {
       const parsed = JSON.parse(body);
+      const text = truncateBodyText(JSON.stringify(parsed, null, 2), totalBytes);
       return {
-        text: truncateBodyText(JSON.stringify(parsed, null, 2), totalBytes),
+        text,
+        html: highlightJsonText(text),
         className: "body-view json",
       };
     } catch (_) {}
@@ -1236,7 +1301,9 @@ function getSearchableElements() {
 function performSearch(term) {
   // Restore original text from cache before rebuilding mark highlights.
   for (const [el, text] of _searchSavedTexts) {
-    el.textContent = text;
+    el.innerHTML = el.dataset.baseHtml || escapeHtml(text);
+    el.dataset.plainText = text;
+    updateLineNumbers(el);
   }
 
   if (!term || term.length < 1) {
@@ -1299,7 +1366,8 @@ function performSearch(term) {
 
 function clearHighlights() {
   for (const [el, text] of _searchSavedTexts) {
-    el.textContent = text;
+    el.innerHTML = el.dataset.baseHtml || escapeHtml(text);
+    el.dataset.plainText = text;
     updateLineNumbers(el);
   }
   _searchSavedTexts.clear();

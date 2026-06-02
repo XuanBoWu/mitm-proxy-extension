@@ -765,13 +765,34 @@ dd { color: var(--text-primary); }
   min-width: max-content;
 }
 .body-view.json {
+  color: var(--text-primary);
+}
+.json-key {
+  color: #9cdcfe;
+}
+.json-string {
   color: var(--orange);
+}
+.json-number {
+  color: var(--orange);
+}
+.json-true {
+  color: var(--green);
+}
+.json-literal {
+  color: var(--red);
 }
 .body-view.html {
   color: var(--yellow);
 }
 .body-view.binary {
   color: var(--text-secondary);
+}
+.header-key {
+  color: #9cdcfe;
+}
+.header-value {
+  color: var(--yellow);
 }
 
 .body-raw {

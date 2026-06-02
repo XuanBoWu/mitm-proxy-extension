@@ -123,6 +123,7 @@ WebSocket 和 REST API 返回的 flow JSON 格式（`mitmproxy/tools/web/app.py:
 - **三态排序**：点击列头循环 升序 → 降序 → 原始顺序，th 显示 ▲/▼
 - **响应更新**：检测已知 flow 的 status_code 变化，自动更新列表（灰色 `...` 等待 → 状态码 / 红色 ERR）
 - **请求/响应详情**：Burp 风格 message editor，显示请求行/响应行 + Headers + 空行 + Body，支持 Formatted/Raw 切换
+- **Formatted 高亮**：Headers 按 name/value 分色，JSON body 按 key、string/number、true、false/null 分色；Raw 保持纯文本
 - **详情行号**：Request/Response 的 Formatted/Raw 均显示行号，自动换行时按真实折行高度对齐，Headers/Body 分隔空行的行号高亮
 - **自动换行**：Request/Response 独立自动换行开关，默认开启，状态持久化，SVG 图标按钮
 - **详情搜索**：请求/响应内搜索高亮，Enter / Shift+Enter 跳转匹配项，跳转只滚动当前 message pane
