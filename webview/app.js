@@ -1607,7 +1607,7 @@ $("detailSearchInput").addEventListener("keydown", function(e) {
       const term = this.value.trim();
       if (term) { cacheSearchTexts(); performSearch(term); }
     }
-    if (_searchMatches.length > 0) navigateSearch(true);
+    if (_searchMatches.length > 0) navigateSearch(!e.shiftKey);
   } else if (e.key === "Escape") {
     e.preventDefault();
     clearSearch();
@@ -1625,6 +1625,25 @@ $("detailRegexBtn").addEventListener("click", function() {
 
 $("detailClearSearchBtn").addEventListener("click", function() {
   clearSearch();
+  $("detailSearchInput").focus();
+});
+
+$("detailPrevSearchBtn").addEventListener("click", function() {
+  if (_searchMatches.length === 0) {
+    const term = $("detailSearchInput").value.trim();
+    if (term) { cacheSearchTexts(); performSearch(term); }
+  }
+  navigateSearch(false);
+  $("detailSearchInput").focus();
+});
+
+$("detailNextSearchBtn").addEventListener("click", function() {
+  if (_searchMatches.length === 0) {
+    const term = $("detailSearchInput").value.trim();
+    if (term) { cacheSearchTexts(); performSearch(term); }
+  }
+  navigateSearch(true);
+  $("detailSearchInput").focus();
 });
 
 // ===== Column Header Sort Click =====

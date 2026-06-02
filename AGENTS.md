@@ -126,7 +126,7 @@ WebSocket 和 REST API 返回的 flow JSON 格式（`mitmproxy/tools/web/app.py:
 - **Formatted 高亮**：Headers 按 name/value 分色，JSON body 按 key、string/number、true、false/null 分色；Raw 保持纯文本
 - **详情行号**：Request/Response 的 Formatted/Raw 均显示行号，自动换行时按真实折行高度对齐，Headers/Body 分隔空行的行号高亮
 - **自动换行**：Request/Response 独立自动换行开关，默认开启，状态持久化，SVG 图标按钮
-- **详情搜索**：请求/响应内搜索高亮，Enter / Shift+Enter 跳转匹配项，跳转只滚动当前 message pane
+- **详情搜索**：请求/响应内搜索高亮，搜索框内置清除按钮，↑/↓ 导航按钮，Enter / Shift+Enter 跳转匹配项，跳转只滚动当前 message pane
 - **Response Render**：响应切换 Render 时隐藏 message editor，渲染视图占满 Response 区域
 - **二进制内容**：二进制响应在 message editor 中显示可见解码文本，过长内容截断显示
 - **详情折叠**：Request/Response 可折叠，TLS & Timing 可折叠

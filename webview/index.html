@@ -133,8 +133,12 @@
         <span class="panel-title">详情</span>
         <div class="search-group" id="detailSearchGroup" style="display:none;">
           <button id="detailRegexBtn" class="search-btn-left" title="使用正则表达式">.*</button>
-          <input type="text" id="detailSearchInput" class="detail-search-input" placeholder="搜索请求/响应..." />
-          <button id="detailClearSearchBtn" class="search-btn-right" title="清除搜索">&times;</button>
+          <div class="detail-search-box">
+            <input type="text" id="detailSearchInput" class="detail-search-input" placeholder="搜索请求/响应..." />
+            <button id="detailClearSearchBtn" class="search-clear-inline" title="清除搜索">&times;</button>
+          </div>
+          <button id="detailPrevSearchBtn" class="search-nav-btn" title="上一个匹配">↑</button>
+          <button id="detailNextSearchBtn" class="search-nav-btn" title="下一个匹配">↓</button>
         </div>
         <button id="toggleRightBtn" class="collapse-btn" title="折叠面板">▶</button>
       </div>
