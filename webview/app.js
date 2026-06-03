@@ -606,14 +606,64 @@ function buildSearchPattern(term, isRegex) {
   }
 }
 
-function renderSearchMatchHtml(matchText) {
-  return escapeHtml(matchText);
-}
-
 function getSearchHighlightClass(matchText) {
   return /[\r\n]/.test(matchText)
     ? "search-highlight has-newline"
     : "search-highlight";
+}
+
+function buildSearchTextNodeIndex(root) {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode(node) {
+      return node.parentElement?.closest("mark.search-highlight")
+        ? NodeFilter.FILTER_REJECT
+        : NodeFilter.FILTER_ACCEPT;
+    },
+  });
+  const nodes = [];
+  let offset = 0;
+  let node = walker.nextNode();
+  while (node) {
+    const length = node.nodeValue.length;
+    nodes.push({ node, start: offset, end: offset + length });
+    offset += length;
+    node = walker.nextNode();
+  }
+  return { nodes, length: offset };
+}
+
+function findSearchTextPosition(index, offset) {
+  if (index.nodes.length === 0) return null;
+  const clamped = Math.max(0, Math.min(offset, index.length));
+  for (const item of index.nodes) {
+    if (clamped <= item.end) {
+      return { node: item.node, offset: Math.max(0, clamped - item.start) };
+    }
+  }
+  const last = index.nodes[index.nodes.length - 1];
+  return { node: last.node, offset: last.node.nodeValue.length };
+}
+
+function applySearchHighlight(el, start, end, matchText) {
+  const index = buildSearchTextNodeIndex(el);
+  const startPos = findSearchTextPosition(index, start);
+  const endPos = findSearchTextPosition(index, end);
+  if (!startPos || !endPos) return null;
+
+  const range = document.createRange();
+  const mark = document.createElement("mark");
+  mark.className = getSearchHighlightClass(matchText);
+  try {
+    range.setStart(startPos.node, startPos.offset);
+    range.setEnd(endPos.node, endPos.offset);
+    mark.appendChild(range.extractContents());
+    range.insertNode(mark);
+    return mark;
+  } catch (_) {
+    return null;
+  } finally {
+    range.detach();
+  }
 }
 
 function renderFlowList() {
@@ -1578,23 +1628,19 @@ function performSearch(term) {
     const matches = [...text.matchAll(regex)];
     if (matches.length === 0) continue;
 
-    let html = "";
-    let lastIdx = 0;
-    for (const m of matches) {
+    const sectionMarks = [];
+    for (let i = matches.length - 1; i >= 0; i--) {
+      const m = matches[i];
       const start = m.index || 0;
       const end = start + m[0].length;
       if (end > start) {
-        html += escapeHtml(text.slice(lastIdx, start));
-        html += `<mark class="${getSearchHighlightClass(m[0])}">${renderSearchMatchHtml(m[0])}</mark>`;
-        lastIdx = end;
+        const mark = applySearchHighlight(el, start, end, m[0]);
+        if (mark) sectionMarks.unshift(mark);
       }
     }
-    html += escapeHtml(text.slice(lastIdx));
-    el.innerHTML = html;
     updateLineNumbers(el);
 
-    const marks = el.querySelectorAll("mark.search-highlight");
-    for (const mark of marks) {
+    for (const mark of sectionMarks) {
       _searchMatches.push({ el: mark, section });
     }
   }
