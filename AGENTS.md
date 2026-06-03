@@ -131,7 +131,7 @@ WebSocket 和 REST API 返回的 flow JSON 格式（`mitmproxy/tools/web/app.py:
 - **Formatted 高亮**：Headers 按 name/value 分色，JSON body 按 key、string/number、true、false/null 分色；Raw 保持纯文本
 - **详情行号**：Request/Response 的 Formatted/Raw 均显示行号，自动换行时按真实 DOM 折行高度对齐，Headers/Body 分隔空行的行号高亮；二进制控制字符会规范化，避免破坏排版
 - **自动换行**：Request/Response 独立自动换行开关，默认开启，状态持久化，SVG 图标按钮
-- **详情搜索**：请求/响应内搜索高亮，搜索框内置清除按钮，↑/↓ 导航按钮，Enter / Shift+Enter 跳转匹配项，支持 JavaScript 正则模式；正则开关会话内保持，`\n` 匹配显示低调换行标记，跳转只滚动当前 message pane
+- **详情搜索**：请求/响应内搜索高亮，搜索框内置清除按钮，↑/↓ 导航按钮，Enter / Shift+Enter 跳转匹配项，支持 JavaScript 正则模式；正则开关会话内保持，搜索高亮基于 DOM Range 插入 `<mark>`，保留 Headers/JSON 语法高亮，`\n` 匹配显示低调换行标记，跳转只滚动当前 message pane
 - **过滤器**：顶部过滤器采用“编辑后应用”模式，关键词范围默认全选 URL/请求头/请求体/响应头/响应体；支持状态码、方法、类型、协议点选过滤，点击应用后生效并自动收起，外部点击收起时若有未应用修改会确认
 - **可信内容过滤**：过滤范围包含请求体/响应体时先由 extension.js 拉取所需 body 后再过滤；首次应用显示进度，后续新抓包后台补齐 body，匹配后增量进入列表
 - **列表增量渲染**：过滤列表按 `flow.id` 复用行，新匹配数据包动态插入，避免持续抓包时整表闪烁；计数显示为 `过滤数 / 总数`，header 布局固定避免计数变化导致控件抖动
