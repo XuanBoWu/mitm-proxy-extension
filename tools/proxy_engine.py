@@ -13,16 +13,11 @@ import logging
 import asyncio
 import argparse
 
+EXPECTED_MITMPROXY_VERSION = "12.2.2"
+
 if sys.platform == "win32":
     sys.stdout = open(sys.stdout.fileno(), mode="w", encoding="utf-8", buffering=1)
     sys.stderr = open(sys.stderr.fileno(), mode="w", encoding="utf-8", buffering=1)
-
-try:
-    from mitmproxy import options
-    from mitmproxy.tools.web.master import WebMaster
-except ImportError as e:
-    print(json.dumps({"error": f"mitmproxy not installed: {e}"}))
-    sys.exit(1)
 
 # Route mitmproxy logging to stderr so extension.js can parse info
 logging.basicConfig(
@@ -32,13 +27,65 @@ logging.basicConfig(
 )
 
 
+def load_mitmproxy():
+    try:
+        from mitmproxy import options
+        from mitmproxy import version
+        from mitmproxy.tools.web.master import WebMaster
+    except ImportError as e:
+        raise RuntimeError(f"mitmproxy is not installed or cannot be imported: {e}") from e
+    return options, WebMaster, version.VERSION
+
+
+def check_dependencies():
+    try:
+        _, _, actual_version = load_mitmproxy()
+    except RuntimeError as e:
+        return {
+            "success": False,
+            "message": str(e),
+            "requiredMitmproxyVersion": EXPECTED_MITMPROXY_VERSION,
+        }
+
+    if actual_version != EXPECTED_MITMPROXY_VERSION:
+        return {
+            "success": False,
+            "message": (
+                f"mitmproxy version mismatch: detected {actual_version}, "
+                f"required {EXPECTED_MITMPROXY_VERSION}."
+            ),
+            "actualMitmproxyVersion": actual_version,
+            "requiredMitmproxyVersion": EXPECTED_MITMPROXY_VERSION,
+        }
+
+    return {
+        "success": True,
+        "mitmproxyVersion": actual_version,
+        "requiredMitmproxyVersion": EXPECTED_MITMPROXY_VERSION,
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description="MITM Proxy Engine")
+    parser.add_argument("--check-deps", action="store_true", help="Check runtime dependencies and exit")
     parser.add_argument("--host", default="0.0.0.0", help="Listen host")
     parser.add_argument("--port", type=int, default=8080, help="Proxy listen port")
     parser.add_argument("--web-port", type=int, default=8081, help="Web UI port")
     parser.add_argument("--confdir", default=None, help="mitmproxy config directory")
     args = parser.parse_args()
+
+    if args.check_deps:
+        result = check_dependencies()
+        print(json.dumps(result, ensure_ascii=False))
+        sys.exit(0 if result["success"] else 1)
+
+    dep_result = check_dependencies()
+    if not dep_result["success"]:
+        sys.stderr.write(json.dumps(dep_result, ensure_ascii=False) + "\n")
+        sys.stderr.flush()
+        sys.exit(1)
+
+    options, WebMaster, _ = load_mitmproxy()
 
     if not args.confdir:
         script_dir = os.path.dirname(os.path.abspath(__file__))

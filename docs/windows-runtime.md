@@ -2,16 +2,34 @@
 
 This extension can run on Windows without using the user's Python installation by downloading an internal runtime package.
 
-## Build in GitHub Actions
+## Build and Release Gates
 
-Run the `Build Windows Runtime` workflow. It builds:
+The `Build Windows Runtime` workflow is gated:
+
+- Pull requests and normal branch pushes build and test only.
+- Runtime packages are uploaded as short-lived workflow artifacts for debugging.
+- GitHub Releases are created only when:
+  - a `runtime-v*` tag is pushed, or
+  - the workflow is manually triggered with `publish=true`.
+- The release job uses the `internal-release` environment. Configure this environment in GitHub repository settings with required reviewers so release publication requires manual approval.
+
+The workflow builds:
 
 ```text
 mitm-proxy-runtime-win32-x64-<runtimeVersion>.zip
 mitm-proxy-runtime-win32-x64-<runtimeVersion>.zip.sha256
 ```
 
-The zip must be published to an internal URL that VS Code can access.
+Before release, CI smoke-tests the runtime by:
+
+- validating `runtime/manifest.json`
+- running `proxy_engine.exe --check-deps`
+- running `cert_manager.exe --help`
+- starting `proxy_engine.exe`
+- requesting mitmweb `/state.json`
+- packaging the VSIX and checking it does not contain build/runtime directories
+
+The released zip must be published to, or remain downloadable from, an internal URL that VS Code can access.
 
 ## Extension Settings
 

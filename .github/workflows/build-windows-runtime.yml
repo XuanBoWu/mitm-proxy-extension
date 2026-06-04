@@ -7,22 +7,63 @@ on:
         description: "Runtime package version"
         required: true
         default: "0.1.0"
+      publish:
+        description: "Publish a GitHub Release after build and tests pass"
+        required: true
+        type: boolean
+        default: false
+      release_tag:
+        description: "Release tag to create/use when publish=true. Defaults to runtime-v<runtime_version>."
+        required: false
+        default: ""
+  pull_request:
+    paths:
+      - ".github/workflows/build-windows-runtime.yml"
+      - "package.json"
+      - "requirements-runtime.txt"
+      - "scripts/build-windows-runtime.ps1"
+      - "scripts/test-windows-runtime.ps1"
+      - "tools/**"
+      - "webview/**"
+      - "extension.js"
   push:
     branches:
       - tmp-windows-runtime-ci
+    tags:
+      - "runtime-v*"
     paths:
       - ".github/workflows/build-windows-runtime.yml"
+      - "package.json"
       - "requirements-runtime.txt"
       - "scripts/build-windows-runtime.ps1"
+      - "scripts/test-windows-runtime.ps1"
       - "tools/**"
+      - "webview/**"
+      - "extension.js"
+
+permissions:
+  contents: read
 
 jobs:
-  build:
+  build-runtime:
     runs-on: windows-latest
+
+    outputs:
+      runtime_version: ${{ steps.version.outputs.runtime_version }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Resolve runtime version
+        id: version
+        shell: pwsh
+        run: |
+          $version = "${{ github.event.inputs.runtime_version }}"
+          if (-not $version) {
+            $version = "0.1.0"
+          }
+          "runtime_version=$version" >> $env:GITHUB_OUTPUT
 
       - name: Setup Python 3.12
         uses: actions/setup-python@v5
@@ -32,16 +73,124 @@ jobs:
       - name: Build runtime
         shell: pwsh
         run: |
-          $version = "${{ github.event.inputs.runtime_version }}"
-          if (-not $version) {
-            $version = "0.1.0"
-          }
-          .\scripts\build-windows-runtime.ps1 -RuntimeVersion $version -Python python -OutputDir dist
+          .\scripts\build-windows-runtime.ps1 `
+            -RuntimeVersion "${{ steps.version.outputs.runtime_version }}" `
+            -Python python `
+            -OutputDir dist
 
-      - name: Upload runtime artifact
+      - name: Upload runtime artifact for tests
         uses: actions/upload-artifact@v4
         with:
-          name: mitm-proxy-runtime-win32-x64
+          name: windows-runtime-package
+          retention-days: 7
           path: |
             dist/*.zip
             dist/*.sha256
+
+  test-runtime:
+    runs-on: windows-latest
+    needs: build-runtime
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download runtime artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-runtime-package
+          path: dist
+
+      - name: Smoke test runtime
+        shell: pwsh
+        run: |
+          $zip = Get-ChildItem dist -Filter "*.zip" | Select-Object -First 1
+          if (-not $zip) {
+            throw "Runtime zip artifact not found"
+          }
+          .\scripts\test-windows-runtime.ps1 `
+            -RuntimeZip $zip.FullName `
+            -RuntimeVersion "${{ needs.build-runtime.outputs.runtime_version }}"
+
+  package-vsix:
+    runs-on: ubuntu-latest
+    needs: test-runtime
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Package VSIX
+        run: npx --yes @vscode/vsce package --allow-missing-repository
+
+      - name: Smoke test VSIX contents
+        run: |
+          set -euo pipefail
+          vsix="$(ls *.vsix | head -n 1)"
+          unzip -l "$vsix"
+          if unzip -l "$vsix" | grep -E 'extension/(certificate|\.venv|\.github|scripts|\.build|dist)/'; then
+            echo "VSIX contains excluded build/runtime content"
+            exit 1
+          fi
+
+      - name: Upload VSIX artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: extension-vsix
+          retention-days: 7
+          path: "*.vsix"
+
+  release:
+    runs-on: ubuntu-latest
+    needs:
+      - build-runtime
+      - test-runtime
+      - package-vsix
+    if: startsWith(github.ref, 'refs/tags/runtime-v') || (github.event_name == 'workflow_dispatch' && inputs.publish)
+    permissions:
+      contents: write
+    environment: internal-release
+
+    steps:
+      - name: Resolve release tag
+        id: release
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF}" == refs/tags/runtime-v* ]]; then
+            tag="${GITHUB_REF_NAME}"
+          elif [[ -n "${{ github.event.inputs.release_tag }}" ]]; then
+            tag="${{ github.event.inputs.release_tag }}"
+          else
+            tag="runtime-v${{ needs.build-runtime.outputs.runtime_version }}"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Download runtime artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-runtime-package
+          path: release-assets
+
+      - name: Download VSIX artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: extension-vsix
+          path: release-assets
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.release.outputs.tag }}
+          name: MITM Proxy Runtime ${{ needs.build-runtime.outputs.runtime_version }}
+          draft: false
+          prerelease: true
+          fail_on_unmatched_files: true
+          files: |
+            release-assets/*.zip
+            release-assets/*.sha256
+            release-assets/*.vsix
