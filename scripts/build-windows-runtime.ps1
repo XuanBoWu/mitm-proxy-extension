@@ -114,6 +114,7 @@ $DistDir = Join-Path $BuildRoot "dist"
 $WorkDir = Join-Path $BuildRoot "work"
 $PackageRoot = Join-Path $BuildRoot "package"
 $RuntimeDir = Join-Path $PackageRoot "runtime"
+$RuntimeIcon = Join-Path $RepoRoot "media\secmp.ico"
 $Arch = Get-RuntimeArch
 
 if (-not $OutputDir) {
@@ -146,6 +147,7 @@ Invoke-Native $PyInstaller `
   --collect-all pydivert `
   --hidden-import mitmproxy.tools.web.master `
   --hidden-import mitmproxy.tools.web.app `
+  --icon $RuntimeIcon `
   (Join-Path $RepoRoot "tools\proxy_engine.py")
 
 Write-Host "Building cert_manager.exe"
@@ -158,6 +160,7 @@ Invoke-Native $PyInstaller `
   --workpath $WorkDir `
   --specpath $BuildRoot `
   --collect-all cryptography `
+  --icon $RuntimeIcon `
   (Join-Path $RepoRoot "tools\cert_manager.py")
 
 Write-Host "Staging runtime package"
@@ -181,7 +184,7 @@ $ManifestJson = $Manifest | ConvertTo-Json -Depth 5
 $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 [System.IO.File]::WriteAllText((Join-Path $RuntimeDir "manifest.json"), $ManifestJson, $Utf8NoBom)
 
-$ZipName = "mitm-proxy-runtime-win32-$Arch-$RuntimeVersion.zip"
+$ZipName = "secmp-runtime-win32-$Arch-$RuntimeVersion.zip"
 $ZipPath = Join-Path $OutputDir $ZipName
 Compress-WithRetry -SourcePath $RuntimeDir -DestinationPath $ZipPath
 

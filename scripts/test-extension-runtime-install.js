@@ -61,7 +61,7 @@ async function main() {
   const args = parseArgs(process.argv.slice(2));
   const repoRoot = path.resolve(__dirname, "..");
   const extensionPath = path.join(repoRoot, "extension.js");
-  const storageDir = fs.mkdtempSync(path.join(os.tmpdir(), "mitm-extension-runtime-"));
+  const storageDir = fs.mkdtempSync(path.join(os.tmpdir(), "secmp-extension-runtime-"));
   const registeredCommands = new Map();
   const logs = [];
 

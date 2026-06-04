@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-MITM Proxy Engine - 基于 mitmproxy WebMaster 的抓包引擎
-通过 WebSocket 实时推送 flow 数据，body 内容通过 REST API 按需获取
+SecMP proxy engine - 基于 mitmproxy WebMaster 的抓包引擎。
+通过 WebSocket 实时推送 flow 数据，body 内容通过 REST API 按需获取。
 """
 
 import sys
@@ -66,7 +66,7 @@ def check_dependencies():
 
 
 def main():
-    parser = argparse.ArgumentParser(description="MITM Proxy Engine")
+    parser = argparse.ArgumentParser(description="SecMP proxy engine")
     parser.add_argument("--check-deps", action="store_true", help="Check runtime dependencies and exit")
     parser.add_argument("--host", default="0.0.0.0", help="Listen host")
     parser.add_argument("--port", type=int, default=8080, help="Proxy listen port")

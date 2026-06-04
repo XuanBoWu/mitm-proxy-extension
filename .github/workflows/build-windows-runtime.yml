@@ -13,7 +13,7 @@ on:
         type: boolean
         default: false
       release_tag:
-        description: "Release tag to create/use when publish=true. Defaults to runtime-v<runtime_version>."
+        description: "Release tag to create/use when publish=true. Defaults to v<runtime_version>."
         required: false
         default: ""
   pull_request:
@@ -29,9 +29,10 @@ on:
       - "extension.js"
   push:
     branches:
+      - master
       - tmp-windows-runtime-ci
     tags:
-      - "runtime-v*"
+      - "v*"
     paths:
       - ".github/workflows/build-windows-runtime.yml"
       - "package.json"
@@ -62,6 +63,9 @@ jobs:
         shell: pwsh
         run: |
           $version = "${{ github.event.inputs.runtime_version }}"
+          if (-not $version -and "${{ github.ref_type }}" -eq "tag") {
+            $version = "${{ github.ref_name }}" -replace '^v', ''
+          }
           if (-not $version) {
             $version = "0.1.0"
           }
@@ -169,22 +173,25 @@ jobs:
       - build-runtime
       - test-runtime
       - package-vsix
-    if: startsWith(github.ref, 'refs/tags/runtime-v') || (github.event_name == 'workflow_dispatch' && inputs.publish)
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.publish)
     permissions:
       contents: write
-    environment: internal-release
+    environment: release
 
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Resolve release tag
         id: release
         run: |
           set -euo pipefail
-          if [[ "${GITHUB_REF}" == refs/tags/runtime-v* ]]; then
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
             tag="${GITHUB_REF_NAME}"
           elif [[ -n "${{ github.event.inputs.release_tag }}" ]]; then
             tag="${{ github.event.inputs.release_tag }}"
           else
-            tag="runtime-v${{ needs.build-runtime.outputs.runtime_version }}"
+            tag="v${{ needs.build-runtime.outputs.runtime_version }}"
           fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
@@ -204,9 +211,10 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.release.outputs.tag }}
-          name: MITM Proxy Runtime ${{ needs.build-runtime.outputs.runtime_version }}
+          name: SecMP ${{ needs.build-runtime.outputs.runtime_version }}
+          body_path: RELEASE_NOTES.md
           draft: false
-          prerelease: true
+          prerelease: false
           fail_on_unmatched_files: true
           files: |
             release-assets/*.zip

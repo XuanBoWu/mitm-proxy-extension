@@ -1,9 +1,31 @@
 {
-  "name": "mitm-proxy-extension",
-  "displayName": "MITM Proxy",
-  "description": "Android MITM security testing - ADB certificate injection + proxy capture with professional UI",
+  "name": "secmp",
+  "displayName": "SecMP",
+  "icon": "media/icon.png",
+  "description": "Android security testing proxy with ADB certificate injection and traffic capture",
   "version": "0.1.0",
   "publisher": "xbowu",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/XuanBoWu/mitm-proxy-extension.git"
+  },
+  "bugs": {
+    "url": "https://github.com/XuanBoWu/mitm-proxy-extension/issues"
+  },
+  "homepage": "https://github.com/XuanBoWu/mitm-proxy-extension#readme",
+  "categories": [
+    "Testing",
+    "Other"
+  ],
+  "keywords": [
+    "android",
+    "adb",
+    "mitm",
+    "proxy",
+    "security",
+    "traffic-capture"
+  ],
   "engines": {
     "vscode": "^1.74.0"
   },
@@ -15,29 +37,29 @@
   "main": "./extension.js",
   "contributes": {
     "configuration": {
-      "title": "MITM Proxy",
+      "title": "SecMP",
       "properties": {
-        "mitmProxy.windowsRuntimePath": {
+        "secmp.windowsRuntimePath": {
           "type": "string",
           "default": "",
           "description": "Optional local Windows runtime directory. Point this to the extracted runtime directory, or to a parent directory containing runtime/. This takes precedence over archive and URL settings."
         },
-        "mitmProxy.windowsRuntimeArchivePath": {
+        "secmp.windowsRuntimeArchivePath": {
           "type": "string",
           "default": "",
           "description": "Optional local Windows runtime zip path. The extension extracts this archive into global storage when the runtime is missing or invalid. This takes precedence over windowsRuntimeUrl."
         },
-        "mitmProxy.windowsRuntimeUrl": {
+        "secmp.windowsRuntimeUrl": {
           "type": "string",
           "default": "",
-          "description": "URL for the internal Windows runtime zip. Used when no local runtime path or archive path is configured."
+          "description": "URL for the Windows runtime zip. Used when no local runtime path or archive path is configured."
         },
-        "mitmProxy.windowsRuntimeSha256": {
+        "secmp.windowsRuntimeSha256": {
           "type": "string",
           "default": "",
           "description": "Optional SHA-256 checksum for the Windows runtime zip. Leave empty to skip checksum validation."
         },
-        "mitmProxy.windowsRuntimeVersion": {
+        "secmp.windowsRuntimeVersion": {
           "type": "string",
           "default": "0.1.0",
           "description": "Expected Windows runtime version. Changing this value forces the extension to install that runtime version."
@@ -46,36 +68,36 @@
     },
     "commands": [
       {
-        "command": "mitm-proxy.startProxy",
-        "title": "MITM Proxy: Start Proxy"
+        "command": "secmp.startProxy",
+        "title": "SecMP: Start Proxy"
       },
       {
-        "command": "mitm-proxy.stopProxy",
-        "title": "MITM Proxy: Stop Proxy"
+        "command": "secmp.stopProxy",
+        "title": "SecMP: Stop Proxy"
       },
       {
-        "command": "mitm-proxy.pushCert",
-        "title": "MITM Proxy: Push Certificate to Device"
+        "command": "secmp.pushCert",
+        "title": "SecMP: Push Certificate to Device"
       },
       {
-        "command": "mitm-proxy.setupProxy",
-        "title": "MITM Proxy: Setup Device Proxy"
+        "command": "secmp.setupProxy",
+        "title": "SecMP: Setup Device Proxy"
       },
       {
-        "command": "mitm-proxy.clearProxy",
-        "title": "MITM Proxy: Clear Device Proxy"
+        "command": "secmp.clearProxy",
+        "title": "SecMP: Clear Device Proxy"
       },
       {
-        "command": "mitm-proxy.exportHar",
-        "title": "MITM Proxy: Export as HAR"
+        "command": "secmp.exportHar",
+        "title": "SecMP: Export as HAR"
       },
       {
-        "command": "mitm-proxy.exportJson",
-        "title": "MITM Proxy: Export as JSON"
+        "command": "secmp.exportJson",
+        "title": "SecMP: Export as JSON"
       },
       {
-        "command": "mitm-proxy.showPanel",
-        "title": "MITM Proxy: Show Capture Panel"
+        "command": "secmp.showPanel",
+        "title": "SecMP: Show Capture Panel"
       }
     ]
   }

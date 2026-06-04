@@ -1,6 +1,6 @@
-# MITM Proxy VSCodium Extension
+# SecMP VSCodium Extension
 
-VSCodium 插件，用于 Android 设备安全测试，替代 Burp Suite + Set-CA-Tool 工作流。
+SecMP 是用于 Android 设备安全测试的 VSCodium / VS Code 插件，整合本地代理抓包、ADB 代理设置和 Android CA 证书注入流程。
 
 ## 架构
 

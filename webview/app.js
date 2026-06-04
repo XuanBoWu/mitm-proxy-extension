@@ -1,4 +1,4 @@
-/* ===== MITM Proxy Webview App ===== */
+/* ===== SecMP Webview App ===== */
 const vscode = acquireVsCodeApi();
 
 // State
@@ -909,7 +909,7 @@ function getSortValue(flow, colId) {
 
 function getColumnOrder() {
   try {
-    const saved = localStorage.getItem("mitm-proxy-column-order");
+    const saved = localStorage.getItem("secmp-column-order");
     if (saved) {
       const order = JSON.parse(saved);
       const ids = COLUMNS.map(c => c.id);
@@ -923,13 +923,13 @@ function getColumnOrder() {
 
 function saveColumnOrder(order) {
   try {
-    localStorage.setItem("mitm-proxy-column-order", JSON.stringify(order));
+    localStorage.setItem("secmp-column-order", JSON.stringify(order));
   } catch (_) {}
 }
 
 function loadColumnWidths() {
   try {
-    const saved = localStorage.getItem("mitm-proxy-column-widths");
+    const saved = localStorage.getItem("secmp-column-widths");
     if (saved) {
       const w = JSON.parse(saved);
       if (typeof w === "object") return w;
@@ -942,7 +942,7 @@ function loadColumnWidths() {
 
 function saveColumnWidths() {
   try {
-    localStorage.setItem("mitm-proxy-column-widths", JSON.stringify(colWidths));
+    localStorage.setItem("secmp-column-widths", JSON.stringify(colWidths));
   } catch (_) {}
 }
 
@@ -1038,7 +1038,7 @@ function initSectionCollapse() {
       section.classList.toggle("collapsed", collapsed);
       header.classList.toggle("collapsed", collapsed);
       // Remember state
-      const key = section.id === "reqSection" ? "mitm-proxy-req-collapsed" : "mitm-proxy-res-collapsed";
+      const key = section.id === "reqSection" ? "secmp-req-collapsed" : "secmp-res-collapsed";
       try {
         localStorage.setItem(key, collapsed ? "1" : "0");
       } catch (_) {}
@@ -1082,7 +1082,7 @@ function initResizeHandles() {
 
 function loadPanelState() {
   try {
-    const saved = localStorage.getItem("mitm-proxy-panel-state");
+    const saved = localStorage.getItem("secmp-panel-state");
     if (saved) {
       const state = JSON.parse(saved);
       leftPanelWidth = state.leftWidth || 220;
@@ -1102,7 +1102,7 @@ function savePanelState() {
       rightWidth: rightPanelWidth,
       rightCollapsed,
     };
-    localStorage.setItem("mitm-proxy-panel-state", JSON.stringify(state));
+    localStorage.setItem("secmp-panel-state", JSON.stringify(state));
   } catch (_) {}
 }
 
@@ -1806,7 +1806,7 @@ function applyDetailView(target, view) {
 function loadWrapState() {
   ["req", "res"].forEach((target) => {
     try {
-      const saved = localStorage.getItem("mitm-proxy-wrap-" + target);
+      const saved = localStorage.getItem("secmp-wrap-" + target);
       wrapState[target] = saved == null ? true : saved === "1";
     } catch (_) {
       wrapState[target] = true;
@@ -1830,7 +1830,7 @@ function applyWrapState(target) {
 function setWrapState(target, enabled) {
   wrapState[target] = enabled;
   try {
-    localStorage.setItem("mitm-proxy-wrap-" + target, enabled ? "1" : "0");
+    localStorage.setItem("secmp-wrap-" + target, enabled ? "1" : "0");
   } catch (_) {}
   applyWrapState(target);
 }
@@ -2019,7 +2019,7 @@ $("tlsTimingToggle").addEventListener("click", () => {
   const collapsed = content.classList.toggle("collapsed");
   header.classList.toggle("collapsed", collapsed);
   try {
-    localStorage.setItem("mitm-proxy-meta-collapsed", collapsed ? "1" : "0");
+    localStorage.setItem("secmp-meta-collapsed", collapsed ? "1" : "0");
   } catch (_) {}
 });
 
@@ -2051,7 +2051,7 @@ let selectedInterface = "";
 function updateInterfaceSelect(interfaces) {
   availableInterfaces = interfaces;
   const sel = $("interfaceSelect");
-  const saved = localStorage.getItem("mitm-proxy-selected-interface") || "";
+  const saved = localStorage.getItem("secmp-selected-interface") || "";
 
   if (interfaces.length === 0) {
     sel.innerHTML = '<option value="">无可用网卡</option>';
@@ -2084,7 +2084,7 @@ function getSelectedInterface() {
   const val = sel ? sel.value : "";
   if (val) {
     selectedInterface = val;
-    localStorage.setItem("mitm-proxy-selected-interface", val);
+    localStorage.setItem("secmp-selected-interface", val);
   }
   return val || "";
 }
@@ -2411,7 +2411,7 @@ colWidths = loadColumnWidths();
 loadPanelState();
 loadWrapState();
 // Restore TLS/Timing collapsed state
-if (localStorage.getItem("mitm-proxy-meta-collapsed") === "1") {
+if (localStorage.getItem("secmp-meta-collapsed") === "1") {
   $("tlsTimingToggle").classList.add("collapsed");
   document.querySelector(".meta-content").classList.add("collapsed");
 }
@@ -2425,7 +2425,7 @@ updateFilterUi();
 
 // Restore section collapse state
 ["req", "res"].forEach(target => {
-  const key = "mitm-proxy-" + target + "-collapsed";
+  const key = "secmp-" + target + "-collapsed";
   if (localStorage.getItem(key) === "1") {
     const section = document.getElementById(target + "Section");
     const scroll = section ? section.querySelector(".section-scroll") : null;

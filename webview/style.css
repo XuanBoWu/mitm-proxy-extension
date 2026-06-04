@@ -76,12 +76,24 @@ body {
   flex: 0 0 180px;
   min-width: 0;
 }
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.brand-icon {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  object-fit: contain;
+}
 .logo {
   font-weight: 600;
-  font-size: 12px;
+  font-size: 13px;
   color: var(--text-primary);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
+  text-transform: none;
+  letter-spacing: 0;
 }
 .indicator { font-size: 8px; }
 .indicator.running { color: var(--green); }

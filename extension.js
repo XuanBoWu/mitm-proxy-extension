@@ -33,7 +33,7 @@ function getPythonCmd() {
 }
 
 function getRuntimeConfig() {
-  const config = vscode.workspace.getConfiguration("mitmProxy");
+  const config = vscode.workspace.getConfiguration("secmp");
   return {
     windowsRuntimePath: String(config.get("windowsRuntimePath", "") || "").trim(),
     windowsRuntimeArchivePath: String(config.get("windowsRuntimeArchivePath", "") || "").trim(),
@@ -168,7 +168,7 @@ function getActiveWindowsRuntimeDir() {
 
 function findNestedRuntimeArchive(searchDir) {
   const config = getRuntimeConfig();
-  const expectedName = `mitm-proxy-runtime-win32-${process.arch}-${config.windowsRuntimeVersion}.zip`.toLowerCase();
+  const expectedName = `secmp-runtime-win32-${process.arch}-${config.windowsRuntimeVersion}.zip`.toLowerCase();
   const stack = [searchDir];
   const zipFiles = [];
 
@@ -185,13 +185,13 @@ function findNestedRuntimeArchive(searchDir) {
   }
 
   return zipFiles.find(filePath => path.basename(filePath).toLowerCase() === expectedName) ||
-    zipFiles.find(filePath => path.basename(filePath).toLowerCase().startsWith("mitm-proxy-runtime-win32-")) ||
+    zipFiles.find(filePath => path.basename(filePath).toLowerCase().startsWith("secmp-runtime-win32-")) ||
     null;
 }
 
 async function promptForWindowsRuntimeArchive() {
   const selected = await vscode.window.showOpenDialog({
-    title: "Select MITM Proxy Windows runtime package",
+    title: "Select SecMP Windows runtime package",
     openLabel: "Use Runtime Package",
     canSelectFiles: true,
     canSelectFolders: false,
@@ -283,7 +283,7 @@ async function installWindowsRuntimeFromZip(zipPath, progress) {
   }
 
   if (!fs.existsSync(getWindowsRuntimeManifestPath(extractedRuntimeDir))) {
-    throw new Error("Runtime archive must contain runtime/manifest.json or a nested mitm-proxy-runtime zip");
+    throw new Error("Runtime archive must contain runtime/manifest.json or a nested secmp-runtime zip");
   }
 
   fs.rmSync(runtimeDir, { recursive: true, force: true });
@@ -330,7 +330,7 @@ async function installWindowsRuntime(progress, selectedArchivePath = null) {
 
   const runtimeRoot = path.join(extensionStorageDir, "windows-runtime");
   const downloadDir = path.join(runtimeRoot, "_downloads");
-  const zipPath = path.join(downloadDir, `mitm-proxy-runtime-win32-${process.arch}-${config.windowsRuntimeVersion}.zip`);
+  const zipPath = path.join(downloadDir, `secmp-runtime-win32-${process.arch}-${config.windowsRuntimeVersion}.zip`);
 
   fs.mkdirSync(downloadDir, { recursive: true });
   await downloadFile(runtimeUrl, zipPath, config.windowsRuntimeSha256, progress);
@@ -358,7 +358,7 @@ async function ensureWindowsRuntime() {
   if (!windowsRuntimeReadyPromise) {
     windowsRuntimeReadyPromise = vscode.window.withProgress({
       location: vscode.ProgressLocation.Notification,
-      title: "Preparing MITM Proxy Windows runtime",
+      title: "Preparing SecMP Windows runtime",
       cancellable: false,
     }, async (progress) => {
       try {
@@ -814,9 +814,11 @@ function getWebviewContent(webview) {
 
   const styleUri = webview.asWebviewUri(vscode.Uri.file(path.join(__dirname, "webview", "style.css")));
   const scriptUri = webview.asWebviewUri(vscode.Uri.file(path.join(__dirname, "webview", "app.js")));
+  const headerIconUri = webview.asWebviewUri(vscode.Uri.file(path.join(__dirname, "webview", "assets", "header-icon.png")));
 
   html = html.replace("./style.css", styleUri.toString());
   html = html.replace("./app.js", scriptUri.toString());
+  html = html.replace("./assets/header-icon.png", headerIconUri.toString());
 
   return html;
 }
@@ -828,8 +830,8 @@ async function createPanel() {
   }
 
   panel = vscode.window.createWebviewPanel(
-    "mitmProxyPanel",
-    "MITM Proxy",
+    "secmpPanel",
+    "SecMP",
     vscode.ViewColumn.One,
     {
       enableScripts: true,
@@ -1176,7 +1178,7 @@ async function exportHar() {
   const har = {
     log: {
       version: "1.2",
-      creator: { name: "MITM Proxy Extension", version: "0.1.0" },
+      creator: { name: "SecMP", version: "0.1.0" },
       entries: capturedFlows.map(f => ({
         startedDateTime: new Date(f.req_timestamp * 1000).toISOString(),
         time: f.duration_ms || 0,
@@ -1298,15 +1300,15 @@ async function loadSession() {
 // ===== Extension Activation =====
 
 function activate(context) {
-  outputChannel = vscode.window.createOutputChannel("MITM Proxy");
-  log("MITM Proxy extension activated");
+  outputChannel = vscode.window.createOutputChannel("SecMP");
+  log("SecMP extension activated");
   initializeRuntimeStorage(context);
 
-  const showPanelCmd = vscode.commands.registerCommand("mitm-proxy.showPanel", () => {
+  const showPanelCmd = vscode.commands.registerCommand("secmp.showPanel", () => {
     createPanel();
   });
 
-  const startProxyCmd = vscode.commands.registerCommand("mitm-proxy.startProxy", async () => {
+  const startProxyCmd = vscode.commands.registerCommand("secmp.startProxy", async () => {
     await createPanel();
     const port = await vscode.window.showInputBox({
       prompt: "Proxy port",
@@ -1323,12 +1325,12 @@ function activate(context) {
     }
   });
 
-  const stopProxyCmd = vscode.commands.registerCommand("mitm-proxy.stopProxy", async () => {
+  const stopProxyCmd = vscode.commands.registerCommand("secmp.stopProxy", async () => {
     const result = await stopProxyEngine();
     vscode.window.showInformationMessage(result.message);
   });
 
-  const pushCertCmd = vscode.commands.registerCommand("mitm-proxy.pushCert", async () => {
+  const pushCertCmd = vscode.commands.registerCommand("secmp.pushCert", async () => {
     const caPath = path.join(certDir, "mitmproxy-ca-cert.pem");
     if (!fs.existsSync(caPath)) {
       vscode.window.showErrorMessage("CA certificate not found. Run the proxy once first to generate it.");
@@ -1360,7 +1362,7 @@ function activate(context) {
     });
   });
 
-  const setupProxyCmd = vscode.commands.registerCommand("mitm-proxy.setupProxy", async () => {
+  const setupProxyCmd = vscode.commands.registerCommand("secmp.setupProxy", async () => {
     const localIp = await getLocalIp();
     const port = await vscode.window.showInputBox({
       prompt: "Proxy port",
@@ -1376,7 +1378,7 @@ function activate(context) {
     }
   });
 
-  const clearProxyCmd = vscode.commands.registerCommand("mitm-proxy.clearProxy", async () => {
+  const clearProxyCmd = vscode.commands.registerCommand("secmp.clearProxy", async () => {
     const result = await clearDeviceProxy();
     if (result.success) {
       vscode.window.showInformationMessage("Device proxy cleared");
@@ -1385,8 +1387,8 @@ function activate(context) {
     }
   });
 
-  const exportHarCmd = vscode.commands.registerCommand("mitm-proxy.exportHar", () => exportHar());
-  const exportJsonCmd = vscode.commands.registerCommand("mitm-proxy.exportJson", () => exportJson());
+  const exportHarCmd = vscode.commands.registerCommand("secmp.exportHar", () => exportHar());
+  const exportJsonCmd = vscode.commands.registerCommand("secmp.exportJson", () => exportJson());
 
   context.subscriptions.push(
     showPanelCmd, startProxyCmd, stopProxyCmd, pushCertCmd,

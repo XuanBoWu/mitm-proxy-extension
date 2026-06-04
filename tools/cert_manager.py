@@ -328,7 +328,7 @@ def inject_certificates():
 # ===== CLI =====
 
 def main():
-    parser = argparse.ArgumentParser(description="Certificate Manager for MITM Proxy")
+    parser = argparse.ArgumentParser(description="Certificate manager for SecMP")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     subparsers.add_parser("check", help="Check ADB device status")
