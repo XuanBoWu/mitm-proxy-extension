@@ -6,9 +6,10 @@ SecMP 是用于 Android 设备安全测试的 VSCodium / VS Code 插件，整合
 
 ```
 Webview UI (HTML/CSS/JS) → vscode.postMessage → extension.js (Node.js)
-                                                     ├── spawn proxy_engine.py (WebMaster, REST API + WebSocket)
+                                                     ├── Windows: install/use packaged runtime exe
+                                                     ├── source/dev: spawn proxy_engine.py (WebMaster, REST API + WebSocket)
                                                      ├── poll http://127.0.0.1:{webPort}/flows.json (500ms)
-                                                     └── spawn cert_manager.py (ADB 证书管理)
+                                                     └── spawn cert_manager entrypoint (ADB 证书管理)
 ```
 
 ## 关键文件
@@ -16,15 +17,81 @@ Webview UI (HTML/CSS/JS) → vscode.postMessage → extension.js (Node.js)
 | 文件 | 用途 |
 |------|------|
 | `extension.js` | 主入口，ADB 管理、代理生命周期、REST API 轮询、Webview 通信、HAR/JSON 导出 |
+| `package.json` | VS Code 扩展元数据、命令注册、`secmp.*` 配置项、扩展图标入口 |
 | `tools/proxy_engine.py` | mitmproxy WebMaster 引擎，输出 WebSocket/REST API 端口和 auth token 到 stderr |
 | `tools/cert_manager.py` | ADB 设备检查、PEM→Android .0 格式转换、纯 Python adb shell 证书注入（无 .sh 脚本依赖） |
 | `webview/index.html` | 三栏布局：设备面板（可折叠） / 请求列表（12 列可拖拽排序） / 详情（可折叠） |
 | `webview/app.js` | 前端逻辑，实时 render flow 数据，面板拖拽/折叠，列排序，键盘导航 |
 | `webview/style.css` | VS Code 原生暗色主题 |
+| `webview/assets/header-icon.png` | Webview 左上角品牌图标 |
+| `media/icon.png` | VS Code 扩展图标 |
+| `media/secmp.ico` | PyInstaller 打包 `proxy_engine.exe` / `cert_manager.exe` 使用的 Windows 图标 |
+| `requirements-runtime.txt` | Windows runtime 打包依赖，当前固定 `mitmproxy==12.2.2`、`pyinstaller==6.11.1` |
+| `scripts/build-windows-runtime.ps1` | 构建 Windows runtime zip，输出 `secmp-runtime-win32-<arch>-<version>.zip` |
+| `scripts/test-windows-runtime.ps1` | runtime 烟测：校验 manifest、entrypoints、mitmweb `/state.json` |
+| `scripts/test-extension-runtime-install.js` | 模拟 VS Code 扩展安装 runtime 并启动代理 |
+| `.github/workflows/build-windows-runtime.yml` | CI 构建 runtime、测试 runtime、打包 VSIX、tag 发布 GitHub Release |
+| `docs/release.md` | 正式发布编排、检查清单和 release notes 模板 |
+| `docs/windows-runtime.md` | Windows runtime 包格式、安装优先级和手动测试说明 |
+
+## 品牌与命名约定
+
+- 产品名是 `SecMP`，扩展包名是 `secmp`。
+- VS Code command ID 前缀统一为 `secmp.*`，例如 `secmp.startProxy`、`secmp.showPanel`。
+- VS Code 配置命名空间统一为 `secmp.*`，例如 `secmp.windowsRuntimeArchivePath`。
+- Webview panel type 是 `secmpPanel`，输出通道名称是 `SecMP`。
+- 新增 UI 或文档时不要再使用旧的 `MITM Proxy` / `mitmProxy` / `mitm-proxy` 品牌命名；GitHub 仓库 URL 保持原仓库名不变。
+
+## Windows Runtime 打包
+
+Windows 用户默认走打包 runtime，不要求本机安装 Python 或 mitmproxy：
+
+1. 扩展检查 VS Code global storage 中的缓存 runtime。
+2. 如果缓存不存在，依次尝试 `secmp.windowsRuntimePath`、`secmp.windowsRuntimeArchivePath`、`secmp.windowsRuntimeUrl`。
+3. 如果没有配置 runtime 来源，会弹出文件选择框，让用户选择 `secmp-runtime-win32-x64-<version>.zip`。
+4. runtime 解压后必须包含 `runtime/manifest.json` 和两个 entrypoint：
+   - `bin/proxy_engine/proxy_engine.exe`
+   - `bin/cert_manager/cert_manager.exe`
+
+构建命令：
+
+```powershell
+npm run runtime:windows -- -RuntimeVersion 0.1.0 -OutputDir dist
+```
+
+验证命令：
+
+```powershell
+.\scripts\test-windows-runtime.ps1 -RuntimeZip .\dist\secmp-runtime-win32-x64-0.1.0.zip -RuntimeVersion 0.1.0
+npm run runtime:windows:test-install -- --runtime-zip .\dist\secmp-runtime-win32-x64-0.1.0.zip --runtime-version 0.1.0
+npx --yes @vscode/vsce package
+```
+
+注意：
+
+- `scripts/build-windows-runtime.ps1` 会将 `media/secmp.ico` 嵌入两个 exe。
+- `.vscodeignore` 必须排除 `.github/`、`scripts/`、`.build/`、`dist/`、`.venv/`、`certificate/`、`*.vsix` 等开发/构建产物。
+- ADB 仍然是外部依赖，不打包进 runtime。
+- Windows 第一次运行 `proxy_engine.exe` 时可能触发防火墙授权提示，这是当前可接受行为。
+
+## CI 与发布流程
+
+- `tmp-windows-runtime-ci` 用于候选构建和验证。
+- `master` 是正式发布源分支。
+- 候选分支 CI 通过后，快进合并到 `master`。
+- `master` push 仍然只构建、测试、打包，不发布。
+- 正式发布从 `master` 打 `v*` tag，例如 `v0.1.0`。
+- tag workflow 会构建 runtime、运行 runtime/扩展安装烟测、打包 VSIX，并创建 GitHub Release。
+- release assets 应包含：
+  - `secmp-<version>.vsix`
+  - `secmp-runtime-win32-x64-<version>.zip`
+  - `secmp-runtime-win32-x64-<version>.zip.sha256`
+
+当前首个正式 release 是 `v0.1.0`。后续变更发布前先更新 `CHANGELOG.md`、`RELEASE_NOTES.md`、`README.md`、`README.zh-CN.md` 和相关 docs。
 
 ## 数据流
 
-1. 用户点击「启动代理」→ extension.js spawn `proxy_engine.py --port 8080 --web-port {random}`
+1. 用户点击「启动代理」→ extension.js 在 Windows 启动打包 runtime entrypoint，在源码开发模式启动 `proxy_engine.py --port 8080 --web-port {random}`
 2. proxy_engine.py 启动 WebMaster，在 stderr 输出 `WEB_PORT={port}` 和 `AUTH_TOKEN={32-char-hex}`
 3. extension.js 解析 stderr 获取 webPort 和 authToken，启动 500ms 定时轮询
 4. 轮询 `GET http://127.0.0.1:{webPort}/flows.json?token={token}` 获取全部 flow 元数据（不含 body）
@@ -42,7 +109,7 @@ Webview UI (HTML/CSS/JS) → vscode.postMessage → extension.js (Node.js)
 - **Web UI 选项注册时机**：`web_host`/`web_port` 由 WebAddon 注册，必须 **在 `WebMaster(opts)` 创建之后** 通过 `master.options.update()` 设置，否则报 `KeyError: Unknown options`
 - **Auth token**：通过 `web_password` 选项设置随机 32-char hex token，作为 REST API 和 WebSocket 的认证凭证（query param `?token=xxx`）
 - **`web_open_browser=False`**：禁用自动打开浏览器，避免无头环境报错
-- CA 证书首次启动自动生成到 `certificate/` 目录
+- 扩展运行时 CA 证书生成到 VS Code global storage 下的 `mitmproxy-conf`；直接运行 Python 脚本时默认生成到仓库 `certificate/` 目录
 - `ssl_insecure=True` 接受所有上游证书
 - 启动时输出 CA 证书 SHA-256 指纹到 stderr，用于验证证书匹配
 
@@ -109,14 +176,14 @@ WebSocket 和 REST API 返回的 flow JSON 格式（`mitmproxy/tools/web/app.py:
 
 ## 依赖
 
-- **Python**: `mitmproxy>=10.0`, `cryptography` (mitmproxy 自带依赖)
+- **Python runtime**: `mitmproxy==12.2.2`, `pyinstaller==6.11.1`（见 `requirements-runtime.txt`）
 - **Node.js**: 仅 VSCode extension API 内置模块（`http` 模块用于 REST API 轮询）
 - **ADB**: 系统 PATH 中需有 `adb` 命令
 - **Android**: 设备需 root，USB 调试开启
 
 ## 平台差异
 
-- Windows: `python` + `taskkill /pid /f /t`
+- Windows: 优先使用打包 runtime exe + `taskkill /pid /f /t`
 - macOS/Linux: `python3` + `SIGTERM`；优先使用 `.venv/bin/python3`（Homebrew Python 不允许全局 pip install）
 
 ## Webview UI 功能
