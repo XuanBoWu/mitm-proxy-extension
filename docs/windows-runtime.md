@@ -27,6 +27,7 @@ Before release, CI smoke-tests the runtime by:
 - running `cert_manager.exe --help`
 - starting `proxy_engine.exe`
 - requesting mitmweb `/state.json`
+- installing the runtime through the extension's Windows runtime path and requesting mitmweb `/state.json`
 - packaging the VSIX and checking it does not contain build/runtime directories
 
 The released zip must be published to, or remain downloadable from, an internal URL that VS Code can access.

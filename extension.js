@@ -109,7 +109,7 @@ function getWindowsRuntimeManifestPath(runtimeDir = getWindowsRuntimeDir()) {
 }
 
 function readJsonFile(filePath) {
-  return JSON.parse(fs.readFileSync(filePath, "utf-8"));
+  return JSON.parse(fs.readFileSync(filePath, "utf-8").replace(/^\uFEFF/, ""));
 }
 
 function getWindowsRuntimeEntrypoint(name, runtimeDir = getWindowsRuntimeDir()) {
@@ -259,7 +259,7 @@ async function expandZipWindows(zipPath, destinationDir, progress) {
     "-ExecutionPolicy",
     "Bypass",
     "-Command",
-    "Expand-Archive -LiteralPath $args[0] -DestinationPath $args[1] -Force",
+    "& { param($zipPath, $destinationDir) Expand-Archive -LiteralPath $zipPath -DestinationPath $destinationDir -Force }",
     zipPath,
     destinationDir,
   ], { logOutput: true });

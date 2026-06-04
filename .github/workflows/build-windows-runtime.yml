@@ -22,6 +22,7 @@ on:
       - "package.json"
       - "requirements-runtime.txt"
       - "scripts/build-windows-runtime.ps1"
+      - "scripts/test-extension-runtime-install.js"
       - "scripts/test-windows-runtime.ps1"
       - "tools/**"
       - "webview/**"
@@ -36,6 +37,7 @@ on:
       - "package.json"
       - "requirements-runtime.txt"
       - "scripts/build-windows-runtime.ps1"
+      - "scripts/test-extension-runtime-install.js"
       - "scripts/test-windows-runtime.ps1"
       - "tools/**"
       - "webview/**"
@@ -95,6 +97,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
       - name: Download runtime artifact
         uses: actions/download-artifact@v4
         with:
@@ -111,6 +118,17 @@ jobs:
           .\scripts\test-windows-runtime.ps1 `
             -RuntimeZip $zip.FullName `
             -RuntimeVersion "${{ needs.build-runtime.outputs.runtime_version }}"
+
+      - name: Smoke test extension runtime install
+        shell: pwsh
+        run: |
+          $zip = Get-ChildItem dist -Filter "*.zip" | Select-Object -First 1
+          if (-not $zip) {
+            throw "Runtime zip artifact not found"
+          }
+          node .\scripts\test-extension-runtime-install.js `
+            --runtime-zip $zip.FullName `
+            --runtime-version "${{ needs.build-runtime.outputs.runtime_version }}"
 
   package-vsix:
     runs-on: ubuntu-latest

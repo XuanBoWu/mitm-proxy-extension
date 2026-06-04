@@ -5,6 +5,8 @@ __pycache__/
 Thumbs.db
 Tasks/
 node_modules/
+.build/
+dist/
 *.vsix
 certificate/
 *.0

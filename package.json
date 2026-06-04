@@ -8,7 +8,8 @@
     "vscode": "^1.74.0"
   },
   "scripts": {
-    "runtime:windows": "powershell -ExecutionPolicy Bypass -File scripts/build-windows-runtime.ps1"
+    "runtime:windows": "powershell -ExecutionPolicy Bypass -File scripts/build-windows-runtime.ps1",
+    "runtime:windows:test-install": "node scripts/test-extension-runtime-install.js"
   },
   "activationEvents": [],
   "main": "./extension.js",
