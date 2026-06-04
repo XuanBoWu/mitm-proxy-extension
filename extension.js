@@ -34,6 +34,8 @@ function getPythonCmd() {
 function getRuntimeConfig() {
   const config = vscode.workspace.getConfiguration("mitmProxy");
   return {
+    windowsRuntimePath: String(config.get("windowsRuntimePath", "") || "").trim(),
+    windowsRuntimeArchivePath: String(config.get("windowsRuntimeArchivePath", "") || "").trim(),
     windowsRuntimeUrl: String(config.get("windowsRuntimeUrl", "") || "").trim(),
     windowsRuntimeSha256: String(config.get("windowsRuntimeSha256", "") || "").trim().toLowerCase(),
     windowsRuntimeVersion: String(config.get("windowsRuntimeVersion", DEFAULT_WINDOWS_RUNTIME_VERSION) || DEFAULT_WINDOWS_RUNTIME_VERSION).trim(),
@@ -119,8 +121,7 @@ function getWindowsRuntimeEntrypoint(name, runtimeDir = getWindowsRuntimeDir()) 
   return fs.existsSync(exePath) ? exePath : null;
 }
 
-function isWindowsRuntimeReady() {
-  const runtimeDir = getWindowsRuntimeDir();
+function isWindowsRuntimeReady(runtimeDir = getWindowsRuntimeDir()) {
   const manifestPath = getWindowsRuntimeManifestPath(runtimeDir);
   if (!fs.existsSync(manifestPath)) {
     return false;
@@ -138,6 +139,26 @@ function isWindowsRuntimeReady() {
     log(`Invalid Windows runtime manifest: ${err.message}`);
     return false;
   }
+}
+
+function getConfiguredWindowsRuntimePath() {
+  const config = getRuntimeConfig();
+  if (!config.windowsRuntimePath) {
+    return null;
+  }
+  const configuredPath = path.resolve(config.windowsRuntimePath);
+  const runtimeDir = path.basename(configuredPath).toLowerCase() === "runtime"
+    ? configuredPath
+    : path.join(configuredPath, "runtime");
+  return runtimeDir;
+}
+
+function getActiveWindowsRuntimeDir() {
+  const configuredRuntimeDir = getConfiguredWindowsRuntimePath();
+  if (configuredRuntimeDir) {
+    return configuredRuntimeDir;
+  }
+  return getWindowsRuntimeDir();
 }
 
 function downloadFile(url, destinationPath, expectedSha256, progress) {
@@ -201,20 +222,11 @@ async function expandZipWindows(zipPath, destinationDir, progress) {
   ], { logOutput: true });
 }
 
-async function installWindowsRuntime(progress) {
+async function installWindowsRuntimeFromZip(zipPath, progress) {
   const config = getRuntimeConfig();
-  if (!config.windowsRuntimeUrl) {
-    throw new Error("Windows runtime is not installed. Set mitmProxy.windowsRuntimeUrl to the internal runtime zip URL.");
-  }
-
   const runtimeRoot = path.join(extensionStorageDir, "windows-runtime");
   const runtimeDir = getWindowsRuntimeDir();
-  const downloadDir = path.join(runtimeRoot, "_downloads");
   const stagingDir = path.join(runtimeRoot, "_staging", config.windowsRuntimeVersion);
-  const zipPath = path.join(downloadDir, `mitm-proxy-runtime-win32-${process.arch}-${config.windowsRuntimeVersion}.zip`);
-
-  fs.mkdirSync(downloadDir, { recursive: true });
-  await downloadFile(config.windowsRuntimeUrl, zipPath, config.windowsRuntimeSha256, progress);
   await expandZipWindows(zipPath, stagingDir, progress);
 
   const extractedRuntimeDir = path.join(stagingDir, "runtime");
@@ -227,16 +239,53 @@ async function installWindowsRuntime(progress) {
   fs.renameSync(extractedRuntimeDir, runtimeDir);
   fs.rmSync(stagingDir, { recursive: true, force: true });
 
-  if (!isWindowsRuntimeReady()) {
+  if (!isWindowsRuntimeReady(runtimeDir)) {
     throw new Error("Windows runtime installation completed but validation failed");
   }
+}
+
+async function installWindowsRuntime(progress) {
+  const config = getRuntimeConfig();
+  const configuredRuntimeDir = getConfiguredWindowsRuntimePath();
+  if (configuredRuntimeDir) {
+    progress?.report({ message: "Using configured local Windows runtime..." });
+    if (!isWindowsRuntimeReady(configuredRuntimeDir)) {
+      throw new Error(`Configured Windows runtime path is invalid: ${configuredRuntimeDir}`);
+    }
+    return;
+  }
+
+  if (config.windowsRuntimeArchivePath) {
+    const archivePath = path.resolve(config.windowsRuntimeArchivePath);
+    if (!fs.existsSync(archivePath)) {
+      throw new Error(`Windows runtime archive not found: ${archivePath}`);
+    }
+    progress?.report({ message: "Installing Windows runtime from local archive..." });
+    await installWindowsRuntimeFromZip(archivePath, progress);
+    return;
+  }
+
+  if (!config.windowsRuntimeUrl) {
+    throw new Error(
+      "Windows runtime is not installed. Set mitmProxy.windowsRuntimePath, " +
+      "mitmProxy.windowsRuntimeArchivePath, or mitmProxy.windowsRuntimeUrl."
+    );
+  }
+
+  const runtimeRoot = path.join(extensionStorageDir, "windows-runtime");
+  const downloadDir = path.join(runtimeRoot, "_downloads");
+  const zipPath = path.join(downloadDir, `mitm-proxy-runtime-win32-${process.arch}-${config.windowsRuntimeVersion}.zip`);
+
+  fs.mkdirSync(downloadDir, { recursive: true });
+  await downloadFile(config.windowsRuntimeUrl, zipPath, config.windowsRuntimeSha256, progress);
+  await installWindowsRuntimeFromZip(zipPath, progress);
 }
 
 async function ensureWindowsRuntime() {
   if (process.platform !== "win32") {
     return;
   }
-  if (isWindowsRuntimeReady()) {
+  if (isWindowsRuntimeReady(getActiveWindowsRuntimeDir())) {
     return;
   }
   if (!windowsRuntimeReadyPromise) {
@@ -259,8 +308,9 @@ async function ensureWindowsRuntime() {
 async function getProxyEngineCommand() {
   if (process.platform === "win32") {
     await ensureWindowsRuntime();
+    const runtimeDir = getActiveWindowsRuntimeDir();
     return {
-      command: getWindowsRuntimeEntrypoint("proxyEngine"),
+      command: getWindowsRuntimeEntrypoint("proxyEngine", runtimeDir),
       args: [],
     };
   }
@@ -273,8 +323,9 @@ async function getProxyEngineCommand() {
 async function getCertManagerCommand() {
   if (process.platform === "win32") {
     await ensureWindowsRuntime();
+    const runtimeDir = getActiveWindowsRuntimeDir();
     return {
-      command: getWindowsRuntimeEntrypoint("certManager"),
+      command: getWindowsRuntimeEntrypoint("certManager", runtimeDir),
       args: [],
     };
   }

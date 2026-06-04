@@ -16,10 +16,20 @@
     "configuration": {
       "title": "MITM Proxy",
       "properties": {
+        "mitmProxy.windowsRuntimePath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional local Windows runtime directory. Point this to the extracted runtime directory, or to a parent directory containing runtime/. This takes precedence over archive and URL settings."
+        },
+        "mitmProxy.windowsRuntimeArchivePath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional local Windows runtime zip path. The extension extracts this archive into global storage when the runtime is missing or invalid. This takes precedence over windowsRuntimeUrl."
+        },
         "mitmProxy.windowsRuntimeUrl": {
           "type": "string",
           "default": "",
-          "description": "URL for the internal Windows runtime zip. Required on Windows unless the runtime is already installed in extension global storage."
+          "description": "URL for the internal Windows runtime zip. Used when no local runtime path or archive path is configured."
         },
         "mitmProxy.windowsRuntimeSha256": {
           "type": "string",

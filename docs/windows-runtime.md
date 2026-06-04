@@ -33,7 +33,26 @@ The released zip must be published to, or remain downloadable from, an internal 
 
 ## Extension Settings
 
-Configure these settings on Windows:
+For manual local testing, configure a local runtime archive path:
+
+```json
+{
+  "mitmProxy.windowsRuntimeVersion": "0.1.0",
+  "mitmProxy.windowsRuntimeArchivePath": "C:\\Users\\me\\Downloads\\mitm-proxy-runtime-win32-x64-0.1.0.zip",
+  "mitmProxy.windowsRuntimeSha256": ""
+}
+```
+
+You can also point directly to an extracted runtime directory:
+
+```json
+{
+  "mitmProxy.windowsRuntimeVersion": "0.1.0",
+  "mitmProxy.windowsRuntimePath": "C:\\tools\\mitm-proxy-runtime\\runtime"
+}
+```
+
+For internal hosted distribution, configure the runtime URL:
 
 ```json
 {
@@ -44,6 +63,12 @@ Configure these settings on Windows:
 ```
 
 `windowsRuntimeSha256` is optional for local testing, but should be set for internal distribution.
+
+Runtime source priority:
+
+1. `mitmProxy.windowsRuntimePath`
+2. `mitmProxy.windowsRuntimeArchivePath`
+3. `mitmProxy.windowsRuntimeUrl`
 
 ## Runtime Layout
 
