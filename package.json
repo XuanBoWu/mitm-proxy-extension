@@ -7,9 +7,32 @@
   "engines": {
     "vscode": "^1.74.0"
   },
+  "scripts": {
+    "runtime:windows": "powershell -ExecutionPolicy Bypass -File scripts/build-windows-runtime.ps1"
+  },
   "activationEvents": [],
   "main": "./extension.js",
   "contributes": {
+    "configuration": {
+      "title": "MITM Proxy",
+      "properties": {
+        "mitmProxy.windowsRuntimeUrl": {
+          "type": "string",
+          "default": "",
+          "description": "URL for the internal Windows runtime zip. Required on Windows unless the runtime is already installed in extension global storage."
+        },
+        "mitmProxy.windowsRuntimeSha256": {
+          "type": "string",
+          "default": "",
+          "description": "Optional SHA-256 checksum for the Windows runtime zip. Leave empty to skip checksum validation."
+        },
+        "mitmProxy.windowsRuntimeVersion": {
+          "type": "string",
+          "default": "0.1.0",
+          "description": "Expected Windows runtime version. Changing this value forces the extension to install that runtime version."
+        }
+      }
+    },
     "commands": [
       {
         "command": "mitm-proxy.startProxy",

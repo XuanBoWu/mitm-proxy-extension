@@ -4,6 +4,8 @@ const path = require("path");
 const fs = require("fs");
 const os = require("os");
 const http = require("http");
+const https = require("https");
+const crypto = require("crypto");
 
 let proxyProcess = null;
 let outputChannel = null;
@@ -16,7 +18,10 @@ let pollingTimer = null;
 let knownFlowIds = new Set();
 
 const TOOLS_DIR = path.join(__dirname, "tools");
-const CERT_DIR = path.join(__dirname, "certificate");
+const DEFAULT_WINDOWS_RUNTIME_VERSION = "0.1.0";
+let extensionStorageDir = null;
+let certDir = path.join(__dirname, "certificate");
+let windowsRuntimeReadyPromise = null;
 
 function getPythonCmd() {
   const venvPython = path.join(__dirname, ".venv", "bin", "python3");
@@ -26,10 +31,257 @@ function getPythonCmd() {
   return process.platform === "win32" ? "python" : "python3";
 }
 
+function getRuntimeConfig() {
+  const config = vscode.workspace.getConfiguration("mitmProxy");
+  return {
+    windowsRuntimeUrl: String(config.get("windowsRuntimeUrl", "") || "").trim(),
+    windowsRuntimeSha256: String(config.get("windowsRuntimeSha256", "") || "").trim().toLowerCase(),
+    windowsRuntimeVersion: String(config.get("windowsRuntimeVersion", DEFAULT_WINDOWS_RUNTIME_VERSION) || DEFAULT_WINDOWS_RUNTIME_VERSION).trim(),
+  };
+}
+
+function initializeRuntimeStorage(context) {
+  extensionStorageDir = context.globalStorageUri.fsPath;
+  certDir = path.join(extensionStorageDir, "mitmproxy-conf");
+  fs.mkdirSync(extensionStorageDir, { recursive: true });
+  fs.mkdirSync(certDir, { recursive: true });
+  log(`Extension storage: ${extensionStorageDir}`);
+  log(`mitmproxy confdir: ${certDir}`);
+}
+
 function log(msg) {
   if (outputChannel) {
     outputChannel.appendLine(`[${new Date().toLocaleTimeString()}] ${msg}`);
   }
+}
+
+function runProcess(command, args, options = {}) {
+  return new Promise((resolve, reject) => {
+    const proc = spawn(command, args, {
+      cwd: options.cwd || __dirname,
+      env: options.env || process.env,
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+    });
+    let stdout = "";
+    let stderr = "";
+
+    proc.stdout.on("data", (data) => {
+      const text = data.toString();
+      stdout += text;
+      if (options.logOutput) {
+        log(text.trim());
+      }
+    });
+    proc.stderr.on("data", (data) => {
+      const text = data.toString();
+      stderr += text;
+      if (options.logOutput) {
+        log(text.trim());
+      }
+    });
+    proc.on("error", (err) => reject(new Error(`${command} failed to start: ${err.message}`)));
+    proc.on("close", (code) => {
+      if (code === 0) {
+        resolve({ stdout, stderr });
+      } else {
+        const detail = (stderr || stdout).trim();
+        reject(new Error(`${command} exited with code ${code}${detail ? `: ${detail}` : ""}`));
+      }
+    });
+  });
+}
+
+function getWindowsRuntimeDir() {
+  const config = getRuntimeConfig();
+  return path.join(extensionStorageDir, "windows-runtime", config.windowsRuntimeVersion);
+}
+
+function getWindowsRuntimeManifestPath(runtimeDir = getWindowsRuntimeDir()) {
+  return path.join(runtimeDir, "manifest.json");
+}
+
+function readJsonFile(filePath) {
+  return JSON.parse(fs.readFileSync(filePath, "utf-8"));
+}
+
+function getWindowsRuntimeEntrypoint(name, runtimeDir = getWindowsRuntimeDir()) {
+  const manifestPath = getWindowsRuntimeManifestPath(runtimeDir);
+  if (!fs.existsSync(manifestPath)) {
+    return null;
+  }
+  const manifest = readJsonFile(manifestPath);
+  const relativePath = manifest.entrypoints?.[name];
+  if (!relativePath) {
+    return null;
+  }
+  const exePath = path.join(runtimeDir, relativePath);
+  return fs.existsSync(exePath) ? exePath : null;
+}
+
+function isWindowsRuntimeReady() {
+  const runtimeDir = getWindowsRuntimeDir();
+  const manifestPath = getWindowsRuntimeManifestPath(runtimeDir);
+  if (!fs.existsSync(manifestPath)) {
+    return false;
+  }
+
+  try {
+    const config = getRuntimeConfig();
+    const manifest = readJsonFile(manifestPath);
+    return manifest.platform === "win32" &&
+      manifest.arch === process.arch &&
+      manifest.runtimeVersion === config.windowsRuntimeVersion &&
+      !!getWindowsRuntimeEntrypoint("proxyEngine", runtimeDir) &&
+      !!getWindowsRuntimeEntrypoint("certManager", runtimeDir);
+  } catch (err) {
+    log(`Invalid Windows runtime manifest: ${err.message}`);
+    return false;
+  }
+}
+
+function downloadFile(url, destinationPath, expectedSha256, progress) {
+  return new Promise((resolve, reject) => {
+    const parsedUrl = new URL(url);
+    const client = parsedUrl.protocol === "https:" ? https : http;
+    const hash = crypto.createHash("sha256");
+    const file = fs.createWriteStream(destinationPath);
+
+    progress?.report({ message: "Downloading Windows runtime..." });
+    const request = client.get(parsedUrl, (response) => {
+      if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
+        file.close(() => {
+          fs.rmSync(destinationPath, { force: true });
+          const redirected = new URL(response.headers.location, parsedUrl).toString();
+          downloadFile(redirected, destinationPath, expectedSha256, progress).then(resolve, reject);
+        });
+        return;
+      }
+
+      if (response.statusCode !== 200) {
+        file.close(() => fs.rmSync(destinationPath, { force: true }));
+        reject(new Error(`Runtime download failed with HTTP ${response.statusCode}`));
+        return;
+      }
+
+      response.on("data", (chunk) => hash.update(chunk));
+      response.pipe(file);
+      file.on("finish", () => {
+        file.close(() => {
+          const actualSha256 = hash.digest("hex");
+          if (expectedSha256 && actualSha256 !== expectedSha256) {
+            fs.rmSync(destinationPath, { force: true });
+            reject(new Error(`Runtime SHA-256 mismatch: expected ${expectedSha256}, got ${actualSha256}`));
+            return;
+          }
+          resolve({ sha256: actualSha256 });
+        });
+      });
+    });
+
+    request.on("error", (err) => {
+      file.close(() => fs.rmSync(destinationPath, { force: true }));
+      reject(err);
+    });
+  });
+}
+
+async function expandZipWindows(zipPath, destinationDir, progress) {
+  progress?.report({ message: "Extracting Windows runtime..." });
+  fs.rmSync(destinationDir, { recursive: true, force: true });
+  fs.mkdirSync(destinationDir, { recursive: true });
+  await runProcess("powershell.exe", [
+    "-NoProfile",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-Command",
+    "Expand-Archive -LiteralPath $args[0] -DestinationPath $args[1] -Force",
+    zipPath,
+    destinationDir,
+  ], { logOutput: true });
+}
+
+async function installWindowsRuntime(progress) {
+  const config = getRuntimeConfig();
+  if (!config.windowsRuntimeUrl) {
+    throw new Error("Windows runtime is not installed. Set mitmProxy.windowsRuntimeUrl to the internal runtime zip URL.");
+  }
+
+  const runtimeRoot = path.join(extensionStorageDir, "windows-runtime");
+  const runtimeDir = getWindowsRuntimeDir();
+  const downloadDir = path.join(runtimeRoot, "_downloads");
+  const stagingDir = path.join(runtimeRoot, "_staging", config.windowsRuntimeVersion);
+  const zipPath = path.join(downloadDir, `mitm-proxy-runtime-win32-${process.arch}-${config.windowsRuntimeVersion}.zip`);
+
+  fs.mkdirSync(downloadDir, { recursive: true });
+  await downloadFile(config.windowsRuntimeUrl, zipPath, config.windowsRuntimeSha256, progress);
+  await expandZipWindows(zipPath, stagingDir, progress);
+
+  const extractedRuntimeDir = path.join(stagingDir, "runtime");
+  if (!fs.existsSync(getWindowsRuntimeManifestPath(extractedRuntimeDir))) {
+    throw new Error("Runtime archive must contain runtime/manifest.json");
+  }
+
+  fs.rmSync(runtimeDir, { recursive: true, force: true });
+  fs.mkdirSync(path.dirname(runtimeDir), { recursive: true });
+  fs.renameSync(extractedRuntimeDir, runtimeDir);
+  fs.rmSync(stagingDir, { recursive: true, force: true });
+
+  if (!isWindowsRuntimeReady()) {
+    throw new Error("Windows runtime installation completed but validation failed");
+  }
+}
+
+async function ensureWindowsRuntime() {
+  if (process.platform !== "win32") {
+    return;
+  }
+  if (isWindowsRuntimeReady()) {
+    return;
+  }
+  if (!windowsRuntimeReadyPromise) {
+    windowsRuntimeReadyPromise = vscode.window.withProgress({
+      location: vscode.ProgressLocation.Notification,
+      title: "Preparing MITM Proxy Windows runtime",
+      cancellable: false,
+    }, async (progress) => {
+      try {
+        await installWindowsRuntime(progress);
+      } catch (err) {
+        windowsRuntimeReadyPromise = null;
+        throw err;
+      }
+    });
+  }
+  return windowsRuntimeReadyPromise;
+}
+
+async function getProxyEngineCommand() {
+  if (process.platform === "win32") {
+    await ensureWindowsRuntime();
+    return {
+      command: getWindowsRuntimeEntrypoint("proxyEngine"),
+      args: [],
+    };
+  }
+  return {
+    command: getPythonCmd(),
+    args: [path.join(TOOLS_DIR, "proxy_engine.py")],
+  };
+}
+
+async function getCertManagerCommand() {
+  if (process.platform === "win32") {
+    await ensureWindowsRuntime();
+    return {
+      command: getWindowsRuntimeEntrypoint("certManager"),
+      args: [],
+    };
+  }
+  return {
+    command: getPythonCmd(),
+    args: [path.join(TOOLS_DIR, "cert_manager.py")],
+  };
 }
 
 // ===== mitmweb REST API helpers =====
@@ -305,23 +557,27 @@ async function clearDeviceProxy() {
 
 // ===== Proxy Engine Management =====
 
-function startProxyEngine(port) {
+async function startProxyEngine(port) {
+  if (proxyProcess) {
+    return { success: true, message: "Proxy already running" };
+  }
+
+  const engine = await getProxyEngineCommand();
+
   return new Promise((resolve, reject) => {
-    if (proxyProcess) {
-      resolve({ success: true, message: "Proxy already running" });
-      return;
-    }
-
-    const scriptPath = path.join(TOOLS_DIR, "proxy_engine.py");
-    const pythonCmd = getPythonCmd();
-
     log(`Starting proxy engine on port ${port}...`);
 
     // Use a random high port for web UI to avoid conflicts
     const wPort = Math.floor(Math.random() * 1000) + 18080;
 
-    proxyProcess = spawn(pythonCmd, [scriptPath, "--port", String(port), "--web-port", String(wPort)], {
+    proxyProcess = spawn(engine.command, [
+      ...engine.args,
+      "--port", String(port),
+      "--web-port", String(wPort),
+      "--confdir", certDir,
+    ], {
       stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
     });
 
     let started = false;
@@ -376,6 +632,10 @@ function startProxyEngine(port) {
       stopFlowPolling();
       webPort = null;
       authToken = null;
+      if (!started) {
+        started = true;
+        reject(new Error(`Proxy engine exited before startup completed (code ${code})`));
+      }
       if (panel) {
         panel.webview.postMessage({
           command: "proxyStatus",
@@ -609,7 +869,7 @@ async function createPanel() {
         break;
 
       case "pushCert": {
-        const caPath = path.join(CERT_DIR, "mitmproxy-ca-cert.pem");
+        const caPath = path.join(certDir, "mitmproxy-ca-cert.pem");
         if (!fs.existsSync(caPath)) {
           panel.webview.postMessage({
             command: "certStatus",
@@ -618,8 +878,18 @@ async function createPanel() {
           });
           break;
         }
-        const scriptPath = path.join(TOOLS_DIR, "cert_manager.py");
-        const proc = spawn(getPythonCmd(), [scriptPath, "push", "--cert", caPath]);
+        let certManager;
+        try {
+          certManager = await getCertManagerCommand();
+        } catch (err) {
+          panel.webview.postMessage({
+            command: "certStatus",
+            success: false,
+            message: err.message,
+          });
+          break;
+        }
+        const proc = spawn(certManager.command, [...certManager.args, "push", "--cert", caPath], { windowsHide: true });
         let output = "";
         proc.stdout.on("data", (d) => (output += d));
         proc.stderr.on("data", (d) => log(`cert: ${d}`));
@@ -912,6 +1182,7 @@ async function loadSession() {
 function activate(context) {
   outputChannel = vscode.window.createOutputChannel("MITM Proxy");
   log("MITM Proxy extension activated");
+  initializeRuntimeStorage(context);
 
   const showPanelCmd = vscode.commands.registerCommand("mitm-proxy.showPanel", () => {
     createPanel();
@@ -940,14 +1211,20 @@ function activate(context) {
   });
 
   const pushCertCmd = vscode.commands.registerCommand("mitm-proxy.pushCert", async () => {
-    const caPath = path.join(CERT_DIR, "mitmproxy-ca-cert.pem");
+    const caPath = path.join(certDir, "mitmproxy-ca-cert.pem");
     if (!fs.existsSync(caPath)) {
       vscode.window.showErrorMessage("CA certificate not found. Run the proxy once first to generate it.");
       return;
     }
 
-    const scriptPath = path.join(TOOLS_DIR, "cert_manager.py");
-    const proc = spawn(getPythonCmd(), [scriptPath, "push", "--cert", caPath]);
+    let certManager;
+    try {
+      certManager = await getCertManagerCommand();
+    } catch (err) {
+      vscode.window.showErrorMessage(err.message);
+      return;
+    }
+    const proc = spawn(certManager.command, [...certManager.args, "push", "--cert", caPath], { windowsHide: true });
     let output = "";
     proc.stdout.on("data", d => output += d);
     proc.stderr.on("data", d => log(`cert: ${d}`));

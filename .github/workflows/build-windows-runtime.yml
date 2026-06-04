@@ -1,0 +1,47 @@
+name: Build Windows Runtime
+
+on:
+  workflow_dispatch:
+    inputs:
+      runtime_version:
+        description: "Runtime package version"
+        required: true
+        default: "0.1.0"
+  push:
+    branches:
+      - tmp-windows-runtime-ci
+    paths:
+      - ".github/workflows/build-windows-runtime.yml"
+      - "requirements-runtime.txt"
+      - "scripts/build-windows-runtime.ps1"
+      - "tools/**"
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build runtime
+        shell: pwsh
+        run: |
+          $version = "${{ github.event.inputs.runtime_version }}"
+          if (-not $version) {
+            $version = "0.1.0"
+          }
+          .\scripts\build-windows-runtime.ps1 -RuntimeVersion $version -Python python -OutputDir dist
+
+      - name: Upload runtime artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mitm-proxy-runtime-win32-x64
+          path: |
+            dist/*.zip
+            dist/*.sha256

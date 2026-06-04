@@ -1,0 +1,2 @@
+mitmproxy==12.2.2
+pyinstaller==6.11.1
