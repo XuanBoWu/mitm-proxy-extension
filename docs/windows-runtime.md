@@ -31,9 +31,27 @@ Before release, CI smoke-tests the runtime by:
 
 The released zip must be published to, or remain downloadable from, an internal URL that VS Code can access.
 
-## Extension Settings
+## Manual Installation
 
-For manual local testing, configure a local runtime archive path:
+For manual local testing, install the VSIX and download the `windows-runtime-package` artifact. The artifact itself is a zip that contains:
+
+```text
+mitm-proxy-runtime-win32-x64-<runtimeVersion>.zip
+mitm-proxy-runtime-win32-x64-<runtimeVersion>.zip.sha256
+```
+
+On first proxy start, if no runtime is cached and no runtime source is configured, the extension prompts you to select a runtime package. You can select either:
+
+- the inner `mitm-proxy-runtime-win32-x64-<runtimeVersion>.zip`
+- the GitHub artifact zip that contains the runtime zip
+
+The extension extracts the runtime into global storage and reuses it on later starts.
+
+## Optional Extension Settings
+
+Settings are not required for manual testing. They are available for managed internal distribution or development.
+
+Configure a local runtime archive path:
 
 ```json
 {
@@ -66,9 +84,12 @@ For internal hosted distribution, configure the runtime URL:
 
 Runtime source priority:
 
-1. `mitmProxy.windowsRuntimePath`
-2. `mitmProxy.windowsRuntimeArchivePath`
-3. `mitmProxy.windowsRuntimeUrl`
+1. cached runtime in extension global storage
+2. `mitmProxy.windowsRuntimePath`
+3. `mitmProxy.windowsRuntimeArchivePath`
+4. `mitmProxy.windowsRuntimeUrl`
+5. built-in internal URL, if configured by the extension build
+6. file picker prompt
 
 ## Runtime Layout
 

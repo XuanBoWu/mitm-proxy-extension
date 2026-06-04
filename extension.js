@@ -19,6 +19,7 @@ let knownFlowIds = new Set();
 
 const TOOLS_DIR = path.join(__dirname, "tools");
 const DEFAULT_WINDOWS_RUNTIME_VERSION = "0.1.0";
+const DEFAULT_WINDOWS_RUNTIME_URL = "";
 let extensionStorageDir = null;
 let certDir = path.join(__dirname, "certificate");
 let windowsRuntimeReadyPromise = null;
@@ -40,6 +41,10 @@ function getRuntimeConfig() {
     windowsRuntimeSha256: String(config.get("windowsRuntimeSha256", "") || "").trim().toLowerCase(),
     windowsRuntimeVersion: String(config.get("windowsRuntimeVersion", DEFAULT_WINDOWS_RUNTIME_VERSION) || DEFAULT_WINDOWS_RUNTIME_VERSION).trim(),
   };
+}
+
+function getDefaultWindowsRuntimeUrl() {
+  return DEFAULT_WINDOWS_RUNTIME_URL;
 }
 
 function initializeRuntimeStorage(context) {
@@ -161,6 +166,44 @@ function getActiveWindowsRuntimeDir() {
   return getWindowsRuntimeDir();
 }
 
+function findNestedRuntimeArchive(searchDir) {
+  const config = getRuntimeConfig();
+  const expectedName = `mitm-proxy-runtime-win32-${process.arch}-${config.windowsRuntimeVersion}.zip`.toLowerCase();
+  const stack = [searchDir];
+  const zipFiles = [];
+
+  while (stack.length > 0) {
+    const currentDir = stack.pop();
+    for (const entry of fs.readdirSync(currentDir, { withFileTypes: true })) {
+      const entryPath = path.join(currentDir, entry.name);
+      if (entry.isDirectory()) {
+        stack.push(entryPath);
+      } else if (entry.isFile() && entry.name.toLowerCase().endsWith(".zip")) {
+        zipFiles.push(entryPath);
+      }
+    }
+  }
+
+  return zipFiles.find(filePath => path.basename(filePath).toLowerCase() === expectedName) ||
+    zipFiles.find(filePath => path.basename(filePath).toLowerCase().startsWith("mitm-proxy-runtime-win32-")) ||
+    null;
+}
+
+async function promptForWindowsRuntimeArchive() {
+  const selected = await vscode.window.showOpenDialog({
+    title: "Select MITM Proxy Windows runtime package",
+    openLabel: "Use Runtime Package",
+    canSelectFiles: true,
+    canSelectFolders: false,
+    canSelectMany: false,
+    filters: {
+      "Runtime Package": ["zip"],
+    },
+  });
+
+  return selected?.[0]?.fsPath || null;
+}
+
 function downloadFile(url, destinationPath, expectedSha256, progress) {
   return new Promise((resolve, reject) => {
     const parsedUrl = new URL(url);
@@ -229,9 +272,18 @@ async function installWindowsRuntimeFromZip(zipPath, progress) {
   const stagingDir = path.join(runtimeRoot, "_staging", config.windowsRuntimeVersion);
   await expandZipWindows(zipPath, stagingDir, progress);
 
-  const extractedRuntimeDir = path.join(stagingDir, "runtime");
+  let extractedRuntimeDir = path.join(stagingDir, "runtime");
   if (!fs.existsSync(getWindowsRuntimeManifestPath(extractedRuntimeDir))) {
-    throw new Error("Runtime archive must contain runtime/manifest.json");
+    const nestedArchivePath = findNestedRuntimeArchive(stagingDir);
+    if (nestedArchivePath) {
+      const nestedStagingDir = path.join(stagingDir, "_runtime");
+      await expandZipWindows(nestedArchivePath, nestedStagingDir, progress);
+      extractedRuntimeDir = path.join(nestedStagingDir, "runtime");
+    }
+  }
+
+  if (!fs.existsSync(getWindowsRuntimeManifestPath(extractedRuntimeDir))) {
+    throw new Error("Runtime archive must contain runtime/manifest.json or a nested mitm-proxy-runtime zip");
   }
 
   fs.rmSync(runtimeDir, { recursive: true, force: true });
@@ -244,7 +296,7 @@ async function installWindowsRuntimeFromZip(zipPath, progress) {
   }
 }
 
-async function installWindowsRuntime(progress) {
+async function installWindowsRuntime(progress, selectedArchivePath = null) {
   const config = getRuntimeConfig();
   const configuredRuntimeDir = getConfiguredWindowsRuntimePath();
   if (configuredRuntimeDir) {
@@ -265,11 +317,15 @@ async function installWindowsRuntime(progress) {
     return;
   }
 
-  if (!config.windowsRuntimeUrl) {
-    throw new Error(
-      "Windows runtime is not installed. Set mitmProxy.windowsRuntimePath, " +
-      "mitmProxy.windowsRuntimeArchivePath, or mitmProxy.windowsRuntimeUrl."
-    );
+  if (selectedArchivePath) {
+    progress?.report({ message: "Installing Windows runtime from selected package..." });
+    await installWindowsRuntimeFromZip(selectedArchivePath, progress);
+    return;
+  }
+
+  const runtimeUrl = config.windowsRuntimeUrl || getDefaultWindowsRuntimeUrl();
+  if (!runtimeUrl) {
+    throw new Error("Windows runtime package was not selected.");
   }
 
   const runtimeRoot = path.join(extensionStorageDir, "windows-runtime");
@@ -277,7 +333,7 @@ async function installWindowsRuntime(progress) {
   const zipPath = path.join(downloadDir, `mitm-proxy-runtime-win32-${process.arch}-${config.windowsRuntimeVersion}.zip`);
 
   fs.mkdirSync(downloadDir, { recursive: true });
-  await downloadFile(config.windowsRuntimeUrl, zipPath, config.windowsRuntimeSha256, progress);
+  await downloadFile(runtimeUrl, zipPath, config.windowsRuntimeSha256, progress);
   await installWindowsRuntimeFromZip(zipPath, progress);
 }
 
@@ -288,6 +344,17 @@ async function ensureWindowsRuntime() {
   if (isWindowsRuntimeReady(getActiveWindowsRuntimeDir())) {
     return;
   }
+  const config = getRuntimeConfig();
+  const hasRuntimeSource = !!(
+    getConfiguredWindowsRuntimePath() ||
+    config.windowsRuntimeArchivePath ||
+    config.windowsRuntimeUrl ||
+    getDefaultWindowsRuntimeUrl()
+  );
+  const selectedArchivePath = hasRuntimeSource ? null : await promptForWindowsRuntimeArchive();
+  if (!hasRuntimeSource && !selectedArchivePath) {
+    throw new Error("Windows runtime is required to start the proxy. Select a runtime package and try again.");
+  }
   if (!windowsRuntimeReadyPromise) {
     windowsRuntimeReadyPromise = vscode.window.withProgress({
       location: vscode.ProgressLocation.Notification,
@@ -295,7 +362,7 @@ async function ensureWindowsRuntime() {
       cancellable: false,
     }, async (progress) => {
       try {
-        await installWindowsRuntime(progress);
+        await installWindowsRuntime(progress, selectedArchivePath);
       } catch (err) {
         windowsRuntimeReadyPromise = null;
         throw err;
