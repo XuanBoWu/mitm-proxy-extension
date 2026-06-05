@@ -1633,7 +1633,7 @@ async function exportHar() {
   const har = {
     log: {
       version: "1.2",
-      creator: { name: "SecMP", version: "0.1.0" },
+      creator: { name: "SecMP", version: extensionPackage.version },
       entries: capturedFlows.map(f => ({
         startedDateTime: new Date(f.req_timestamp * 1000).toISOString(),
         time: f.duration_ms || 0,
