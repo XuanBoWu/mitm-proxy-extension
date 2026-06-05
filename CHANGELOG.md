@@ -2,6 +2,11 @@
 
 All notable changes to SecMP are documented in this file.
 
+## Unreleased
+
+- Added an Environment / About panel with extension, runtime, ADB, mitmproxy, platform, and update status.
+- Added in-panel controls for checking updates, changing the auto-check interval, cleaning runtime cache, opening the release page, and copying environment diagnostics.
+
 ## 0.1.1 - 2026-06-05
 
 - Added GitHub Release update checks and VSIX download/install flow without requiring Marketplace publishing.

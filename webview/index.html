@@ -138,7 +138,93 @@
         <button id="saveSessionBtn" class="btn btn-block btn-sm">保存会话</button>
         <button id="loadSessionBtn" class="btn btn-block btn-sm">加载会话</button>
       </div>
+
+      <button id="environmentSummary" class="environment-summary" type="button" aria-expanded="false">
+        <span class="environment-summary-main">SecMP v<span id="envSummaryVersion">-</span></span>
+        <span class="environment-summary-state">
+          <span id="envSummaryDot" class="dot neutral"></span>
+          <span id="envSummaryText">Checking</span>
+        </span>
+      </button>
         </div><!-- .panel-body -->
+
+        <div id="environmentPanel" class="environment-panel" hidden>
+          <div class="environment-panel-header">
+            <div>
+              <div class="environment-title">Environment / About</div>
+              <div id="environmentSubtitle" class="environment-subtitle">SecMP environment status</div>
+            </div>
+            <button id="environmentCloseBtn" class="collapse-btn" title="关闭">×</button>
+          </div>
+
+          <div class="environment-panel-body">
+            <section class="environment-section">
+              <h3>Version</h3>
+              <dl class="environment-dl">
+                <dt>Extension</dt><dd id="envExtensionVersion">-</dd>
+                <dt>Runtime</dt><dd id="envRuntimeVersion">-</dd>
+                <dt>Runtime API</dt><dd id="envRuntimeApi">-</dd>
+                <dt>mitmproxy</dt><dd id="envMitmproxyVersion">-</dd>
+              </dl>
+            </section>
+
+            <section class="environment-section">
+              <h3>Environment</h3>
+              <dl class="environment-dl">
+                <dt>ADB</dt><dd id="envAdbStatus">-</dd>
+                <dt>ADB version</dt><dd id="envAdbVersion">-</dd>
+                <dt>Device</dt><dd id="envDevice">-</dd>
+                <dt>Platform</dt><dd id="envPlatform">-</dd>
+              </dl>
+            </section>
+
+            <section class="environment-section">
+              <h3>Runtime</h3>
+              <dl class="environment-dl">
+                <dt>Status</dt><dd id="envRuntimeStatus">-</dd>
+                <dt>Source</dt><dd id="envRuntimeSource">-</dd>
+                <dt>Path</dt><dd id="envRuntimePath" class="mono-value">-</dd>
+              </dl>
+            </section>
+
+            <section class="environment-section">
+              <h3>Updates</h3>
+              <div class="environment-setting-row">
+                <label for="envUpdateEnabled">Auto check</label>
+                <label class="switch">
+                  <input type="checkbox" id="envUpdateEnabled">
+                  <span class="switch-track"></span>
+                </label>
+              </div>
+              <div class="environment-setting-row">
+                <label for="envUpdateInterval">Check interval</label>
+                <select id="envUpdateInterval">
+                  <option value="1">1 h</option>
+                  <option value="6">6 h</option>
+                  <option value="12">12 h</option>
+                  <option value="24">24 h</option>
+                  <option value="72">3 days</option>
+                  <option value="168">7 days</option>
+                </select>
+              </div>
+              <dl class="environment-dl">
+                <dt>Last checked</dt><dd id="envUpdateLastChecked">Never</dd>
+                <dt>Latest</dt><dd id="envUpdateLatest">-</dd>
+                <dt>Status</dt><dd id="envUpdateStatus">-</dd>
+              </dl>
+            </section>
+
+            <div id="environmentActionStatus" class="environment-action-status" hidden></div>
+          </div>
+
+          <div class="environment-actions">
+            <button id="envDownloadUpdateBtn" class="btn btn-sm btn-primary" style="display:none;">Download and Install</button>
+            <button id="envCheckUpdateBtn" class="btn btn-sm">Check Now</button>
+            <button id="envOpenReleaseBtn" class="btn btn-sm btn-outline">Open Release</button>
+            <button id="envCleanRuntimeBtn" class="btn btn-sm btn-outline">Clean Runtime</button>
+            <button id="envCopyInfoBtn" class="btn btn-sm btn-outline">Copy Info</button>
+          </div>
+        </div>
     </aside>
 
     <div id="leftGutter" class="gutter gutter-left"></div>

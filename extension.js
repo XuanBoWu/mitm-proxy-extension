@@ -35,6 +35,7 @@ const DEFAULT_WINDOWS_RUNTIME_SOURCES = {
 let extensionStorageDir = null;
 let certDir = path.join(__dirname, "certificate");
 let windowsRuntimeReadyPromise = null;
+let latestExtensionReleaseStatus = null;
 
 function loadExtensionPackage() {
   try {
@@ -677,8 +678,27 @@ function getExtensionUpdateFromRelease(release) {
 }
 
 async function fetchLatestExtensionUpdate() {
+  const status = await fetchLatestExtensionReleaseStatus();
+  return status.update || null;
+}
+
+async function fetchLatestExtensionReleaseStatus() {
   const release = await requestJson(GITHUB_RELEASE_API_URL);
-  return getExtensionUpdateFromRelease(release);
+  const currentVersion = normalizeVersion(extensionPackage.version);
+  const latestVersion = normalizeVersion(release?.tag_name);
+  const releaseUrl = release?.html_url || (latestVersion ? `${DEFAULT_WINDOWS_RUNTIME_REPO}/releases/tag/v${latestVersion}` : DEFAULT_WINDOWS_RUNTIME_REPO);
+  const update = getExtensionUpdateFromRelease(release);
+  latestExtensionReleaseStatus = {
+    status: update ? "updateAvailable" : "upToDate",
+    currentVersion,
+    latestVersion: latestVersion || currentVersion,
+    tagName: release?.tag_name || "",
+    releaseUrl,
+    checkedAt: Date.now(),
+    update,
+    error: "",
+  };
+  return latestExtensionReleaseStatus;
 }
 
 async function openRelease(update) {
@@ -746,12 +766,14 @@ async function promptForExtensionUpdate(update) {
 
 async function checkForExtensionUpdate(context, options = {}) {
   const manual = Boolean(options.manual);
+  const notify = options.notify !== false;
+  const showProgress = options.progress !== false;
   const config = getUpdateConfig();
   if (!manual && !config.updateCheckEnabled) {
-    return;
+    return latestExtensionReleaseStatus;
   }
   if (!manual && !context?.globalState) {
-    return;
+    return latestExtensionReleaseStatus;
   }
 
   const now = Date.now();
@@ -759,37 +781,232 @@ async function checkForExtensionUpdate(context, options = {}) {
     const lastCheckAt = Number(context.globalState.get(UPDATE_LAST_CHECK_KEY, 0) || 0);
     const intervalMs = config.updateCheckIntervalHours * 60 * 60 * 1000;
     if (lastCheckAt && now - lastCheckAt < intervalMs) {
-      return;
+      return latestExtensionReleaseStatus;
     }
     await context.globalState.update(UPDATE_LAST_CHECK_KEY, now);
   }
 
   try {
-    const update = manual
+    const status = manual && showProgress
       ? await vscode.window.withProgress({
         location: vscode.ProgressLocation.Notification,
         title: "Checking SecMP updates",
         cancellable: false,
       }, async (progress) => {
         progress.report({ message: "Checking GitHub Release..." });
-        return fetchLatestExtensionUpdate();
+        return fetchLatestExtensionReleaseStatus();
       })
-      : await fetchLatestExtensionUpdate();
+      : await fetchLatestExtensionReleaseStatus();
 
-    if (!update) {
-      if (manual) {
+    if (!status.update) {
+      if (manual && notify) {
         vscode.window.showInformationMessage(`SecMP is up to date (${extensionPackage.version}).`);
       }
-      return;
+      return status;
     }
 
-    await promptForExtensionUpdate(update);
+    if (notify) {
+      await promptForExtensionUpdate(status.update);
+    }
+    return status;
   } catch (err) {
     log(`Update check failed: ${err.message}`);
-    if (manual) {
+    latestExtensionReleaseStatus = {
+      status: "error",
+      currentVersion: normalizeVersion(extensionPackage.version),
+      latestVersion: "",
+      tagName: "",
+      releaseUrl: DEFAULT_WINDOWS_RUNTIME_REPO,
+      checkedAt: Date.now(),
+      update: null,
+      error: err.message,
+    };
+    if (manual && notify) {
       vscode.window.showErrorMessage(`Failed to check SecMP updates: ${err.message}`);
     }
+    return latestExtensionReleaseStatus;
   }
+}
+
+function getLastUpdateCheckAt(context) {
+  return Number(context?.globalState?.get(UPDATE_LAST_CHECK_KEY, 0) || 0);
+}
+
+function getRuntimeEnvironmentInfo() {
+  const config = getRuntimeConfig();
+  const runtimeDir = getActiveWindowsRuntimeDir();
+  const manifestPath = getWindowsRuntimeManifestPath(runtimeDir);
+  const info = {
+    status: "notRequired",
+    valid: process.platform !== "win32",
+    version: process.platform === "win32" ? config.windowsRuntimeVersion : "source",
+    apiVersion: process.platform === "win32" ? WINDOWS_RUNTIME_API_VERSION : null,
+    platform: process.platform,
+    arch: process.arch,
+    source: process.platform === "win32" ? "VS Code global storage" : "Source/dev",
+    path: process.platform === "win32" ? runtimeDir : TOOLS_DIR,
+    error: "",
+  };
+
+  if (process.platform !== "win32") {
+    return info;
+  }
+
+  if (config.windowsRuntimePath) {
+    info.source = "Configured path";
+  } else if (config.windowsRuntimeArchivePath) {
+    info.source = "Configured archive";
+  } else if (config.windowsRuntimeUrl) {
+    info.source = "Configured URL";
+  }
+
+  if (!fs.existsSync(manifestPath)) {
+    info.status = "missing";
+    info.valid = false;
+    return info;
+  }
+
+  try {
+    const manifest = readJsonFile(manifestPath);
+    info.version = manifest.runtimeVersion || config.windowsRuntimeVersion;
+    info.apiVersion = getManifestRuntimeApiVersion(manifest);
+    info.valid = isWindowsRuntimeReady(runtimeDir);
+    info.status = info.valid ? "ready" : "invalid";
+    if (!info.valid) {
+      info.error = "Runtime manifest or entrypoints do not match the current extension requirements.";
+    }
+  } catch (err) {
+    info.status = "invalid";
+    info.valid = false;
+    info.error = err.message;
+  }
+  return info;
+}
+
+async function getAdbEnvironmentInfo() {
+  return new Promise((resolve) => {
+    exec("adb version", { timeout: 5000 }, (err, stdout) => {
+      if (err) {
+        resolve({
+          available: false,
+          version: "",
+          detail: "",
+          error: err.message,
+        });
+        return;
+      }
+      const firstLine = stdout.trim().split(/\r?\n/)[0] || "";
+      const match = firstLine.match(/version\s+([^\s]+)/i);
+      resolve({
+        available: true,
+        version: match ? match[1] : "",
+        detail: firstLine,
+        error: "",
+      });
+    });
+  });
+}
+
+async function getMitmproxyEnvironmentInfo() {
+  if (!webPort || !authToken) {
+    return { running: false, version: "", error: "" };
+  }
+  try {
+    const state = await mitmwebGetJson("/state.json");
+    return {
+      running: true,
+      version: state.version || "",
+      error: "",
+    };
+  } catch (err) {
+    return {
+      running: false,
+      version: "",
+      error: err.message,
+    };
+  }
+}
+
+function getUpdateEnvironmentInfo(context) {
+  const config = getUpdateConfig();
+  return {
+    enabled: config.updateCheckEnabled,
+    intervalHours: config.updateCheckIntervalHours,
+    lastCheckedAt: getLastUpdateCheckAt(context),
+    latest: latestExtensionReleaseStatus || {
+      status: "unknown",
+      currentVersion: normalizeVersion(extensionPackage.version),
+      latestVersion: "",
+      tagName: "",
+      releaseUrl: DEFAULT_WINDOWS_RUNTIME_REPO,
+      checkedAt: 0,
+      update: null,
+      error: "",
+    },
+  };
+}
+
+async function getEnvironmentStatus(context) {
+  const [adb, mitmproxy] = await Promise.all([
+    getAdbEnvironmentInfo(),
+    getMitmproxyEnvironmentInfo(),
+  ]);
+  return {
+    extension: {
+      version: normalizeVersion(extensionPackage.version),
+    },
+    runtime: getRuntimeEnvironmentInfo(),
+    adb,
+    device: deviceInfo,
+    mitmproxy,
+    platform: {
+      os: process.platform,
+      arch: process.arch,
+      node: process.version,
+    },
+    updates: getUpdateEnvironmentInfo(context),
+  };
+}
+
+function formatTimestamp(timestamp) {
+  if (!timestamp) return "Never";
+  return new Date(timestamp).toLocaleString();
+}
+
+function formatEnvironmentInfoForClipboard(status) {
+  const lines = [
+    `SecMP Extension: ${status.extension.version}`,
+    `Runtime: ${status.runtime.valid ? "Ready" : status.runtime.status} ${status.runtime.version || ""}`.trim(),
+    `Runtime API: ${status.runtime.apiVersion ?? "-"}`,
+    `Runtime source: ${status.runtime.source}`,
+    `Runtime path: ${status.runtime.path}`,
+    `ADB: ${status.adb.available ? "Available" : "Missing"}`,
+    `ADB version: ${status.adb.version || "-"}`,
+    `Device: ${status.device?.model || "-"}`,
+    `Android: ${status.device?.androidVersion || "-"}`,
+    `Root: ${status.device?.isRoot ? "Yes" : "No"}`,
+    `mitmproxy: ${status.mitmproxy.version || (status.mitmproxy.running ? "Running" : "Not running")}`,
+    `Platform: ${status.platform.os} ${status.platform.arch}`,
+    `Node: ${status.platform.node}`,
+    `Update check: ${status.updates.enabled ? "Enabled" : "Disabled"}`,
+    `Update interval: ${status.updates.intervalHours}h`,
+    `Last checked: ${formatTimestamp(status.updates.lastCheckedAt || status.updates.latest.checkedAt)}`,
+    `Latest release: ${status.updates.latest.latestVersion || "-"}`,
+    `Update status: ${status.updates.latest.status}`,
+  ];
+  if (status.runtime.error) lines.push(`Runtime error: ${status.runtime.error}`);
+  if (status.adb.error) lines.push(`ADB error: ${status.adb.error}`);
+  if (status.updates.latest.error) lines.push(`Update error: ${status.updates.latest.error}`);
+  return lines.join("\n");
+}
+
+async function postEnvironmentStatus(context) {
+  if (!panel) return;
+  const status = await getEnvironmentStatus(context);
+  panel.webview.postMessage({
+    command: "environmentStatus",
+    status,
+  });
 }
 
 async function ensureWindowsRuntime() {
@@ -1308,9 +1525,10 @@ async function createPanel() {
           device: deviceInfo,
           flowCount: capturedFlows.length,
         });
+        await postEnvironmentStatus(context);
         break;
 
-      case "refreshDevice":
+      case "refreshDevice": {
         const connected = await checkAdbDevice();
         if (connected.connected) {
           deviceInfo = await getDeviceInfo();
@@ -1326,15 +1544,137 @@ async function createPanel() {
             connected: false,
           });
         }
+        await postEnvironmentStatus(context);
         break;
+      }
 
-      case "ensureRoot":
+      case "ensureRoot": {
         const rootResult = await ensureRoot();
         panel.webview.postMessage({
           command: "rootResult",
           ...rootResult,
         });
+        deviceInfo = await getDeviceInfo();
+        await postEnvironmentStatus(context);
         break;
+      }
+
+      case "getEnvironmentStatus":
+        await postEnvironmentStatus(context);
+        break;
+
+      case "checkEnvironmentUpdates":
+        panel.webview.postMessage({
+          command: "environmentActionResult",
+          action: "checkUpdates",
+          running: true,
+          message: "Checking GitHub Release...",
+        });
+        await checkForExtensionUpdate(context, { manual: true, notify: false, progress: false });
+        await postEnvironmentStatus(context);
+        break;
+
+      case "installEnvironmentUpdate": {
+        let update = latestExtensionReleaseStatus?.update || null;
+        if (!update) {
+          const status = await checkForExtensionUpdate(context, { manual: true, notify: false, progress: false });
+          update = status?.update || null;
+        }
+        if (!update) {
+          panel.webview.postMessage({
+            command: "environmentActionResult",
+            action: "installUpdate",
+            running: false,
+            message: "No extension update is available.",
+          });
+          await postEnvironmentStatus(context);
+          break;
+        }
+        try {
+          await downloadAndInstallExtensionUpdate(update);
+          panel.webview.postMessage({
+            command: "environmentActionResult",
+            action: "installUpdate",
+            running: false,
+            message: `Downloaded SecMP ${update.version}. VS Code may ask you to reload.`,
+          });
+        } catch (err) {
+          panel.webview.postMessage({
+            command: "environmentActionResult",
+            action: "installUpdate",
+            running: false,
+            message: `Update installation failed: ${err.message}`,
+          });
+        }
+        await postEnvironmentStatus(context);
+        break;
+      }
+
+      case "openLatestRelease": {
+        const releaseUrl = latestExtensionReleaseStatus?.releaseUrl || DEFAULT_WINDOWS_RUNTIME_REPO;
+        await vscode.env.openExternal(vscode.Uri.parse(releaseUrl));
+        break;
+      }
+
+      case "setUpdateConfig": {
+        const config = vscode.workspace.getConfiguration("secmp");
+        if (typeof message.enabled === "boolean") {
+          await config.update("updateCheckEnabled", message.enabled, vscode.ConfigurationTarget.Global);
+        }
+        if (message.intervalHours != null) {
+          const intervalHours = Number(message.intervalHours);
+          if (Number.isFinite(intervalHours) && intervalHours >= 1) {
+            await config.update("updateCheckIntervalHours", intervalHours, vscode.ConfigurationTarget.Global);
+          }
+        }
+        await postEnvironmentStatus(context);
+        break;
+      }
+
+      case "cleanRuntimeCacheFromEnvironment": {
+        if (proxyProcess) {
+          panel.webview.postMessage({
+            command: "environmentActionResult",
+            action: "cleanRuntimeCache",
+            running: false,
+            message: "Stop the SecMP proxy before cleaning the runtime cache.",
+          });
+          break;
+        }
+        try {
+          const result = cleanWindowsRuntimeCache();
+          panel.webview.postMessage({
+            command: "environmentActionResult",
+            action: "cleanRuntimeCache",
+            running: false,
+            message:
+              `Kept ${result.keptVersions.join(", ") || "none"}. ` +
+              `Removed ${result.runtimeDirsRemoved} runtime dirs, ${result.downloadFilesRemoved} downloads. ` +
+              `Freed ${formatBytes(result.bytesFreed)}.`,
+          });
+        } catch (err) {
+          panel.webview.postMessage({
+            command: "environmentActionResult",
+            action: "cleanRuntimeCache",
+            running: false,
+            message: `Failed to clean runtime cache: ${err.message}`,
+          });
+        }
+        await postEnvironmentStatus(context);
+        break;
+      }
+
+      case "copyEnvironmentInfo": {
+        const status = await getEnvironmentStatus(context);
+        await vscode.env.clipboard.writeText(formatEnvironmentInfoForClipboard(status));
+        panel.webview.postMessage({
+          command: "environmentActionResult",
+          action: "copyEnvironmentInfo",
+          running: false,
+          message: "Environment info copied.",
+        });
+        break;
+      }
 
       case "startProxy": {
         const port = message.port || 8080;
@@ -1353,6 +1693,7 @@ async function createPanel() {
             message: err.message,
           });
         }
+        await postEnvironmentStatus(context);
         break;
       }
 
@@ -1363,6 +1704,7 @@ async function createPanel() {
           running: false,
           message: result.message,
         });
+        await postEnvironmentStatus(context);
         break;
       }
 

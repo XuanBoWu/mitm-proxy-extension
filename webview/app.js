@@ -5,6 +5,8 @@ const vscode = acquireVsCodeApi();
 let flows = [];
 let selectedFlowId = null;
 let proxyRunning = false;
+let environmentStatus = null;
+let environmentPanelOpen = false;
 let filterTextDraft = "";
 let filterText = "";
 const DEFAULT_FILTER_SCOPES = ["url", "reqHeaders", "reqBody", "resHeaders", "resBody"];
@@ -201,6 +203,13 @@ window.addEventListener("message", (event) => {
     case "interfacesList":
       updateInterfaceSelect(msg.interfaces);
       break;
+    case "environmentStatus":
+      environmentStatus = msg.status;
+      renderEnvironmentStatus();
+      break;
+    case "environmentActionResult":
+      showEnvironmentActionStatus(msg.message || "", !!msg.running);
+      break;
   }
 });
 
@@ -255,6 +264,116 @@ function showProxySetupStatus(type, message) {
   el.style.display = "block";
   el.className = "status-text " + type;
   el.textContent = message;
+}
+
+// ===== Environment / About =====
+
+function setText(id, value) {
+  const el = $(id);
+  if (el) el.textContent = value == null || value === "" ? "-" : String(value);
+}
+
+function formatEnvTime(value) {
+  if (!value) return "Never";
+  try {
+    return new Date(value).toLocaleString();
+  } catch (_) {
+    return "Never";
+  }
+}
+
+function runtimeStatusText(runtime) {
+  if (!runtime) return "Unknown";
+  if (runtime.status === "notRequired") return "Source/dev";
+  if (runtime.status === "ready") return "Ready";
+  if (runtime.status === "missing") return "Missing";
+  if (runtime.status === "invalid") return "Invalid";
+  return runtime.status || "Unknown";
+}
+
+function updateStatusText(updates) {
+  const latest = updates?.latest;
+  if (!latest || latest.status === "unknown") return "Not checked";
+  if (latest.status === "updateAvailable") return `Update available: ${latest.update?.version || latest.latestVersion}`;
+  if (latest.status === "upToDate") return "Up to date";
+  if (latest.status === "error") return `Error: ${latest.error || "check failed"}`;
+  return latest.status;
+}
+
+function getEnvironmentSummary(status) {
+  const latest = status?.updates?.latest;
+  if (latest?.status === "updateAvailable") {
+    return { text: "Update available", dot: "info" };
+  }
+  if (status?.runtime && !status.runtime.valid) {
+    return { text: status.runtime.status === "missing" ? "Runtime missing" : "Runtime invalid", dot: "disconnected" };
+  }
+  if (status?.adb && !status.adb.available) {
+    return { text: "ADB missing", dot: "disconnected" };
+  }
+  if (latest?.status === "error") {
+    return { text: "Update check failed", dot: "warning" };
+  }
+  return { text: "Ready", dot: "connected" };
+}
+
+function renderEnvironmentStatus() {
+  const status = environmentStatus;
+  if (!status) return;
+
+  const summary = getEnvironmentSummary(status);
+  setText("envSummaryVersion", status.extension?.version);
+  $("envSummaryDot").className = `dot ${summary.dot}`;
+  setText("envSummaryText", summary.text);
+  setText("environmentSubtitle", `${summary.text} · ${status.platform?.os || "-"} ${status.platform?.arch || ""}`.trim());
+
+  setText("envExtensionVersion", status.extension?.version);
+  setText("envRuntimeVersion", status.runtime?.version);
+  setText("envRuntimeApi", status.runtime?.apiVersion ?? "-");
+  setText("envMitmproxyVersion", status.mitmproxy?.version || (status.mitmproxy?.running ? "Running" : "Not running"));
+
+  setText("envAdbStatus", status.adb?.available ? "Available" : "Missing");
+  setText("envAdbVersion", status.adb?.version || status.adb?.detail || "-");
+  setText("envDevice", status.device?.model ? `${status.device.model} · Android ${status.device.androidVersion || "-"}` : "Not connected");
+  setText("envPlatform", `${status.platform?.os || "-"} ${status.platform?.arch || ""}`);
+
+  setText("envRuntimeStatus", runtimeStatusText(status.runtime));
+  setText("envRuntimeSource", status.runtime?.source);
+  setText("envRuntimePath", status.runtime?.path);
+
+  const updates = status.updates || {};
+  $("envUpdateEnabled").checked = !!updates.enabled;
+  const intervalSelect = $("envUpdateInterval");
+  const intervalValue = String(updates.intervalHours || 24);
+  if (![...intervalSelect.options].some((option) => option.value === intervalValue)) {
+    intervalSelect.add(new Option(`${intervalValue} h`, intervalValue));
+  }
+  intervalSelect.value = intervalValue;
+  $("envUpdateInterval").disabled = !updates.enabled;
+  setText("envUpdateLastChecked", formatEnvTime(updates.lastCheckedAt || updates.latest?.checkedAt));
+  setText("envUpdateLatest", updates.latest?.latestVersion || "-");
+  setText("envUpdateStatus", updateStatusText(updates));
+  $("envDownloadUpdateBtn").style.display = updates.latest?.status === "updateAvailable" ? "" : "none";
+}
+
+function toggleEnvironmentPanel(open = !environmentPanelOpen) {
+  environmentPanelOpen = open;
+  $("environmentPanel").hidden = !open;
+  $("environmentSummary").setAttribute("aria-expanded", open ? "true" : "false");
+  if (open) {
+    vscode.postMessage({ command: "getEnvironmentStatus" });
+  }
+}
+
+function showEnvironmentActionStatus(message, running = false) {
+  const el = $("environmentActionStatus");
+  if (!message) {
+    el.hidden = true;
+    el.textContent = "";
+    return;
+  }
+  el.hidden = false;
+  el.textContent = running ? message : message;
 }
 
 // ===== Flow List Rendering =====
@@ -2043,6 +2162,51 @@ $("loadSessionBtn").addEventListener("click", () => {
   vscode.postMessage({ command: "loadSession" });
 });
 
+$("environmentSummary").addEventListener("click", () => {
+  toggleEnvironmentPanel();
+});
+
+$("environmentCloseBtn").addEventListener("click", () => {
+  toggleEnvironmentPanel(false);
+});
+
+$("envCheckUpdateBtn").addEventListener("click", () => {
+  showEnvironmentActionStatus("Checking GitHub Release...", true);
+  vscode.postMessage({ command: "checkEnvironmentUpdates" });
+});
+
+$("envDownloadUpdateBtn").addEventListener("click", () => {
+  showEnvironmentActionStatus("Downloading update...", true);
+  vscode.postMessage({ command: "installEnvironmentUpdate" });
+});
+
+$("envOpenReleaseBtn").addEventListener("click", () => {
+  vscode.postMessage({ command: "openLatestRelease" });
+});
+
+$("envCleanRuntimeBtn").addEventListener("click", () => {
+  showEnvironmentActionStatus("Cleaning runtime cache...", true);
+  vscode.postMessage({ command: "cleanRuntimeCacheFromEnvironment" });
+});
+
+$("envCopyInfoBtn").addEventListener("click", () => {
+  vscode.postMessage({ command: "copyEnvironmentInfo" });
+});
+
+$("envUpdateEnabled").addEventListener("change", () => {
+  vscode.postMessage({
+    command: "setUpdateConfig",
+    enabled: $("envUpdateEnabled").checked,
+  });
+});
+
+$("envUpdateInterval").addEventListener("change", () => {
+  vscode.postMessage({
+    command: "setUpdateConfig",
+    intervalHours: Number($("envUpdateInterval").value),
+  });
+});
+
 // ===== Network Interface Selection =====
 
 let availableInterfaces = [];
@@ -2451,3 +2615,4 @@ setInterval(() => {
 vscode.postMessage({ command: "getStatus" });
 vscode.postMessage({ command: "refreshDevice" });
 vscode.postMessage({ command: "getInterfaces" });
+vscode.postMessage({ command: "getEnvironmentStatus" });
