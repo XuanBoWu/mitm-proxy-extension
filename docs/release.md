@@ -2,6 +2,8 @@
 
 SecMP is currently released through GitHub Releases only. VS Code Marketplace publishing is intentionally out of scope for this release line.
 
+Installed extensions can check GitHub Releases for newer VSIX packages through `SecMP: Check for Updates`. Keep the VSIX asset name in the `secmp-<version>.vsix` format so the updater can find it.
+
 ## Branching Model
 
 - `master` is the release source branch.
@@ -98,13 +100,15 @@ Initial GitHub release.
 - ADB-powered device proxy setup and clearing.
 - Rooted Android CA certificate injection.
 - HAR and JSON export.
-- Packaged Windows runtime, no local Python or mitmproxy install required.
+- Packaged Windows runtime with automatic GitHub Release download, no local Python or mitmproxy install required.
+- GitHub Release update checks for installing newer VSIX packages without Marketplace publishing.
 
 ### Requirements
 
 - Windows with VS Code or VSCodium.
 - ADB available on PATH.
 - Rooted Android device with USB debugging enabled.
+- Internet access on first proxy start, or the Windows runtime zip for offline installation.
 - Allow the Windows firewall prompt on first proxy start.
 
 ### Assets

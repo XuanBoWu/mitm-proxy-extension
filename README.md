@@ -27,7 +27,7 @@ SecMP is intended for authorized testing of devices and applications you own or 
 - ADB available on `PATH`.
 - A rooted Android device with USB debugging enabled.
 - The SecMP VSIX package.
-- The SecMP Windows runtime zip from the same GitHub Release.
+- Internet access on first proxy start, or the SecMP Windows runtime zip from the same GitHub Release for offline installation.
 
 ### macOS / Linux
 
@@ -36,14 +36,17 @@ The extension can still run from source, but the packaged runtime flow currently
 ## Install From GitHub Release
 
 1. Download `secmp-<version>.vsix` from the GitHub Release.
-2. Download `secmp-runtime-win32-x64-<version>.zip` from the same release.
-3. In VS Code or VSCodium, run `Extensions: Install from VSIX...`.
-4. Select the downloaded VSIX.
-5. Run `SecMP: Start Proxy`.
-6. When prompted for a runtime package, select `secmp-runtime-win32-x64-<version>.zip`.
-7. If Windows asks for network access, allow Private network access.
+2. In VS Code or VSCodium, run `Extensions: Install from VSIX...`.
+3. Select the downloaded VSIX.
+4. Run `SecMP: Start Proxy`.
+5. SecMP downloads the matching Windows runtime from the GitHub Release and caches it in VS Code global storage.
+6. If Windows asks for network access, allow Private network access.
 
 The runtime is extracted into VS Code global storage and reused on later starts.
+
+SecMP can also check GitHub Releases for a newer VSIX without using the VS Code Marketplace. Run `SecMP: Check for Updates`, or keep the default automatic check enabled. When an update is available, SecMP downloads the VSIX from the release and starts VS Code's VSIX installation flow after you confirm.
+
+For offline installation, download `secmp-runtime-win32-x64-<version>.zip` from the same release and configure `secmp.windowsRuntimeArchivePath`, or select the zip if prompted.
 
 ## Quick Start
 
@@ -64,6 +67,8 @@ The runtime is extracted into VS Code global storage and reused on later starts.
 - `SecMP: Push Certificate to Device`
 - `SecMP: Setup Device Proxy`
 - `SecMP: Clear Device Proxy`
+- `SecMP: Clean Runtime Cache`
+- `SecMP: Check for Updates`
 - `SecMP: Export as HAR`
 - `SecMP: Export as JSON`
 
@@ -74,8 +79,24 @@ Settings are optional for normal manual installation.
 ```json
 {
   "secmp.windowsRuntimeVersion": "0.1.0",
-  "secmp.windowsRuntimeArchivePath": "C:\\Users\\me\\Downloads\\secmp-runtime-win32-x64-0.1.0.zip",
-  "secmp.windowsRuntimeSha256": ""
+  "secmp.updateCheckEnabled": true,
+  "secmp.updateCheckIntervalHours": 24
+}
+```
+
+By default, SecMP downloads the matching Windows runtime from the GitHub Release and validates it with the built-in checksum when available.
+
+The runtime version is separate from the VSIX version. SecMP reuses a cached runtime while `secmp.windowsRuntimeVersion` stays the same, and installs a new runtime when that setting changes.
+
+The update checker only checks the extension VSIX version. Runtime upgrades are still controlled by `secmp.windowsRuntimeVersion`, so an extension update can reuse the existing runtime when the runtime API and version have not changed.
+
+Use `SecMP: Clean Runtime Cache` to remove old cached Windows runtimes. The command keeps the current runtime version and the newest previous version, deletes older runtime directories and stale downloaded runtime zips, and does not delete the mitmproxy CA/config directory.
+
+For offline installation, configure a local runtime archive path:
+
+```json
+{
+  "secmp.windowsRuntimeArchivePath": "C:\\Users\\me\\Downloads\\secmp-runtime-win32-x64-0.1.0.zip"
 }
 ```
 
@@ -93,7 +114,8 @@ Runtime source priority:
 2. `secmp.windowsRuntimePath`.
 3. `secmp.windowsRuntimeArchivePath`.
 4. `secmp.windowsRuntimeUrl`.
-5. File picker prompt.
+5. Matching GitHub Release runtime.
+6. File picker prompt.
 
 ## Android Certificate Notes
 

@@ -27,7 +27,7 @@ SecMP 仅用于你拥有或已获得授权的设备、应用和网络测试。
 - `adb` 已加入 `PATH`。
 - 已 root 且开启 USB 调试的 Android 设备。
 - SecMP VSIX 安装包。
-- 同一个 GitHub Release 中提供的 SecMP Windows runtime zip。
+- 首次启动代理时可访问互联网，或准备同一个 GitHub Release 中提供的 SecMP Windows runtime zip 用于离线安装。
 
 ### macOS / Linux
 
@@ -36,14 +36,17 @@ SecMP 仅用于你拥有或已获得授权的设备、应用和网络测试。
 ## 从 GitHub Release 安装
 
 1. 从 GitHub Release 下载 `secmp-<version>.vsix`。
-2. 从同一个 release 下载 `secmp-runtime-win32-x64-<version>.zip`。
-3. 在 VS Code 或 VSCodium 中运行 `Extensions: Install from VSIX...`。
-4. 选择下载好的 VSIX。
-5. 运行 `SecMP: Start Proxy`。
-6. 首次提示选择 runtime 时，选择 `secmp-runtime-win32-x64-<version>.zip`。
-7. 如果 Windows 弹出网络访问提示，请允许 Private network access。
+2. 在 VS Code 或 VSCodium 中运行 `Extensions: Install from VSIX...`。
+3. 选择下载好的 VSIX。
+4. 运行 `SecMP: Start Proxy`。
+5. SecMP 会从对应 GitHub Release 自动下载匹配的 Windows runtime，并缓存到 VS Code 全局存储目录。
+6. 如果 Windows 弹出网络访问提示，请允许 Private network access。
 
 runtime 会被解压到 VS Code 的全局存储目录，后续启动会复用已安装的 runtime。
+
+SecMP 也可以不依赖 VS Code Marketplace，直接检查 GitHub Release 中的新版本 VSIX。可以运行 `SecMP: Check for Updates` 手动检查，也可以保留默认开启的自动检查。发现新版本后，SecMP 会在你确认后下载 VSIX，并启动 VS Code 的 VSIX 安装流程。
+
+离线安装时，可以从同一个 release 下载 `secmp-runtime-win32-x64-<version>.zip`，配置 `secmp.windowsRuntimeArchivePath`，或在提示时选择该 zip。
 
 ## 快速开始
 
@@ -64,6 +67,8 @@ runtime 会被解压到 VS Code 的全局存储目录，后续启动会复用已
 - `SecMP: Push Certificate to Device`
 - `SecMP: Setup Device Proxy`
 - `SecMP: Clear Device Proxy`
+- `SecMP: Clean Runtime Cache`
+- `SecMP: Check for Updates`
 - `SecMP: Export as HAR`
 - `SecMP: Export as JSON`
 
@@ -74,8 +79,24 @@ runtime 会被解压到 VS Code 的全局存储目录，后续启动会复用已
 ```json
 {
   "secmp.windowsRuntimeVersion": "0.1.0",
-  "secmp.windowsRuntimeArchivePath": "C:\\Users\\me\\Downloads\\secmp-runtime-win32-x64-0.1.0.zip",
-  "secmp.windowsRuntimeSha256": ""
+  "secmp.updateCheckEnabled": true,
+  "secmp.updateCheckIntervalHours": 24
+}
+```
+
+默认情况下，SecMP 会从 GitHub Release 自动下载匹配的 Windows runtime，并在有内置校验值时校验 SHA-256。
+
+runtime 版本与 VSIX 版本相互独立。只要 `secmp.windowsRuntimeVersion` 不变，SecMP 会复用已缓存的 runtime；该设置变化时才会安装新的 runtime。
+
+更新检查只判断扩展 VSIX 版本。runtime 升级仍由 `secmp.windowsRuntimeVersion` 控制，所以当 runtime API 和版本都不需要变化时，升级扩展可以继续复用已有 runtime。
+
+可以使用 `SecMP: Clean Runtime Cache` 清理旧的 Windows runtime 缓存。该命令默认保留当前 runtime 版本和最新的上一个版本，删除更旧的 runtime 目录和过期下载 zip，不会删除 mitmproxy CA/config 目录。
+
+离线安装可配置本地 runtime 压缩包路径：
+
+```json
+{
+  "secmp.windowsRuntimeArchivePath": "C:\\Users\\me\\Downloads\\secmp-runtime-win32-x64-0.1.0.zip"
 }
 ```
 
@@ -93,7 +114,8 @@ runtime 查找优先级：
 2. `secmp.windowsRuntimePath`。
 3. `secmp.windowsRuntimeArchivePath`。
 4. `secmp.windowsRuntimeUrl`。
-5. 文件选择提示。
+5. 匹配的 GitHub Release runtime。
+6. 文件选择提示。
 
 ## Android 证书说明
 

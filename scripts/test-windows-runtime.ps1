@@ -35,6 +35,8 @@ try {
 
   $Manifest = Get-Content $ManifestPath -Raw | ConvertFrom-Json
   Assert-True ($Manifest.runtimeVersion -eq $RuntimeVersion) "Unexpected runtimeVersion: $($Manifest.runtimeVersion)"
+  $RuntimeApiVersion = if ($null -eq $Manifest.runtimeApiVersion) { 1 } else { [int]$Manifest.runtimeApiVersion }
+  Assert-True ($RuntimeApiVersion -eq 1) "Unexpected runtimeApiVersion: $($Manifest.runtimeApiVersion)"
   Assert-True ($Manifest.platform -eq "win32") "Unexpected platform: $($Manifest.platform)"
   Assert-True ($Manifest.arch -in @("x64", "arm64")) "Unexpected arch: $($Manifest.arch)"
   Assert-True ($Manifest.mitmproxyVersion -eq "12.2.2") "Unexpected mitmproxyVersion: $($Manifest.mitmproxyVersion)"

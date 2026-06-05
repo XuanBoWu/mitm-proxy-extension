@@ -19,10 +19,30 @@ let knownFlowIds = new Set();
 
 const TOOLS_DIR = path.join(__dirname, "tools");
 const DEFAULT_WINDOWS_RUNTIME_VERSION = "0.1.0";
-const DEFAULT_WINDOWS_RUNTIME_URL = "";
+const DEFAULT_WINDOWS_RUNTIME_REPO = "https://github.com/XuanBoWu/mitm-proxy-extension";
+const GITHUB_RELEASE_API_URL = "https://api.github.com/repos/XuanBoWu/mitm-proxy-extension/releases/latest";
+const WINDOWS_RUNTIME_API_VERSION = 1;
+const WINDOWS_RUNTIME_RETAIN_PREVIOUS_COUNT = 1;
+const DEFAULT_UPDATE_CHECK_INTERVAL_HOURS = 24;
+const UPDATE_LAST_CHECK_KEY = "secmp.lastUpdateCheckAt";
+const extensionPackage = loadExtensionPackage();
+const DEFAULT_WINDOWS_RUNTIME_SOURCES = {
+  "0.1.0:win32:x64": {
+    url: "https://github.com/XuanBoWu/mitm-proxy-extension/releases/download/v0.1.0/secmp-runtime-win32-x64-0.1.0.zip",
+    sha256: "9af752357285dd0bd10768a4fb7f41abdf5c077d5649893224e388ef957e0727",
+  },
+};
 let extensionStorageDir = null;
 let certDir = path.join(__dirname, "certificate");
 let windowsRuntimeReadyPromise = null;
+
+function loadExtensionPackage() {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(__dirname, "package.json"), "utf8"));
+  } catch (_) {
+    return { version: "0.0.0" };
+  }
+}
 
 function getPythonCmd() {
   const venvPython = path.join(__dirname, ".venv", "bin", "python3");
@@ -43,8 +63,206 @@ function getRuntimeConfig() {
   };
 }
 
+function getUpdateConfig() {
+  const config = vscode.workspace.getConfiguration("secmp");
+  const intervalHours = Number(config.get("updateCheckIntervalHours", DEFAULT_UPDATE_CHECK_INTERVAL_HOURS));
+  return {
+    updateCheckEnabled: Boolean(config.get("updateCheckEnabled", true)),
+    updateCheckIntervalHours: Number.isFinite(intervalHours) && intervalHours > 0
+      ? intervalHours
+      : DEFAULT_UPDATE_CHECK_INTERVAL_HOURS,
+  };
+}
+
+function getWindowsRuntimeSourceKey(version, platform = "win32", arch = process.arch) {
+  return `${version}:${platform}:${arch}`;
+}
+
+function buildDefaultWindowsRuntimeUrl(version, arch = process.arch) {
+  const fileName = `secmp-runtime-win32-${arch}-${version}.zip`;
+  return `${DEFAULT_WINDOWS_RUNTIME_REPO}/releases/download/v${version}/${fileName}`;
+}
+
+function getDefaultWindowsRuntimeSource() {
+  const config = getRuntimeConfig();
+  const version = config.windowsRuntimeVersion;
+  const key = getWindowsRuntimeSourceKey(version);
+  return DEFAULT_WINDOWS_RUNTIME_SOURCES[key] || {
+    url: buildDefaultWindowsRuntimeUrl(version),
+    sha256: "",
+  };
+}
+
 function getDefaultWindowsRuntimeUrl() {
-  return DEFAULT_WINDOWS_RUNTIME_URL;
+  return getDefaultWindowsRuntimeSource().url;
+}
+
+function getExpectedWindowsRuntimeSha256() {
+  const config = getRuntimeConfig();
+  if (config.windowsRuntimeSha256) {
+    return config.windowsRuntimeSha256;
+  }
+  return getDefaultWindowsRuntimeSource().sha256 || "";
+}
+
+function compareRuntimeVersions(a, b) {
+  const aParts = String(a).split(/[.-]/);
+  const bParts = String(b).split(/[.-]/);
+  const len = Math.max(aParts.length, bParts.length);
+  for (let i = 0; i < len; i++) {
+    const av = aParts[i] || "";
+    const bv = bParts[i] || "";
+    const an = /^\d+$/.test(av) ? Number(av) : null;
+    const bn = /^\d+$/.test(bv) ? Number(bv) : null;
+    if (an !== null && bn !== null) {
+      if (an !== bn) return an - bn;
+    } else if (av !== bv) {
+      return av.localeCompare(bv);
+    }
+  }
+  return 0;
+}
+
+function normalizeVersion(version) {
+  return String(version || "").trim().replace(/^v/i, "").split("+")[0];
+}
+
+function compareReleaseVersions(a, b) {
+  return compareRuntimeVersions(normalizeVersion(a), normalizeVersion(b));
+}
+
+function isRuntimeVersionDir(entry) {
+  return entry.isDirectory() && !entry.name.startsWith("_");
+}
+
+function getRuntimeVersionFromDownloadName(fileName) {
+  const match = String(fileName).match(/^secmp-runtime-win32-[^-]+-(.+)\.zip(?:\.sha256)?$/i);
+  return match ? match[1] : null;
+}
+
+function getRuntimeCacheKeepVersions(runtimeRoot, currentVersion) {
+  const versions = new Set([currentVersion]);
+  if (!fs.existsSync(runtimeRoot)) {
+    return versions;
+  }
+
+  const cachedVersions = fs.readdirSync(runtimeRoot, { withFileTypes: true })
+    .filter(isRuntimeVersionDir)
+    .map(entry => entry.name)
+    .filter(version => version !== currentVersion)
+    .sort((a, b) => compareRuntimeVersions(b, a));
+
+  for (const version of cachedVersions.slice(0, WINDOWS_RUNTIME_RETAIN_PREVIOUS_COUNT)) {
+    versions.add(version);
+  }
+  return versions;
+}
+
+function cleanWindowsRuntimeCache() {
+  const config = getRuntimeConfig();
+  const runtimeRoot = path.join(extensionStorageDir, "windows-runtime");
+  const keepVersions = getRuntimeCacheKeepVersions(runtimeRoot, config.windowsRuntimeVersion);
+  const result = {
+    runtimeDirsRemoved: 0,
+    downloadFilesRemoved: 0,
+    stagingDirsRemoved: 0,
+    bytesFreed: 0,
+    keptVersions: Array.from(keepVersions).sort(compareRuntimeVersions),
+  };
+
+  function removePath(targetPath, counterName) {
+    if (!fs.existsSync(targetPath)) return;
+    let size = 0;
+    try {
+      const stat = fs.statSync(targetPath);
+      if (stat.isDirectory()) {
+        const stack = [targetPath];
+        while (stack.length > 0) {
+          const current = stack.pop();
+          for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+            const entryPath = path.join(current, entry.name);
+            if (entry.isDirectory()) {
+              stack.push(entryPath);
+            } else if (entry.isFile()) {
+              size += fs.statSync(entryPath).size;
+            }
+          }
+        }
+      } else if (stat.isFile()) {
+        size = stat.size;
+      }
+    } catch (_) {}
+    fs.rmSync(targetPath, { recursive: true, force: true });
+    result[counterName] += 1;
+    result.bytesFreed += size;
+  }
+
+  if (!fs.existsSync(runtimeRoot)) {
+    return result;
+  }
+
+  for (const entry of fs.readdirSync(runtimeRoot, { withFileTypes: true })) {
+    const entryPath = path.join(runtimeRoot, entry.name);
+    if (isRuntimeVersionDir(entry) && !keepVersions.has(entry.name)) {
+      removePath(entryPath, "runtimeDirsRemoved");
+    } else if (entry.isDirectory() && entry.name === "_staging") {
+      removePath(entryPath, "stagingDirsRemoved");
+    }
+  }
+
+  const downloadDir = path.join(runtimeRoot, "_downloads");
+  if (fs.existsSync(downloadDir)) {
+    for (const entry of fs.readdirSync(downloadDir, { withFileTypes: true })) {
+      if (!entry.isFile()) continue;
+      const version = getRuntimeVersionFromDownloadName(entry.name);
+      if (version && !keepVersions.has(version)) {
+        removePath(path.join(downloadDir, entry.name), "downloadFilesRemoved");
+      }
+    }
+  }
+
+  return result;
+}
+
+function formatBytes(bytes) {
+  if (!bytes) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  let value = bytes;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  return `${value.toFixed(unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
+}
+
+function formatDuration(seconds) {
+  if (!Number.isFinite(seconds) || seconds < 0) {
+    return "--";
+  }
+  const rounded = Math.max(0, Math.round(seconds));
+  const mins = Math.floor(rounded / 60);
+  const secs = rounded % 60;
+  if (mins <= 0) {
+    return `${secs}s`;
+  }
+  return `${mins}m ${String(secs).padStart(2, "0")}s`;
+}
+
+function formatDownloadProgress(downloadedBytes, totalBytes, startedAt, label = "Downloading") {
+  const elapsedSeconds = Math.max(0.001, (Date.now() - startedAt) / 1000);
+  const speedBytesPerSecond = downloadedBytes / elapsedSeconds;
+  const speedText = `${formatBytes(speedBytesPerSecond)}/s`;
+
+  if (totalBytes > 0) {
+    const percent = Math.min(100, Math.max(0, (downloadedBytes / totalBytes) * 100));
+    const remainingBytes = Math.max(0, totalBytes - downloadedBytes);
+    const etaSeconds = speedBytesPerSecond > 0 ? remainingBytes / speedBytesPerSecond : Infinity;
+    return `${label}... ${percent.toFixed(1)}% ` +
+      `(${formatBytes(downloadedBytes)} / ${formatBytes(totalBytes)}, ${speedText}, ETA ${formatDuration(etaSeconds)})`;
+  }
+
+  return `${label}... ${formatBytes(downloadedBytes)} (${speedText})`;
 }
 
 function initializeRuntimeStorage(context) {
@@ -126,6 +344,10 @@ function getWindowsRuntimeEntrypoint(name, runtimeDir = getWindowsRuntimeDir()) 
   return fs.existsSync(exePath) ? exePath : null;
 }
 
+function getManifestRuntimeApiVersion(manifest) {
+  return manifest.runtimeApiVersion == null ? 1 : Number(manifest.runtimeApiVersion);
+}
+
 function isWindowsRuntimeReady(runtimeDir = getWindowsRuntimeDir()) {
   const manifestPath = getWindowsRuntimeManifestPath(runtimeDir);
   if (!fs.existsSync(manifestPath)) {
@@ -138,6 +360,7 @@ function isWindowsRuntimeReady(runtimeDir = getWindowsRuntimeDir()) {
     return manifest.platform === "win32" &&
       manifest.arch === process.arch &&
       manifest.runtimeVersion === config.windowsRuntimeVersion &&
+      getManifestRuntimeApiVersion(manifest) === WINDOWS_RUNTIME_API_VERSION &&
       !!getWindowsRuntimeEntrypoint("proxyEngine", runtimeDir) &&
       !!getWindowsRuntimeEntrypoint("certManager", runtimeDir);
   } catch (err) {
@@ -204,38 +427,108 @@ async function promptForWindowsRuntimeArchive() {
   return selected?.[0]?.fsPath || null;
 }
 
-function downloadFile(url, destinationPath, expectedSha256, progress) {
+function requestJson(url, redirectCount = 0) {
+  return new Promise((resolve, reject) => {
+    if (redirectCount > 5) {
+      reject(new Error("Too many redirects"));
+      return;
+    }
+
+    const parsedUrl = new URL(url);
+    const client = parsedUrl.protocol === "https:" ? https : http;
+    const request = client.get(parsedUrl, {
+      headers: {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": `SecMP/${extensionPackage.version}`,
+      },
+    }, (response) => {
+      if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
+        const redirected = new URL(response.headers.location, parsedUrl).toString();
+        response.resume();
+        requestJson(redirected, redirectCount + 1).then(resolve, reject);
+        return;
+      }
+
+      let body = "";
+      response.setEncoding("utf8");
+      response.on("data", (chunk) => {
+        body += chunk;
+        if (body.length > 2 * 1024 * 1024) {
+          request.destroy(new Error("JSON response is too large"));
+        }
+      });
+      response.on("end", () => {
+        if (response.statusCode !== 200) {
+          reject(new Error(`GitHub release check failed with HTTP ${response.statusCode}`));
+          return;
+        }
+        try {
+          resolve(JSON.parse(body));
+        } catch (err) {
+          reject(new Error(`Failed to parse GitHub release response: ${err.message}`));
+        }
+      });
+    });
+
+    request.setTimeout(15000, () => request.destroy(new Error("GitHub release check timed out")));
+    request.on("error", reject);
+  });
+}
+
+function downloadFile(url, destinationPath, expectedSha256, progress, label = "Downloading Windows runtime") {
   return new Promise((resolve, reject) => {
     const parsedUrl = new URL(url);
     const client = parsedUrl.protocol === "https:" ? https : http;
     const hash = crypto.createHash("sha256");
     const file = fs.createWriteStream(destinationPath);
 
-    progress?.report({ message: "Downloading Windows runtime..." });
+    progress?.report({ message: `${label}...` });
     const request = client.get(parsedUrl, (response) => {
       if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
         file.close(() => {
           fs.rmSync(destinationPath, { force: true });
           const redirected = new URL(response.headers.location, parsedUrl).toString();
-          downloadFile(redirected, destinationPath, expectedSha256, progress).then(resolve, reject);
+          progress?.report({ message: `${label}... following redirect` });
+          downloadFile(redirected, destinationPath, expectedSha256, progress, label).then(resolve, reject);
         });
         return;
       }
 
       if (response.statusCode !== 200) {
         file.close(() => fs.rmSync(destinationPath, { force: true }));
-        reject(new Error(`Runtime download failed with HTTP ${response.statusCode}`));
+        reject(new Error(`Download failed with HTTP ${response.statusCode}`));
         return;
       }
 
-      response.on("data", (chunk) => hash.update(chunk));
+      const totalBytes = Number(response.headers["content-length"] || 0);
+      const startedAt = Date.now();
+      let downloadedBytes = 0;
+      let lastReportAt = 0;
+      const reportProgress = (force = false) => {
+        const now = Date.now();
+        if (!force && now - lastReportAt < 500) {
+          return;
+        }
+        lastReportAt = now;
+        progress?.report({
+          message: formatDownloadProgress(downloadedBytes, totalBytes, startedAt, label),
+        });
+      };
+
+      response.on("data", (chunk) => {
+        downloadedBytes += chunk.length;
+        hash.update(chunk);
+        reportProgress();
+      });
       response.pipe(file);
       file.on("finish", () => {
         file.close(() => {
+          reportProgress(true);
+          progress?.report({ message: expectedSha256 ? "Verifying download..." : "Finishing download..." });
           const actualSha256 = hash.digest("hex");
           if (expectedSha256 && actualSha256 !== expectedSha256) {
             fs.rmSync(destinationPath, { force: true });
-            reject(new Error(`Runtime SHA-256 mismatch: expected ${expectedSha256}, got ${actualSha256}`));
+            reject(new Error(`SHA-256 mismatch: expected ${expectedSha256}, got ${actualSha256}`));
             return;
           }
           resolve({ sha256: actualSha256 });
@@ -327,14 +620,176 @@ async function installWindowsRuntime(progress, selectedArchivePath = null) {
   if (!runtimeUrl) {
     throw new Error("Windows runtime package was not selected.");
   }
+  const usingDefaultRuntimeUrl = !config.windowsRuntimeUrl;
 
   const runtimeRoot = path.join(extensionStorageDir, "windows-runtime");
   const downloadDir = path.join(runtimeRoot, "_downloads");
   const zipPath = path.join(downloadDir, `secmp-runtime-win32-${process.arch}-${config.windowsRuntimeVersion}.zip`);
 
   fs.mkdirSync(downloadDir, { recursive: true });
-  await downloadFile(runtimeUrl, zipPath, config.windowsRuntimeSha256, progress);
+  try {
+    await downloadFile(runtimeUrl, zipPath, getExpectedWindowsRuntimeSha256(), progress);
+  } catch (err) {
+    if (usingDefaultRuntimeUrl) {
+      throw new Error(
+        `${err.message}. Download the runtime zip from the SecMP GitHub Release and set ` +
+        "`secmp.windowsRuntimeArchivePath`, or configure `secmp.windowsRuntimeUrl`."
+      );
+    }
+    throw err;
+  }
   await installWindowsRuntimeFromZip(zipPath, progress);
+}
+
+function getVsixAsset(release, version) {
+  const assets = Array.isArray(release?.assets) ? release.assets : [];
+  const exactName = `secmp-${version}.vsix`.toLowerCase();
+  return assets.find(asset => String(asset.name || "").toLowerCase() === exactName && asset.browser_download_url) ||
+    assets.find(asset => /^secmp-.+\.vsix$/i.test(String(asset.name || "")) && asset.browser_download_url) ||
+    assets.find(asset => String(asset.name || "").toLowerCase().endsWith(".vsix") && asset.browser_download_url) ||
+    null;
+}
+
+function getExtensionUpdateFromRelease(release) {
+  if (!release || release.draft || release.prerelease) {
+    return null;
+  }
+
+  const currentVersion = normalizeVersion(extensionPackage.version);
+  const latestVersion = normalizeVersion(release.tag_name);
+  if (!latestVersion || compareReleaseVersions(latestVersion, currentVersion) <= 0) {
+    return null;
+  }
+
+  const asset = getVsixAsset(release, latestVersion);
+  if (!asset) {
+    throw new Error(`Release ${release.tag_name || latestVersion} does not contain a SecMP VSIX asset`);
+  }
+
+  return {
+    currentVersion,
+    version: latestVersion,
+    tagName: release.tag_name || `v${latestVersion}`,
+    releaseUrl: release.html_url || `${DEFAULT_WINDOWS_RUNTIME_REPO}/releases/tag/v${latestVersion}`,
+    assetName: asset.name,
+    assetUrl: asset.browser_download_url,
+  };
+}
+
+async function fetchLatestExtensionUpdate() {
+  const release = await requestJson(GITHUB_RELEASE_API_URL);
+  return getExtensionUpdateFromRelease(release);
+}
+
+async function openRelease(update) {
+  if (update?.releaseUrl) {
+    await vscode.env.openExternal(vscode.Uri.parse(update.releaseUrl));
+  }
+}
+
+async function openUpdateFolder(updateDir) {
+  await vscode.env.openExternal(vscode.Uri.file(updateDir));
+}
+
+async function installDownloadedVsix(vsixPath, update) {
+  try {
+    await vscode.commands.executeCommand("workbench.extensions.installExtension", vscode.Uri.file(vsixPath));
+    vscode.window.showInformationMessage("SecMP update installation started. Reload VS Code if prompted.");
+  } catch (err) {
+    const action = await vscode.window.showWarningMessage(
+      `Downloaded SecMP ${update.version}, but automatic VSIX installation failed: ${err.message}`,
+      "Open Folder",
+      "Copy Path",
+      "Open Release"
+    );
+    if (action === "Open Folder") {
+      await openUpdateFolder(path.dirname(vsixPath));
+    } else if (action === "Copy Path") {
+      await vscode.env.clipboard.writeText(vsixPath);
+      vscode.window.showInformationMessage("VSIX path copied.");
+    } else if (action === "Open Release") {
+      await openRelease(update);
+    }
+  }
+}
+
+async function downloadAndInstallExtensionUpdate(update) {
+  const updateDir = path.join(extensionStorageDir, "updates", update.version);
+  const vsixPath = path.join(updateDir, update.assetName || `secmp-${update.version}.vsix`);
+  fs.mkdirSync(updateDir, { recursive: true });
+
+  await vscode.window.withProgress({
+    location: vscode.ProgressLocation.Notification,
+    title: `SecMP ${update.version} update`,
+    cancellable: false,
+  }, async (progress) => {
+    await downloadFile(update.assetUrl, vsixPath, "", progress, "Downloading SecMP update");
+  });
+
+  await installDownloadedVsix(vsixPath, update);
+}
+
+async function promptForExtensionUpdate(update) {
+  const action = await vscode.window.showInformationMessage(
+    `SecMP ${update.version} is available. Current version: ${update.currentVersion}.`,
+    "Download and Install",
+    "Open Release",
+    "Later"
+  );
+
+  if (action === "Download and Install") {
+    await downloadAndInstallExtensionUpdate(update);
+  } else if (action === "Open Release") {
+    await openRelease(update);
+  }
+}
+
+async function checkForExtensionUpdate(context, options = {}) {
+  const manual = Boolean(options.manual);
+  const config = getUpdateConfig();
+  if (!manual && !config.updateCheckEnabled) {
+    return;
+  }
+  if (!manual && !context?.globalState) {
+    return;
+  }
+
+  const now = Date.now();
+  if (!manual) {
+    const lastCheckAt = Number(context.globalState.get(UPDATE_LAST_CHECK_KEY, 0) || 0);
+    const intervalMs = config.updateCheckIntervalHours * 60 * 60 * 1000;
+    if (lastCheckAt && now - lastCheckAt < intervalMs) {
+      return;
+    }
+    await context.globalState.update(UPDATE_LAST_CHECK_KEY, now);
+  }
+
+  try {
+    const update = manual
+      ? await vscode.window.withProgress({
+        location: vscode.ProgressLocation.Notification,
+        title: "Checking SecMP updates",
+        cancellable: false,
+      }, async (progress) => {
+        progress.report({ message: "Checking GitHub Release..." });
+        return fetchLatestExtensionUpdate();
+      })
+      : await fetchLatestExtensionUpdate();
+
+    if (!update) {
+      if (manual) {
+        vscode.window.showInformationMessage(`SecMP is up to date (${extensionPackage.version}).`);
+      }
+      return;
+    }
+
+    await promptForExtensionUpdate(update);
+  } catch (err) {
+    log(`Update check failed: ${err.message}`);
+    if (manual) {
+      vscode.window.showErrorMessage(`Failed to check SecMP updates: ${err.message}`);
+    }
+  }
 }
 
 async function ensureWindowsRuntime() {
@@ -1303,6 +1758,7 @@ function activate(context) {
   outputChannel = vscode.window.createOutputChannel("SecMP");
   log("SecMP extension activated");
   initializeRuntimeStorage(context);
+  checkForExtensionUpdate(context, { manual: false });
 
   const showPanelCmd = vscode.commands.registerCommand("secmp.showPanel", () => {
     createPanel();
@@ -1387,12 +1843,33 @@ function activate(context) {
     }
   });
 
+  const cleanRuntimeCacheCmd = vscode.commands.registerCommand("secmp.cleanRuntimeCache", async () => {
+    if (proxyProcess) {
+      vscode.window.showWarningMessage("Stop the SecMP proxy before cleaning the runtime cache.");
+      return;
+    }
+    try {
+      const result = cleanWindowsRuntimeCache();
+      vscode.window.showInformationMessage(
+        `Runtime cache cleaned. Kept versions: ${result.keptVersions.join(", ") || "none"}. ` +
+        `Removed ${result.runtimeDirsRemoved} runtime directories, ${result.downloadFilesRemoved} downloads, ` +
+        `${result.stagingDirsRemoved} staging directories. Freed ${formatBytes(result.bytesFreed)}.`
+      );
+    } catch (err) {
+      vscode.window.showErrorMessage(`Failed to clean runtime cache: ${err.message}`);
+    }
+  });
+
+  const checkForUpdatesCmd = vscode.commands.registerCommand("secmp.checkForUpdates", async () => {
+    await checkForExtensionUpdate(context, { manual: true });
+  });
+
   const exportHarCmd = vscode.commands.registerCommand("secmp.exportHar", () => exportHar());
   const exportJsonCmd = vscode.commands.registerCommand("secmp.exportJson", () => exportJson());
 
   context.subscriptions.push(
     showPanelCmd, startProxyCmd, stopProxyCmd, pushCertCmd,
-    setupProxyCmd, clearProxyCmd, exportHarCmd, exportJsonCmd,
+    setupProxyCmd, clearProxyCmd, cleanRuntimeCacheCmd, checkForUpdatesCmd, exportHarCmd, exportJsonCmd,
     outputChannel
   );
 

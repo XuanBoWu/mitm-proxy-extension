@@ -48,10 +48,15 @@ Windows 用户默认走打包 runtime，不要求本机安装 Python 或 mitmpro
 
 1. 扩展检查 VS Code global storage 中的缓存 runtime。
 2. 如果缓存不存在，依次尝试 `secmp.windowsRuntimePath`、`secmp.windowsRuntimeArchivePath`、`secmp.windowsRuntimeUrl`。
-3. 如果没有配置 runtime 来源，会弹出文件选择框，让用户选择 `secmp-runtime-win32-x64-<version>.zip`。
-4. runtime 解压后必须包含 `runtime/manifest.json` 和两个 entrypoint：
+3. 如果用户没有配置 runtime 来源，扩展会根据 `secmp.windowsRuntimeVersion` 自动拼出 GitHub Release 下载 URL：`https://github.com/XuanBoWu/mitm-proxy-extension/releases/download/v<version>/secmp-runtime-win32-<arch>-<version>.zip`。
+4. 默认下载源集中维护在 `DEFAULT_WINDOWS_RUNTIME_SOURCES`，key 为 `<runtimeVersion>:win32:<arch>`；当前 `0.1.0:win32:x64` 内置 URL 和 SHA-256 校验值。
+5. 如果默认下载失败，提示用户下载 runtime zip 并设置 `secmp.windowsRuntimeArchivePath`，或配置 `secmp.windowsRuntimeUrl`。
+6. runtime 解压后必须包含 `runtime/manifest.json` 和两个 entrypoint：
    - `bin/proxy_engine/proxy_engine.exe`
    - `bin/cert_manager/cert_manager.exe`
+7. `runtimeVersion` 与 VSIX 版本独立；仅 Webview/文档/extension 侧变更可继续复用旧 runtime。
+8. `runtimeApiVersion` 表示 extension ↔ runtime 命令/输出协议版本；缺失时按 `1` 兼容首个 `0.1.0` runtime，协议不兼容时才升级。
+9. `SecMP: Clean Runtime Cache` 只清理 VS Code global storage 下的 `windows-runtime/`，代理运行中拒绝执行；默认保留当前 runtime 版本和最新的上一个版本，删除更旧 runtime、`_staging` 和旧下载 zip，不删除 `mitmproxy-conf`。
 
 构建命令：
 

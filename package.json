@@ -33,7 +33,9 @@
     "runtime:windows": "powershell -ExecutionPolicy Bypass -File scripts/build-windows-runtime.ps1",
     "runtime:windows:test-install": "node scripts/test-extension-runtime-install.js"
   },
-  "activationEvents": [],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "main": "./extension.js",
   "contributes": {
     "configuration": {
@@ -52,17 +54,28 @@
         "secmp.windowsRuntimeUrl": {
           "type": "string",
           "default": "",
-          "description": "URL for the Windows runtime zip. Used when no local runtime path or archive path is configured."
+          "description": "Optional URL for the Windows runtime zip. Leave empty to use the runtime from the matching GitHub Release."
         },
         "secmp.windowsRuntimeSha256": {
           "type": "string",
           "default": "",
-          "description": "Optional SHA-256 checksum for the Windows runtime zip. Leave empty to skip checksum validation."
+          "description": "Optional SHA-256 checksum for the Windows runtime zip. Leave empty to use the built-in checksum for the default GitHub Release runtime when available."
         },
         "secmp.windowsRuntimeVersion": {
           "type": "string",
           "default": "0.1.0",
           "description": "Expected Windows runtime version. Changing this value forces the extension to install that runtime version."
+        },
+        "secmp.updateCheckEnabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically check the SecMP GitHub Release for a newer VSIX package."
+        },
+        "secmp.updateCheckIntervalHours": {
+          "type": "number",
+          "default": 24,
+          "minimum": 1,
+          "description": "Minimum interval, in hours, between automatic SecMP update checks."
         }
       }
     },
@@ -86,6 +99,14 @@
       {
         "command": "secmp.clearProxy",
         "title": "SecMP: Clear Device Proxy"
+      },
+      {
+        "command": "secmp.cleanRuntimeCache",
+        "title": "SecMP: Clean Runtime Cache"
+      },
+      {
+        "command": "secmp.checkForUpdates",
+        "title": "SecMP: Check for Updates"
       },
       {
         "command": "secmp.exportHar",

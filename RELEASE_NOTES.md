@@ -9,22 +9,23 @@ Initial GitHub release.
 - Rooted Android CA certificate injection.
 - Request and response inspection with filtering.
 - HAR and JSON export.
-- Packaged Windows runtime, no local Python or mitmproxy install required.
+- Packaged Windows runtime with automatic GitHub Release download, no local Python or mitmproxy install required.
+- Runtime cache cleanup command for removing stale cached runtime versions.
 
 ## Requirements
 
 - Windows with VS Code or VSCodium.
 - ADB available on `PATH`.
 - Rooted Android device with USB debugging enabled.
-- The Windows runtime zip from this release.
+- Internet access on first proxy start, or the Windows runtime zip from this release for offline installation.
 - Allow the Windows firewall prompt on first proxy start.
 
 ## Installation
 
 1. Download `secmp-0.1.0.vsix`.
-2. Download `secmp-runtime-win32-x64-0.1.0.zip`.
-3. In VS Code or VSCodium, run `Extensions: Install from VSIX...`.
-4. Run `SecMP: Start Proxy` and select the runtime zip when prompted.
+2. In VS Code or VSCodium, run `Extensions: Install from VSIX...`.
+3. Run `SecMP: Start Proxy`.
+4. SecMP downloads and caches the matching Windows runtime automatically.
 
 ## Assets
 

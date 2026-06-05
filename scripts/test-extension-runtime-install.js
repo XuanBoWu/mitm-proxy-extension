@@ -154,6 +154,10 @@ async function main() {
     }
 
     const manifest = readJsonFile(manifestPath);
+    const runtimeApiVersion = manifest.runtimeApiVersion == null ? 1 : Number(manifest.runtimeApiVersion);
+    if (runtimeApiVersion !== 1) {
+      throw new Error(`Unexpected runtimeApiVersion: ${manifest.runtimeApiVersion}`);
+    }
     const proxyExe = path.join(runtimeDir, manifest.entrypoints.proxyEngine);
     const certExe = path.join(runtimeDir, manifest.entrypoints.certManager);
     if (!fs.existsSync(proxyExe) || !fs.existsSync(certExe)) {

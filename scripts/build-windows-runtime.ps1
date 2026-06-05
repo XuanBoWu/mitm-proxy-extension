@@ -171,6 +171,7 @@ Copy-Item (Join-Path $DistDir "cert_manager") (Join-Path $RuntimeDir "bin\cert_m
 
 $Manifest = [ordered]@{
   runtimeVersion = $RuntimeVersion
+  runtimeApiVersion = 1
   platform = "win32"
   arch = $Arch
   mitmproxyVersion = "12.2.2"
