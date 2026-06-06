@@ -4,6 +4,10 @@ All notable changes to SecMP are documented in this file.
 
 ## Unreleased
 
+## 0.1.6 - 2026-06-07
+
+- Fixed the extension runtime install smoke-test mock so the release workflow supports the `secmp.language` configuration listener.
+
 ## 0.1.5 - 2026-06-07
 
 - Added Chinese-first i18n infrastructure with `secmp.language`, Webview/runtime language bundles, and VS Code package NLS metadata.

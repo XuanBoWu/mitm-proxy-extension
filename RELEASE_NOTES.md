@@ -1,6 +1,6 @@
-# SecMP 0.1.5
+# SecMP 0.1.6
 
-Patch release for the capture header layout and the Chinese-first i18n foundation.
+Patch release for the capture header layout, the Chinese-first i18n foundation, and the release smoke-test flow.
 
 ## Highlights
 
@@ -10,6 +10,7 @@ Patch release for the capture header layout and the Chinese-first i18n foundatio
 - Standardized the product language rules: Chinese-first UI, with professional terms such as `Request`, `Response`, `HTTP`, `TLS`, `HAR`, `JSON`, `ADB`, and `mitmproxy` preserved where appropriate.
 - Fixed Webview i18n injection so table column names, filter controls, footer status, and other dynamic text no longer fall back to visible keys, blank labels, or the wrong language.
 - Added l10n validation for Webview, extension runtime, and `package.nls*` key references.
+- Fixed the release workflow's extension runtime install smoke-test mock so it supports the `secmp.language` configuration listener.
 
 ## Requirements
 
@@ -21,7 +22,7 @@ Patch release for the capture header layout and the Chinese-first i18n foundatio
 
 ## Installation
 
-1. Download `secmp-0.1.5.vsix`.
+1. Download `secmp-0.1.6.vsix`.
 2. In VS Code or VSCodium, run `Extensions: Install from VSIX...`.
 3. Run `SecMP: Show Capture Panel`.
 4. Run `SecMP: Start Proxy`.
@@ -43,15 +44,15 @@ Command Palette titles and Settings descriptions follow VS Code's static `packag
 
 ## Update From 0.1.3
 
-This release includes every change since the previous release tag `v0.1.3`: the capture header count layout fix from `0.1.4`, plus the language system, English-language preparation, Webview i18n fixes, and stronger l10n checks from `0.1.5`.
+This release includes every change since the previous successful release tag `v0.1.3`: the capture header count layout fix, the language system, English-language preparation, Webview i18n fixes, stronger l10n checks, and the release smoke-test compatibility fix.
 
-Run `SecMP: Check for Updates`, or install `secmp-0.1.5.vsix` manually from the GitHub Release.
+Run `SecMP: Check for Updates`, or install `secmp-0.1.6.vsix` manually from the GitHub Release.
 
 This release uses runtime `0.1.2`. The VSIX version changed for UI, extension, and documentation updates, but the packaged runtime did not change.
 
 ## Assets
 
-- `secmp-0.1.5.vsix`
+- `secmp-0.1.6.vsix`
 
 Runtime assets remain available from the `v0.1.2` release:
 

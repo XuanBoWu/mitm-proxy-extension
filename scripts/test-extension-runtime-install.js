@@ -74,6 +74,7 @@ async function main() {
       },
     },
     workspace: {
+      onDidChangeConfiguration: () => ({ dispose() {} }),
       getConfiguration: () => ({
         get: (name, defaultValue) => {
           const values = {
