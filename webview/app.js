@@ -6,7 +6,8 @@ let flows = [];
 let selectedFlowId = null;
 let proxyRunning = false;
 let environmentStatus = null;
-let environmentPanelOpen = false;
+let aboutPopoverOpen = false;
+const EXTENSION_VERSION = window.__SECMP_EXTENSION_VERSION__ || document.getElementById("footerVersion")?.textContent?.trim() || "-";
 let filterTextDraft = "";
 let filterText = "";
 const DEFAULT_FILTER_SCOPES = ["url", "reqHeaders", "reqBody", "resHeaders", "resBody"];
@@ -82,7 +83,6 @@ const flowCount = $("flowCount");
 const proxyIndicator = $("proxyIndicator");
 const proxyStatusText = $("proxyStatusText");
 const footerStatus = $("footerStatus");
-const footerTime = $("footerTime");
 
 // ===== Message Handlers =====
 
@@ -322,24 +322,21 @@ function renderEnvironmentStatus() {
   if (!status) return;
 
   const summary = getEnvironmentSummary(status);
-  setText("envSummaryVersion", status.extension?.version);
-  $("envSummaryDot").className = `dot ${summary.dot}`;
-  setText("envSummaryText", summary.text);
-  setText("environmentSubtitle", `${summary.text} · ${status.platform?.os || "-"} ${status.platform?.arch || ""}`.trim());
+  setText("footerVersion", status.extension?.version || EXTENSION_VERSION);
+  setText("aboutSummary", summary.text);
 
-  setText("envExtensionVersion", status.extension?.version);
-  setText("envRuntimeVersion", status.runtime?.version);
+  setText("envVersionInfo", versionDisplayText(status));
+  setText("envRuntimeVersion", runtimeDisplayText(status.runtime));
   setText("envRuntimeApi", status.runtime?.apiVersion ?? "-");
   setText("envMitmproxyVersion", status.mitmproxy?.version || (status.mitmproxy?.running ? "Running" : "Not running"));
 
-  setText("envAdbStatus", status.adb?.available ? "Available" : "Missing");
+  setText("envAdbStatus", status.adb?.available ? `Available${status.adb.version ? ` · ${status.adb.version}` : ""}` : "Missing");
   setText("envAdbVersion", status.adb?.version || status.adb?.detail || "-");
   setText("envDevice", status.device?.model ? `${status.device.model} · Android ${status.device.androidVersion || "-"}` : "Not connected");
   setText("envPlatform", `${status.platform?.os || "-"} ${status.platform?.arch || ""}`);
 
   setText("envRuntimeStatus", runtimeStatusText(status.runtime));
   setText("envRuntimeSource", status.runtime?.source);
-  setText("envRuntimePath", status.runtime?.path);
 
   const updates = status.updates || {};
   $("envUpdateEnabled").checked = !!updates.enabled;
@@ -351,15 +348,36 @@ function renderEnvironmentStatus() {
   intervalSelect.value = intervalValue;
   $("envUpdateInterval").disabled = !updates.enabled;
   setText("envUpdateLastChecked", formatEnvTime(updates.lastCheckedAt || updates.latest?.checkedAt));
-  setText("envUpdateLatest", updates.latest?.latestVersion || "-");
-  setText("envUpdateStatus", updateStatusText(updates));
+  setText("envUpdateLatest", latestDisplayText(updates));
   $("envDownloadUpdateBtn").style.display = updates.latest?.status === "updateAvailable" ? "" : "none";
 }
 
-function toggleEnvironmentPanel(open = !environmentPanelOpen) {
-  environmentPanelOpen = open;
-  $("environmentPanel").hidden = !open;
-  $("environmentSummary").setAttribute("aria-expanded", open ? "true" : "false");
+function versionDisplayText(status) {
+  const extensionVersion = status?.extension?.version || EXTENSION_VERSION;
+  return `Extension v${extensionVersion} · Runtime ${runtimeDisplayText(status?.runtime)}`;
+}
+
+function runtimeDisplayText(runtime) {
+  if (!runtime) return "Checking";
+  if (runtime.status === "notRequired") return "Source";
+  if (runtime.status === "missing") return runtime.version ? `v${runtime.version} · Not installed` : "Not installed";
+  if (runtime.status === "invalid") return `Invalid${runtime.version ? ` · v${runtime.version}` : ""}`;
+  return runtime.version ? `v${runtime.version}` : runtimeStatusText(runtime);
+}
+
+function latestDisplayText(updates) {
+  const latest = updates?.latest;
+  if (!latest || latest.status === "unknown") return "Not checked";
+  if (latest.status === "updateAvailable") return `v${latest.update?.version || latest.latestVersion} available`;
+  if (latest.status === "upToDate") return latest.latestVersion ? `v${latest.latestVersion} · Up to date` : "Up to date";
+  if (latest.status === "error") return "Check failed";
+  return updateStatusText(updates);
+}
+
+function toggleAboutPopover(open = !aboutPopoverOpen) {
+  aboutPopoverOpen = open;
+  $("aboutPopover").hidden = !open;
+  $("footerVersionBtn").setAttribute("aria-expanded", open ? "true" : "false");
   if (open) {
     vscode.postMessage({ command: "getEnvironmentStatus" });
   }
@@ -2143,6 +2161,9 @@ $("tlsTimingToggle").addEventListener("click", () => {
 });
 
 $("clearBtn").addEventListener("click", () => {
+  if (!window.confirm("确定清空当前抓包列表吗？此操作不会保存当前会话。")) {
+    return;
+  }
   vscode.postMessage({ command: "clearFlows" });
 });
 
@@ -2162,12 +2183,12 @@ $("loadSessionBtn").addEventListener("click", () => {
   vscode.postMessage({ command: "loadSession" });
 });
 
-$("environmentSummary").addEventListener("click", () => {
-  toggleEnvironmentPanel();
+$("footerVersionBtn").addEventListener("click", () => {
+  toggleAboutPopover();
 });
 
-$("environmentCloseBtn").addEventListener("click", () => {
-  toggleEnvironmentPanel(false);
+$("aboutCloseBtn").addEventListener("click", () => {
+  toggleAboutPopover(false);
 });
 
 $("envCheckUpdateBtn").addEventListener("click", () => {
@@ -2182,15 +2203,6 @@ $("envDownloadUpdateBtn").addEventListener("click", () => {
 
 $("envOpenReleaseBtn").addEventListener("click", () => {
   vscode.postMessage({ command: "openLatestRelease" });
-});
-
-$("envCleanRuntimeBtn").addEventListener("click", () => {
-  showEnvironmentActionStatus("Cleaning runtime cache...", true);
-  vscode.postMessage({ command: "cleanRuntimeCacheFromEnvironment" });
-});
-
-$("envCopyInfoBtn").addEventListener("click", () => {
-  vscode.postMessage({ command: "copyEnvironmentInfo" });
 });
 
 $("envUpdateEnabled").addEventListener("change", () => {
@@ -2570,6 +2582,8 @@ document.addEventListener("keydown", (e) => {
 
 // ===== Init =====
 
+setText("footerVersion", EXTENSION_VERSION);
+setText("envVersionInfo", `Extension v${EXTENSION_VERSION} · Runtime checking`);
 colOrder = getColumnOrder();
 colWidths = loadColumnWidths();
 loadPanelState();
@@ -2605,11 +2619,6 @@ window.addEventListener("resize", () => {
   updateTableWidth();
   updateAllLineNumbers();
 });
-
-footerTime.textContent = new Date().toLocaleString();
-setInterval(() => {
-  footerTime.textContent = new Date().toLocaleString();
-}, 30000);
 
 // Request initial status
 vscode.postMessage({ command: "getStatus" });

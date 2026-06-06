@@ -16,17 +16,21 @@ let webPort = null;
 let authToken = null;
 let pollingTimer = null;
 let knownFlowIds = new Set();
+let ignoredFlowIdsAfterClear = new Set();
+let extensionContext = null;
 
 const TOOLS_DIR = path.join(__dirname, "tools");
-const DEFAULT_WINDOWS_RUNTIME_VERSION = "0.1.0";
-const DEFAULT_WINDOWS_RUNTIME_REPO = "https://github.com/XuanBoWu/mitm-proxy-extension";
+const DEFAULT_RUNTIME_VERSION = "0.1.2";
+const DEFAULT_RUNTIME_REPO = "https://github.com/XuanBoWu/mitm-proxy-extension";
 const GITHUB_RELEASE_API_URL = "https://api.github.com/repos/XuanBoWu/mitm-proxy-extension/releases/latest";
+const GITHUB_RELEASE_LATEST_URL = `${DEFAULT_RUNTIME_REPO}/releases/latest`;
 const WINDOWS_RUNTIME_API_VERSION = 1;
 const WINDOWS_RUNTIME_RETAIN_PREVIOUS_COUNT = 1;
 const DEFAULT_UPDATE_CHECK_INTERVAL_HOURS = 24;
 const UPDATE_LAST_CHECK_KEY = "secmp.lastUpdateCheckAt";
 const extensionPackage = loadExtensionPackage();
-const DEFAULT_WINDOWS_RUNTIME_SOURCES = {
+const SUPPORTED_RUNTIME_PLATFORMS = new Set(["win32", "darwin"]);
+const DEFAULT_RUNTIME_SOURCES = {
   "0.1.0:win32:x64": {
     url: "https://github.com/XuanBoWu/mitm-proxy-extension/releases/download/v0.1.0/secmp-runtime-win32-x64-0.1.0.zip",
     sha256: "9af752357285dd0bd10768a4fb7f41abdf5c077d5649893224e388ef957e0727",
@@ -55,12 +59,23 @@ function getPythonCmd() {
 
 function getRuntimeConfig() {
   const config = vscode.workspace.getConfiguration("secmp");
+  const runtimePath = String(config.get("runtimePath", "") || config.get("windowsRuntimePath", "") || "").trim();
+  const runtimeArchivePath = String(config.get("runtimeArchivePath", "") || config.get("windowsRuntimeArchivePath", "") || "").trim();
+  const runtimeUrl = String(config.get("runtimeUrl", "") || config.get("windowsRuntimeUrl", "") || "").trim();
+  const runtimeSha256 = String(config.get("runtimeSha256", "") || config.get("windowsRuntimeSha256", "") || "").trim().toLowerCase();
+  const runtimeVersion = String(config.get("runtimeVersion", "") || config.get("windowsRuntimeVersion", DEFAULT_RUNTIME_VERSION) || DEFAULT_RUNTIME_VERSION).trim();
   return {
-    windowsRuntimePath: String(config.get("windowsRuntimePath", "") || "").trim(),
-    windowsRuntimeArchivePath: String(config.get("windowsRuntimeArchivePath", "") || "").trim(),
-    windowsRuntimeUrl: String(config.get("windowsRuntimeUrl", "") || "").trim(),
-    windowsRuntimeSha256: String(config.get("windowsRuntimeSha256", "") || "").trim().toLowerCase(),
-    windowsRuntimeVersion: String(config.get("windowsRuntimeVersion", DEFAULT_WINDOWS_RUNTIME_VERSION) || DEFAULT_WINDOWS_RUNTIME_VERSION).trim(),
+    runtimePath,
+    runtimeArchivePath,
+    runtimeUrl,
+    runtimeSha256,
+    runtimeVersion,
+    // Backward-compatible aliases for older Windows settings.
+    windowsRuntimePath: runtimePath,
+    windowsRuntimeArchivePath: runtimeArchivePath,
+    windowsRuntimeUrl: runtimeUrl,
+    windowsRuntimeSha256: runtimeSha256,
+    windowsRuntimeVersion: runtimeVersion,
   };
 }
 
@@ -75,20 +90,32 @@ function getUpdateConfig() {
   };
 }
 
-function getWindowsRuntimeSourceKey(version, platform = "win32", arch = process.arch) {
+function isPackagedRuntimePlatform() {
+  return SUPPORTED_RUNTIME_PLATFORMS.has(process.platform);
+}
+
+function getRuntimePlatform() {
+  return process.platform;
+}
+
+function getRuntimePackageName(version, platform = getRuntimePlatform(), arch = process.arch) {
+  return `secmp-runtime-${platform}-${arch}-${version}.zip`;
+}
+
+function getWindowsRuntimeSourceKey(version, platform = getRuntimePlatform(), arch = process.arch) {
   return `${version}:${platform}:${arch}`;
 }
 
-function buildDefaultWindowsRuntimeUrl(version, arch = process.arch) {
-  const fileName = `secmp-runtime-win32-${arch}-${version}.zip`;
-  return `${DEFAULT_WINDOWS_RUNTIME_REPO}/releases/download/v${version}/${fileName}`;
+function buildDefaultWindowsRuntimeUrl(version, arch = process.arch, platform = getRuntimePlatform()) {
+  const fileName = getRuntimePackageName(version, platform, arch);
+  return `${DEFAULT_RUNTIME_REPO}/releases/download/v${version}/${fileName}`;
 }
 
 function getDefaultWindowsRuntimeSource() {
   const config = getRuntimeConfig();
-  const version = config.windowsRuntimeVersion;
+  const version = config.runtimeVersion;
   const key = getWindowsRuntimeSourceKey(version);
-  return DEFAULT_WINDOWS_RUNTIME_SOURCES[key] || {
+  return DEFAULT_RUNTIME_SOURCES[key] || {
     url: buildDefaultWindowsRuntimeUrl(version),
     sha256: "",
   };
@@ -100,8 +127,8 @@ function getDefaultWindowsRuntimeUrl() {
 
 function getExpectedWindowsRuntimeSha256() {
   const config = getRuntimeConfig();
-  if (config.windowsRuntimeSha256) {
-    return config.windowsRuntimeSha256;
+  if (config.runtimeSha256) {
+    return config.runtimeSha256;
   }
   return getDefaultWindowsRuntimeSource().sha256 || "";
 }
@@ -137,7 +164,7 @@ function isRuntimeVersionDir(entry) {
 }
 
 function getRuntimeVersionFromDownloadName(fileName) {
-  const match = String(fileName).match(/^secmp-runtime-win32-[^-]+-(.+)\.zip(?:\.sha256)?$/i);
+  const match = String(fileName).match(/^secmp-runtime-[^-]+-[^-]+-(.+)\.zip(?:\.sha256)?$/i);
   return match ? match[1] : null;
 }
 
@@ -161,8 +188,8 @@ function getRuntimeCacheKeepVersions(runtimeRoot, currentVersion) {
 
 function cleanWindowsRuntimeCache() {
   const config = getRuntimeConfig();
-  const runtimeRoot = path.join(extensionStorageDir, "windows-runtime");
-  const keepVersions = getRuntimeCacheKeepVersions(runtimeRoot, config.windowsRuntimeVersion);
+  const runtimeRoot = path.join(extensionStorageDir, "runtime", getRuntimePlatform(), process.arch);
+  const keepVersions = getRuntimeCacheKeepVersions(runtimeRoot, config.runtimeVersion);
   const result = {
     runtimeDirsRemoved: 0,
     downloadFilesRemoved: 0,
@@ -320,7 +347,7 @@ function runProcess(command, args, options = {}) {
 
 function getWindowsRuntimeDir() {
   const config = getRuntimeConfig();
-  return path.join(extensionStorageDir, "windows-runtime", config.windowsRuntimeVersion);
+  return path.join(extensionStorageDir, "runtime", getRuntimePlatform(), process.arch, config.runtimeVersion);
 }
 
 function getWindowsRuntimeManifestPath(runtimeDir = getWindowsRuntimeDir()) {
@@ -358,24 +385,24 @@ function isWindowsRuntimeReady(runtimeDir = getWindowsRuntimeDir()) {
   try {
     const config = getRuntimeConfig();
     const manifest = readJsonFile(manifestPath);
-    return manifest.platform === "win32" &&
+    return manifest.platform === getRuntimePlatform() &&
       manifest.arch === process.arch &&
-      manifest.runtimeVersion === config.windowsRuntimeVersion &&
+      manifest.runtimeVersion === config.runtimeVersion &&
       getManifestRuntimeApiVersion(manifest) === WINDOWS_RUNTIME_API_VERSION &&
       !!getWindowsRuntimeEntrypoint("proxyEngine", runtimeDir) &&
       !!getWindowsRuntimeEntrypoint("certManager", runtimeDir);
   } catch (err) {
-    log(`Invalid Windows runtime manifest: ${err.message}`);
+    log(`Invalid SecMP runtime manifest: ${err.message}`);
     return false;
   }
 }
 
 function getConfiguredWindowsRuntimePath() {
   const config = getRuntimeConfig();
-  if (!config.windowsRuntimePath) {
+  if (!config.runtimePath) {
     return null;
   }
-  const configuredPath = path.resolve(config.windowsRuntimePath);
+  const configuredPath = path.resolve(config.runtimePath);
   const runtimeDir = path.basename(configuredPath).toLowerCase() === "runtime"
     ? configuredPath
     : path.join(configuredPath, "runtime");
@@ -392,7 +419,7 @@ function getActiveWindowsRuntimeDir() {
 
 function findNestedRuntimeArchive(searchDir) {
   const config = getRuntimeConfig();
-  const expectedName = `secmp-runtime-win32-${process.arch}-${config.windowsRuntimeVersion}.zip`.toLowerCase();
+  const expectedName = getRuntimePackageName(config.runtimeVersion).toLowerCase();
   const stack = [searchDir];
   const zipFiles = [];
 
@@ -409,13 +436,13 @@ function findNestedRuntimeArchive(searchDir) {
   }
 
   return zipFiles.find(filePath => path.basename(filePath).toLowerCase() === expectedName) ||
-    zipFiles.find(filePath => path.basename(filePath).toLowerCase().startsWith("secmp-runtime-win32-")) ||
+    zipFiles.find(filePath => path.basename(filePath).toLowerCase().startsWith(`secmp-runtime-${getRuntimePlatform()}-`)) ||
     null;
 }
 
 async function promptForWindowsRuntimeArchive() {
   const selected = await vscode.window.showOpenDialog({
-    title: "Select SecMP Windows runtime package",
+    title: "Select SecMP runtime package",
     openLabel: "Use Runtime Package",
     canSelectFiles: true,
     canSelectFolders: false,
@@ -476,7 +503,78 @@ function requestJson(url, redirectCount = 0) {
   });
 }
 
-function downloadFile(url, destinationPath, expectedSha256, progress, label = "Downloading Windows runtime") {
+function getReleaseTagFromUrl(url) {
+  try {
+    const parsed = new URL(url);
+    const match = parsed.pathname.match(/\/releases\/tag\/([^/?#]+)/);
+    return match ? decodeURIComponent(match[1]) : "";
+  } catch (_) {
+    return "";
+  }
+}
+
+function requestLatestReleaseRedirect(url = GITHUB_RELEASE_LATEST_URL, redirectCount = 0) {
+  return new Promise((resolve, reject) => {
+    if (redirectCount > 5) {
+      reject(new Error("Too many redirects"));
+      return;
+    }
+
+    const parsedUrl = new URL(url);
+    const client = parsedUrl.protocol === "https:" ? https : http;
+    const request = client.get(parsedUrl, {
+      headers: {
+        "Accept": "text/html,application/xhtml+xml",
+        "User-Agent": `SecMP/${extensionPackage.version}`,
+      },
+    }, (response) => {
+      if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
+        const redirected = new URL(response.headers.location, parsedUrl).toString();
+        const tagName = getReleaseTagFromUrl(redirected);
+        response.resume();
+        if (tagName) {
+          resolve({
+            tagName,
+            releaseUrl: redirected,
+          });
+          return;
+        }
+        requestLatestReleaseRedirect(redirected, redirectCount + 1).then(resolve, reject);
+        return;
+      }
+
+      let body = "";
+      response.setEncoding("utf8");
+      response.on("data", (chunk) => {
+        body += chunk;
+        if (body.length > 1024 * 1024) {
+          request.destroy(new Error("GitHub release page is too large"));
+        }
+      });
+      response.on("end", () => {
+        if (response.statusCode !== 200) {
+          reject(new Error(`GitHub latest release page failed with HTTP ${response.statusCode}`));
+          return;
+        }
+        const match = body.match(/\/releases\/tag\/([^"'?#<]+)/);
+        const tagName = match ? decodeURIComponent(match[1]) : "";
+        if (!tagName) {
+          reject(new Error("Could not determine latest GitHub Release tag"));
+          return;
+        }
+        resolve({
+          tagName,
+          releaseUrl: `${DEFAULT_RUNTIME_REPO}/releases/tag/${encodeURIComponent(tagName)}`,
+        });
+      });
+    });
+
+    request.setTimeout(15000, () => request.destroy(new Error("GitHub latest release check timed out")));
+    request.on("error", reject);
+  });
+}
+
+function downloadFile(url, destinationPath, expectedSha256, progress, label = "Downloading SecMP runtime") {
   return new Promise((resolve, reject) => {
     const parsedUrl = new URL(url);
     const client = parsedUrl.protocol === "https:" ? https : http;
@@ -545,25 +643,29 @@ function downloadFile(url, destinationPath, expectedSha256, progress, label = "D
 }
 
 async function expandZipWindows(zipPath, destinationDir, progress) {
-  progress?.report({ message: "Extracting Windows runtime..." });
+  progress?.report({ message: "Extracting SecMP runtime..." });
   fs.rmSync(destinationDir, { recursive: true, force: true });
   fs.mkdirSync(destinationDir, { recursive: true });
-  await runProcess("powershell.exe", [
-    "-NoProfile",
-    "-ExecutionPolicy",
-    "Bypass",
-    "-Command",
-    "& { param($zipPath, $destinationDir) Expand-Archive -LiteralPath $zipPath -DestinationPath $destinationDir -Force }",
-    zipPath,
-    destinationDir,
-  ], { logOutput: true });
+  if (process.platform === "win32") {
+    await runProcess("powershell.exe", [
+      "-NoProfile",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-Command",
+      "& { param($zipPath, $destinationDir) Expand-Archive -LiteralPath $zipPath -DestinationPath $destinationDir -Force }",
+      zipPath,
+      destinationDir,
+    ], { logOutput: true });
+  } else {
+    await runProcess("unzip", ["-q", zipPath, "-d", destinationDir], { logOutput: true });
+  }
 }
 
 async function installWindowsRuntimeFromZip(zipPath, progress) {
   const config = getRuntimeConfig();
-  const runtimeRoot = path.join(extensionStorageDir, "windows-runtime");
+  const runtimeRoot = path.join(extensionStorageDir, "runtime", getRuntimePlatform(), process.arch);
   const runtimeDir = getWindowsRuntimeDir();
-  const stagingDir = path.join(runtimeRoot, "_staging", config.windowsRuntimeVersion);
+  const stagingDir = path.join(runtimeRoot, "_staging", config.runtimeVersion);
   await expandZipWindows(zipPath, stagingDir, progress);
 
   let extractedRuntimeDir = path.join(stagingDir, "runtime");
@@ -586,7 +688,7 @@ async function installWindowsRuntimeFromZip(zipPath, progress) {
   fs.rmSync(stagingDir, { recursive: true, force: true });
 
   if (!isWindowsRuntimeReady(runtimeDir)) {
-    throw new Error("Windows runtime installation completed but validation failed");
+    throw new Error("SecMP runtime installation completed but validation failed");
   }
 }
 
@@ -594,47 +696,54 @@ async function installWindowsRuntime(progress, selectedArchivePath = null) {
   const config = getRuntimeConfig();
   const configuredRuntimeDir = getConfiguredWindowsRuntimePath();
   if (configuredRuntimeDir) {
-    progress?.report({ message: "Using configured local Windows runtime..." });
+    progress?.report({ message: "Using configured local SecMP runtime..." });
     if (!isWindowsRuntimeReady(configuredRuntimeDir)) {
-      throw new Error(`Configured Windows runtime path is invalid: ${configuredRuntimeDir}`);
+      throw new Error(`Configured SecMP runtime path is invalid: ${configuredRuntimeDir}`);
     }
     return;
   }
 
-  if (config.windowsRuntimeArchivePath) {
-    const archivePath = path.resolve(config.windowsRuntimeArchivePath);
+  if (config.runtimeArchivePath) {
+    const archivePath = path.resolve(config.runtimeArchivePath);
     if (!fs.existsSync(archivePath)) {
-      throw new Error(`Windows runtime archive not found: ${archivePath}`);
+      throw new Error(`SecMP runtime archive not found: ${archivePath}`);
     }
-    progress?.report({ message: "Installing Windows runtime from local archive..." });
+    progress?.report({ message: "Installing SecMP runtime from local archive..." });
     await installWindowsRuntimeFromZip(archivePath, progress);
     return;
   }
 
   if (selectedArchivePath) {
-    progress?.report({ message: "Installing Windows runtime from selected package..." });
+    progress?.report({ message: "Installing SecMP runtime from selected package..." });
     await installWindowsRuntimeFromZip(selectedArchivePath, progress);
     return;
   }
 
-  const runtimeUrl = config.windowsRuntimeUrl || getDefaultWindowsRuntimeUrl();
+  const runtimeUrl = config.runtimeUrl || getDefaultWindowsRuntimeUrl();
   if (!runtimeUrl) {
-    throw new Error("Windows runtime package was not selected.");
+    throw new Error("SecMP runtime package was not selected.");
   }
-  const usingDefaultRuntimeUrl = !config.windowsRuntimeUrl;
+  const usingDefaultRuntimeUrl = !config.runtimeUrl;
 
-  const runtimeRoot = path.join(extensionStorageDir, "windows-runtime");
+  const runtimeRoot = path.join(extensionStorageDir, "runtime", getRuntimePlatform(), process.arch);
   const downloadDir = path.join(runtimeRoot, "_downloads");
-  const zipPath = path.join(downloadDir, `secmp-runtime-win32-${process.arch}-${config.windowsRuntimeVersion}.zip`);
+  const zipPath = path.join(downloadDir, getRuntimePackageName(config.runtimeVersion));
 
   fs.mkdirSync(downloadDir, { recursive: true });
   try {
-    await downloadFile(runtimeUrl, zipPath, getExpectedWindowsRuntimeSha256(), progress);
+    await downloadFile(runtimeUrl, zipPath, getExpectedWindowsRuntimeSha256(), progress, "Downloading SecMP runtime");
   } catch (err) {
     if (usingDefaultRuntimeUrl) {
+      progress?.report({ message: "Default runtime download failed. Select a local runtime package..." });
+      const archivePath = await promptForWindowsRuntimeArchive();
+      if (archivePath) {
+        progress?.report({ message: "Installing SecMP runtime from selected package..." });
+        await installWindowsRuntimeFromZip(archivePath, progress);
+        return;
+      }
       throw new Error(
         `${err.message}. Download the runtime zip from the SecMP GitHub Release and set ` +
-        "`secmp.windowsRuntimeArchivePath`, or configure `secmp.windowsRuntimeUrl`."
+        "`secmp.runtimeArchivePath`, or configure `secmp.runtimeUrl`."
       );
     }
     throw err;
@@ -671,22 +780,37 @@ function getExtensionUpdateFromRelease(release) {
     currentVersion,
     version: latestVersion,
     tagName: release.tag_name || `v${latestVersion}`,
-    releaseUrl: release.html_url || `${DEFAULT_WINDOWS_RUNTIME_REPO}/releases/tag/v${latestVersion}`,
+    releaseUrl: release.html_url || `${DEFAULT_RUNTIME_REPO}/releases/tag/v${latestVersion}`,
     assetName: asset.name,
     assetUrl: asset.browser_download_url,
   };
 }
 
-async function fetchLatestExtensionUpdate() {
-  const status = await fetchLatestExtensionReleaseStatus();
-  return status.update || null;
+function buildReleaseFromLatestTag(tagName, releaseUrl) {
+  const latestVersion = normalizeVersion(tagName);
+  if (!latestVersion) {
+    throw new Error(`Invalid GitHub Release tag: ${tagName || "unknown"}`);
+  }
+  const normalizedTag = tagName && String(tagName).startsWith("v") ? tagName : `v${latestVersion}`;
+  const assetName = `secmp-${latestVersion}.vsix`;
+  return {
+    draft: false,
+    prerelease: false,
+    tag_name: normalizedTag,
+    html_url: releaseUrl || `${DEFAULT_RUNTIME_REPO}/releases/tag/${normalizedTag}`,
+    assets: [
+      {
+        name: assetName,
+        browser_download_url: `${DEFAULT_RUNTIME_REPO}/releases/download/${normalizedTag}/${assetName}`,
+      },
+    ],
+  };
 }
 
-async function fetchLatestExtensionReleaseStatus() {
-  const release = await requestJson(GITHUB_RELEASE_API_URL);
+function setLatestExtensionReleaseStatusFromRelease(release, source, warning = "") {
   const currentVersion = normalizeVersion(extensionPackage.version);
   const latestVersion = normalizeVersion(release?.tag_name);
-  const releaseUrl = release?.html_url || (latestVersion ? `${DEFAULT_WINDOWS_RUNTIME_REPO}/releases/tag/v${latestVersion}` : DEFAULT_WINDOWS_RUNTIME_REPO);
+  const releaseUrl = release?.html_url || (latestVersion ? `${DEFAULT_RUNTIME_REPO}/releases/tag/v${latestVersion}` : DEFAULT_RUNTIME_REPO);
   const update = getExtensionUpdateFromRelease(release);
   latestExtensionReleaseStatus = {
     status: update ? "updateAvailable" : "upToDate",
@@ -697,8 +821,27 @@ async function fetchLatestExtensionReleaseStatus() {
     checkedAt: Date.now(),
     update,
     error: "",
+    source,
+    warning,
   };
   return latestExtensionReleaseStatus;
+}
+
+async function fetchLatestExtensionUpdate() {
+  const status = await fetchLatestExtensionReleaseStatus();
+  return status.update || null;
+}
+
+async function fetchLatestExtensionReleaseStatus() {
+  try {
+    const release = await requestJson(GITHUB_RELEASE_API_URL);
+    return setLatestExtensionReleaseStatusFromRelease(release, "api");
+  } catch (apiErr) {
+    log(`GitHub Releases API check failed, falling back to releases/latest: ${apiErr.message}`);
+    const latest = await requestLatestReleaseRedirect();
+    const release = buildReleaseFromLatestTag(latest.tagName, latest.releaseUrl);
+    return setLatestExtensionReleaseStatusFromRelease(release, "latestRedirect", apiErr.message);
+  }
 }
 
 async function openRelease(update) {
@@ -816,7 +959,7 @@ async function checkForExtensionUpdate(context, options = {}) {
       currentVersion: normalizeVersion(extensionPackage.version),
       latestVersion: "",
       tagName: "",
-      releaseUrl: DEFAULT_WINDOWS_RUNTIME_REPO,
+      releaseUrl: DEFAULT_RUNTIME_REPO,
       checkedAt: Date.now(),
       update: null,
       error: err.message,
@@ -836,27 +979,28 @@ function getRuntimeEnvironmentInfo() {
   const config = getRuntimeConfig();
   const runtimeDir = getActiveWindowsRuntimeDir();
   const manifestPath = getWindowsRuntimeManifestPath(runtimeDir);
+  const packagedRuntime = isPackagedRuntimePlatform();
   const info = {
     status: "notRequired",
-    valid: process.platform !== "win32",
-    version: process.platform === "win32" ? config.windowsRuntimeVersion : "source",
-    apiVersion: process.platform === "win32" ? WINDOWS_RUNTIME_API_VERSION : null,
+    valid: !packagedRuntime,
+    version: packagedRuntime ? config.runtimeVersion : "source",
+    apiVersion: packagedRuntime ? WINDOWS_RUNTIME_API_VERSION : null,
     platform: process.platform,
     arch: process.arch,
-    source: process.platform === "win32" ? "VS Code global storage" : "Source/dev",
-    path: process.platform === "win32" ? runtimeDir : TOOLS_DIR,
+    source: packagedRuntime ? "VS Code global storage" : "Source/dev",
+    path: packagedRuntime ? runtimeDir : TOOLS_DIR,
     error: "",
   };
 
-  if (process.platform !== "win32") {
+  if (!packagedRuntime) {
     return info;
   }
 
-  if (config.windowsRuntimePath) {
+  if (config.runtimePath) {
     info.source = "Configured path";
-  } else if (config.windowsRuntimeArchivePath) {
+  } else if (config.runtimeArchivePath) {
     info.source = "Configured archive";
-  } else if (config.windowsRuntimeUrl) {
+  } else if (config.runtimeUrl) {
     info.source = "Configured URL";
   }
 
@@ -868,7 +1012,7 @@ function getRuntimeEnvironmentInfo() {
 
   try {
     const manifest = readJsonFile(manifestPath);
-    info.version = manifest.runtimeVersion || config.windowsRuntimeVersion;
+    info.version = manifest.runtimeVersion || config.runtimeVersion;
     info.apiVersion = getManifestRuntimeApiVersion(manifest);
     info.valid = isWindowsRuntimeReady(runtimeDir);
     info.status = info.valid ? "ready" : "invalid";
@@ -938,11 +1082,55 @@ function getUpdateEnvironmentInfo(context) {
       currentVersion: normalizeVersion(extensionPackage.version),
       latestVersion: "",
       tagName: "",
-      releaseUrl: DEFAULT_WINDOWS_RUNTIME_REPO,
+      releaseUrl: DEFAULT_RUNTIME_REPO,
       checkedAt: 0,
       update: null,
       error: "",
     },
+  };
+}
+
+function getUpdateActionMessage(status) {
+  if (!status || status.status === "unknown") {
+    return "Update check finished.";
+  }
+  if (status.status === "error") {
+    return `Update check failed: ${status.error || "unknown error"}`;
+  }
+  if (status.status === "updateAvailable") {
+    const version = status.update?.version || status.latestVersion || "";
+    return `SecMP ${version} is available.`;
+  }
+  if (status.status === "upToDate") {
+    const version = status.currentVersion || normalizeVersion(extensionPackage.version);
+    return `SecMP is up to date (${version}).`;
+  }
+  return "Update check finished.";
+}
+
+function getFallbackEnvironmentStatus(context, error) {
+  return {
+    extension: {
+      version: normalizeVersion(extensionPackage.version),
+    },
+    runtime: {
+      ...getRuntimeEnvironmentInfo(),
+      error: error?.message || String(error || ""),
+    },
+    adb: {
+      available: false,
+      version: "",
+      detail: "",
+      error: error?.message || String(error || ""),
+    },
+    device: deviceInfo,
+    mitmproxy: { running: false, version: "", error: "" },
+    platform: {
+      os: process.platform,
+      arch: process.arch,
+      node: process.version,
+    },
+    updates: getUpdateEnvironmentInfo(context),
   };
 }
 
@@ -1002,7 +1190,13 @@ function formatEnvironmentInfoForClipboard(status) {
 
 async function postEnvironmentStatus(context) {
   if (!panel) return;
-  const status = await getEnvironmentStatus(context);
+  let status;
+  try {
+    status = await getEnvironmentStatus(context);
+  } catch (err) {
+    log(`Failed to collect environment status: ${err.message}`);
+    status = getFallbackEnvironmentStatus(context, err);
+  }
   panel.webview.postMessage({
     command: "environmentStatus",
     status,
@@ -1010,7 +1204,7 @@ async function postEnvironmentStatus(context) {
 }
 
 async function ensureWindowsRuntime() {
-  if (process.platform !== "win32") {
+  if (!isPackagedRuntimePlatform()) {
     return;
   }
   if (isWindowsRuntimeReady(getActiveWindowsRuntimeDir())) {
@@ -1019,18 +1213,18 @@ async function ensureWindowsRuntime() {
   const config = getRuntimeConfig();
   const hasRuntimeSource = !!(
     getConfiguredWindowsRuntimePath() ||
-    config.windowsRuntimeArchivePath ||
-    config.windowsRuntimeUrl ||
+    config.runtimeArchivePath ||
+    config.runtimeUrl ||
     getDefaultWindowsRuntimeUrl()
   );
   const selectedArchivePath = hasRuntimeSource ? null : await promptForWindowsRuntimeArchive();
   if (!hasRuntimeSource && !selectedArchivePath) {
-    throw new Error("Windows runtime is required to start the proxy. Select a runtime package and try again.");
+    throw new Error("SecMP runtime is required to start the proxy. Select a runtime package and try again.");
   }
   if (!windowsRuntimeReadyPromise) {
     windowsRuntimeReadyPromise = vscode.window.withProgress({
       location: vscode.ProgressLocation.Notification,
-      title: "Preparing SecMP Windows runtime",
+      title: "Preparing SecMP runtime",
       cancellable: false,
     }, async (progress) => {
       try {
@@ -1045,7 +1239,7 @@ async function ensureWindowsRuntime() {
 }
 
 async function getProxyEngineCommand() {
-  if (process.platform === "win32") {
+  if (isPackagedRuntimePlatform()) {
     await ensureWindowsRuntime();
     const runtimeDir = getActiveWindowsRuntimeDir();
     return {
@@ -1060,7 +1254,7 @@ async function getProxyEngineCommand() {
 }
 
 async function getCertManagerCommand() {
-  if (process.platform === "win32") {
+  if (isPackagedRuntimePlatform()) {
     await ensureWindowsRuntime();
     const runtimeDir = getActiveWindowsRuntimeDir();
     return {
@@ -1188,6 +1382,7 @@ async function pollFlows() {
     if (flows.length === 0 && capturedFlows.length > 0) {
       capturedFlows = [];
       knownFlowIds.clear();
+      ignoredFlowIdsAfterClear.clear();
       if (panel) {
         panel.webview.postMessage({ command: "flowsCleared" });
       }
@@ -1197,6 +1392,9 @@ async function pollFlows() {
     // Check for new flows
     const newFlows = [];
     for (const f of flows) {
+      if (ignoredFlowIdsAfterClear.has(f.id)) {
+        continue;
+      }
       if (!knownFlowIds.has(f.id)) {
         knownFlowIds.add(f.id);
         newFlows.push(f);
@@ -1252,6 +1450,7 @@ async function pollFlows() {
 function startFlowPolling() {
   stopFlowPolling();
   knownFlowIds.clear();
+  ignoredFlowIdsAfterClear.clear();
   capturedFlows = [];
   pollingTimer = setInterval(pollFlows, 500);
 }
@@ -1371,7 +1570,25 @@ async function startProxyEngine(port) {
     });
 
     let started = false;
+    let proxyReady = false;
     let stderrBuffer = "";
+    let startupTimer = null;
+
+    webPort = null;
+    authToken = null;
+
+    function resolveStarted() {
+      if (started || !proxyReady || !webPort || !authToken) {
+        return;
+      }
+      started = true;
+      if (startupTimer) {
+        clearTimeout(startupTimer);
+        startupTimer = null;
+      }
+      startFlowPolling();
+      resolve({ success: true, message: `Proxy started on port ${port}`, webPort: wPort });
+    }
 
     proxyProcess.stderr.on("data", (data) => {
       const text = data.toString();
@@ -1395,11 +1612,9 @@ async function startProxyEngine(port) {
       }
 
       // mitmproxy outputs "Proxy server listening" to stderr when ready
-      if (!started && (text.includes("listening") || text.includes("Proxy server listening"))) {
-        started = true;
-        // Start polling flows
-        startFlowPolling();
-        resolve({ success: true, message: `Proxy started on port ${port}`, webPort: wPort });
+      if (text.includes("listening") || text.includes("Proxy server listening")) {
+        proxyReady = true;
+        resolveStarted();
       }
     });
 
@@ -1411,6 +1626,10 @@ async function startProxyEngine(port) {
       log(`Proxy engine error: ${err.message}`);
       proxyProcess = null;
       stopFlowPolling();
+      if (startupTimer) {
+        clearTimeout(startupTimer);
+        startupTimer = null;
+      }
       if (!started) {
         reject(err);
       }
@@ -1422,6 +1641,10 @@ async function startProxyEngine(port) {
       stopFlowPolling();
       webPort = null;
       authToken = null;
+      if (startupTimer) {
+        clearTimeout(startupTimer);
+        startupTimer = null;
+      }
       if (!started) {
         started = true;
         reject(new Error(`Proxy engine exited before startup completed (code ${code})`));
@@ -1436,13 +1659,13 @@ async function startProxyEngine(port) {
     });
 
     // Timeout if mitmproxy doesn't report started
-    setTimeout(() => {
+    startupTimer = setTimeout(() => {
       if (!started) {
         started = true;
-        startFlowPolling();
-        resolve({ success: true, message: `Proxy engine spawned on port ${port}`, webPort: wPort });
+        const detail = stderrBuffer.trim();
+        reject(new Error(`Proxy engine did not report readiness within 45s${detail ? `: ${detail}` : ""}`));
       }
-    }, 5000);
+    }, 45000);
   });
 }
 
@@ -1491,11 +1714,13 @@ function getWebviewContent(webview) {
   html = html.replace("./style.css", styleUri.toString());
   html = html.replace("./app.js", scriptUri.toString());
   html = html.replace("./assets/header-icon.png", headerIconUri.toString());
+  html = html.replaceAll("__EXTENSION_VERSION__", normalizeVersion(extensionPackage.version));
 
   return html;
 }
 
 async function createPanel() {
+  const context = extensionContext;
   if (panel) {
     panel.reveal(vscode.ViewColumn.One);
     return;
@@ -1515,6 +1740,7 @@ async function createPanel() {
   );
 
   panel.webview.html = getWebviewContent(panel.webview);
+  panel.iconPath = vscode.Uri.file(path.join(__dirname, "media", "icon.png"));
 
   panel.webview.onDidReceiveMessage(async (message) => {
     switch (message.command) {
@@ -1570,7 +1796,15 @@ async function createPanel() {
           running: true,
           message: "Checking GitHub Release...",
         });
-        await checkForExtensionUpdate(context, { manual: true, notify: false, progress: false });
+        {
+          const status = await checkForExtensionUpdate(context, { manual: true, notify: false, progress: false });
+          panel.webview.postMessage({
+            command: "environmentActionResult",
+            action: "checkUpdates",
+            running: false,
+            message: getUpdateActionMessage(status),
+          });
+        }
         await postEnvironmentStatus(context);
         break;
 
@@ -1611,7 +1845,7 @@ async function createPanel() {
       }
 
       case "openLatestRelease": {
-        const releaseUrl = latestExtensionReleaseStatus?.releaseUrl || DEFAULT_WINDOWS_RUNTIME_REPO;
+        const releaseUrl = latestExtensionReleaseStatus?.releaseUrl || DEFAULT_RUNTIME_REPO;
         await vscode.env.openExternal(vscode.Uri.parse(releaseUrl));
         break;
       }
@@ -1763,6 +1997,12 @@ async function createPanel() {
         break;
 
       case "clearFlows": {
+        for (const id of knownFlowIds) {
+          ignoredFlowIdsAfterClear.add(id);
+        }
+        for (const flow of capturedFlows) {
+          ignoredFlowIdsAfterClear.add(flow.id);
+        }
         capturedFlows = [];
         knownFlowIds.clear();
         // Also clear flows in mitmproxy via REST API
@@ -2097,6 +2337,7 @@ async function loadSession() {
 // ===== Extension Activation =====
 
 function activate(context) {
+  extensionContext = context;
   outputChannel = vscode.window.createOutputChannel("SecMP");
   log("SecMP extension activated");
   initializeRuntimeStorage(context);

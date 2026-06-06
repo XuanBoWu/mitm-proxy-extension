@@ -3,7 +3,7 @@
   "displayName": "SecMP",
   "icon": "media/icon.png",
   "description": "Android security testing proxy with ADB certificate injection and traffic capture",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "publisher": "xbowu",
   "license": "MIT",
   "repository": {
@@ -30,6 +30,7 @@
     "vscode": "^1.74.0"
   },
   "scripts": {
+    "runtime:macos": "bash scripts/build-macos-runtime.sh",
     "runtime:windows": "powershell -ExecutionPolicy Bypass -File scripts/build-windows-runtime.ps1",
     "runtime:windows:test-install": "node scripts/test-extension-runtime-install.js"
   },
@@ -41,30 +42,55 @@
     "configuration": {
       "title": "SecMP",
       "properties": {
+        "secmp.runtimePath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional local SecMP runtime directory. Point this to the extracted runtime directory, or to a parent directory containing runtime/. This takes precedence over archive and URL settings."
+        },
+        "secmp.runtimeArchivePath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional local SecMP runtime zip path. The extension extracts this archive into global storage when the runtime is missing or invalid. This takes precedence over runtimeUrl."
+        },
+        "secmp.runtimeUrl": {
+          "type": "string",
+          "default": "",
+          "description": "Optional URL for the SecMP runtime zip. Leave empty to use the runtime from the matching GitHub Release."
+        },
+        "secmp.runtimeSha256": {
+          "type": "string",
+          "default": "",
+          "description": "Optional SHA-256 checksum for the SecMP runtime zip. Leave empty to use the built-in checksum for the default GitHub Release runtime when available."
+        },
+        "secmp.runtimeVersion": {
+          "type": "string",
+          "default": "0.1.2",
+          "description": "Expected SecMP runtime version. Changing this value forces the extension to install that runtime version."
+        },
         "secmp.windowsRuntimePath": {
           "type": "string",
           "default": "",
-          "description": "Optional local Windows runtime directory. Point this to the extracted runtime directory, or to a parent directory containing runtime/. This takes precedence over archive and URL settings."
+          "description": "Deprecated compatibility setting. Use secmp.runtimePath instead."
         },
         "secmp.windowsRuntimeArchivePath": {
           "type": "string",
           "default": "",
-          "description": "Optional local Windows runtime zip path. The extension extracts this archive into global storage when the runtime is missing or invalid. This takes precedence over windowsRuntimeUrl."
+          "description": "Deprecated compatibility setting. Use secmp.runtimeArchivePath instead."
         },
         "secmp.windowsRuntimeUrl": {
           "type": "string",
           "default": "",
-          "description": "Optional URL for the Windows runtime zip. Leave empty to use the runtime from the matching GitHub Release."
+          "description": "Deprecated compatibility setting. Use secmp.runtimeUrl instead."
         },
         "secmp.windowsRuntimeSha256": {
           "type": "string",
           "default": "",
-          "description": "Optional SHA-256 checksum for the Windows runtime zip. Leave empty to use the built-in checksum for the default GitHub Release runtime when available."
+          "description": "Deprecated compatibility setting. Use secmp.runtimeSha256 instead."
         },
         "secmp.windowsRuntimeVersion": {
           "type": "string",
-          "default": "0.1.0",
-          "description": "Expected Windows runtime version. Changing this value forces the extension to install that runtime version."
+          "default": "0.1.2",
+          "description": "Deprecated compatibility setting. Use secmp.runtimeVersion instead."
         },
         "secmp.updateCheckEnabled": {
           "type": "boolean",

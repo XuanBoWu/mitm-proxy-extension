@@ -54,10 +54,6 @@ function readJsonFile(filePath) {
 }
 
 async function main() {
-  if (process.platform !== "win32") {
-    throw new Error("This test exercises the Windows runtime path and must run on Windows.");
-  }
-
   const args = parseArgs(process.argv.slice(2));
   const repoRoot = path.resolve(__dirname, "..");
   const extensionPath = path.join(repoRoot, "extension.js");
@@ -81,6 +77,11 @@ async function main() {
       getConfiguration: () => ({
         get: (name, defaultValue) => {
           const values = {
+            runtimePath: "",
+            runtimeArchivePath: args.runtimeZip,
+            runtimeUrl: "",
+            runtimeSha256: "",
+            runtimeVersion: args.runtimeVersion,
             windowsRuntimePath: "",
             windowsRuntimeArchivePath: args.runtimeZip,
             windowsRuntimeUrl: "",
@@ -97,7 +98,7 @@ async function main() {
         dispose() {},
       }),
       showOpenDialog: async () => {
-        throw new Error("showOpenDialog should not be called when windowsRuntimeArchivePath is configured.");
+        throw new Error("showOpenDialog should not be called when runtimeArchivePath is configured.");
       },
       withProgress: async (_options, task) => task({ report() {} }),
       showInformationMessage: async () => undefined,
@@ -147,7 +148,7 @@ async function main() {
     await sandbox.stopProxyEngine();
     proxyStarted = false;
 
-    const runtimeDir = path.join(storageDir, "windows-runtime", args.runtimeVersion);
+    const runtimeDir = path.join(storageDir, "runtime", process.platform, process.arch, args.runtimeVersion);
     const manifestPath = path.join(runtimeDir, "manifest.json");
     if (!fs.existsSync(manifestPath)) {
       throw new Error(`Runtime manifest was not installed: ${manifestPath}`);
@@ -164,7 +165,13 @@ async function main() {
       throw new Error("Installed runtime entrypoints are missing.");
     }
 
-    console.log(`Extension runtime install/use smoke test passed: ${args.runtimeZip}`);
+    console.log(`Extension runtime install/use smoke test passed on ${process.platform}-${process.arch}: ${args.runtimeZip}`);
+  } catch (err) {
+    if (logs.length) {
+      console.error("Extension output log:");
+      console.error(logs.join("\n"));
+    }
+    throw err;
   } finally {
     if (proxyStarted) {
       try {

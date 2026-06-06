@@ -13,11 +13,11 @@ Installed extensions can check GitHub Releases for newer VSIX packages through `
 
 ## Release Versioning
 
-Use SemVer-style versions for both the VSIX and the Windows runtime:
+Use SemVer-style versions for both the VSIX and the packaged runtime:
 
 ```text
-0.1.0
-v0.1.0
+0.1.2
+v0.1.2
 ```
 
 The Git tag includes the leading `v`. The package version and runtime version do not.
@@ -29,29 +29,41 @@ Before creating a release:
 - Confirm the working tree contains only intended release changes.
 - Confirm the icon asset is selected and wired into `package.json`.
 - Confirm `README.md`, `README.zh-CN.md`, `LICENSE`, `CHANGELOG.md`, `SECURITY.md`, `RELEASE_NOTES.md`, and runtime documentation are up to date.
-- Confirm local Windows runtime build and extension runtime install smoke tests pass.
+- Confirm local packaged runtime build and extension runtime install smoke tests pass for the target platform.
 - Confirm GitHub Actions build, runtime smoke tests, and VSIX packaging pass.
 - Confirm the release job uses the `release` environment if manual approval is required.
-- Confirm release notes mention the Windows firewall prompt and the rooted Android device requirement.
+- Confirm release notes mention OS network access prompts and the rooted Android device requirement.
 
 ## Local Validation
 
 Build the Windows runtime:
 
 ```powershell
-npm run runtime:windows -- -RuntimeVersion 0.1.0 -OutputDir dist
+npm run runtime:windows -- -RuntimeVersion 0.1.2 -OutputDir dist
+```
+
+Build the macOS runtime:
+
+```bash
+npm run runtime:macos -- --runtime-version 0.1.2 --output-dir dist
 ```
 
 Smoke test the runtime:
 
 ```powershell
-.\scripts\test-windows-runtime.ps1 -RuntimeZip .\dist\secmp-runtime-win32-x64-0.1.0.zip -RuntimeVersion 0.1.0
+.\scripts\test-windows-runtime.ps1 -RuntimeZip .\dist\secmp-runtime-win32-x64-0.1.2.zip -RuntimeVersion 0.1.2
 ```
 
 Smoke test extension runtime installation:
 
 ```powershell
-npm run runtime:windows:test-install -- --runtime-zip .\dist\secmp-runtime-win32-x64-0.1.0.zip --runtime-version 0.1.0
+npm run runtime:windows:test-install -- --runtime-zip .\dist\secmp-runtime-win32-x64-0.1.2.zip --runtime-version 0.1.2
+```
+
+On macOS, use the same install smoke test with the macOS runtime zip:
+
+```bash
+node scripts/test-extension-runtime-install.js --runtime-zip dist/secmp-runtime-darwin-arm64-0.1.2.zip --runtime-version 0.1.2
 ```
 
 Package the VSIX:
@@ -67,32 +79,34 @@ After the final code is on `master`, create and push a tag:
 ```powershell
 git checkout master
 git pull --ff-only
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.1.2
+git push origin v0.1.2
 ```
 
-The `Build Windows Runtime` workflow will:
+The `Build Runtime Packages` workflow will:
 
 - build `secmp-runtime-win32-x64-<version>.zip`
+- build `secmp-runtime-darwin-arm64-<version>.zip`
 - generate `secmp-runtime-win32-x64-<version>.zip.sha256`
+- generate `secmp-runtime-darwin-arm64-<version>.zip.sha256`
 - run runtime and extension install smoke tests
 - package `secmp-<version>.vsix`
-- attach the runtime zip, checksum, and VSIX to the GitHub Release
+- attach the runtime zips, checksums, and VSIX to the GitHub Release
 
 For a manual release run, trigger the workflow with:
 
 ```text
 publish=true
-runtime_version=0.1.0
-release_tag=v0.1.0
+runtime_version=0.1.2
+release_tag=v0.1.2
 ```
 
 ## Release Notes Template
 
 ```markdown
-## SecMP 0.1.0
+## SecMP 0.1.2
 
-Initial GitHub release.
+Patch release for packaged macOS runtime support, Environment / About reliability, and GitHub Release update-check fallback.
 
 ### Highlights
 
@@ -100,20 +114,22 @@ Initial GitHub release.
 - ADB-powered device proxy setup and clearing.
 - Rooted Android CA certificate injection.
 - HAR and JSON export.
-- Packaged Windows runtime with automatic GitHub Release download, no local Python or mitmproxy install required.
-- GitHub Release update checks for installing newer VSIX packages without Marketplace publishing.
+- Packaged Windows/macOS runtime with automatic GitHub Release download, no local Python or mitmproxy install required.
+- GitHub Release update checks with `/releases/latest` fallback for installing newer VSIX packages without Marketplace publishing.
 
 ### Requirements
 
-- Windows with VS Code or VSCodium.
+- Windows or macOS with VS Code or VSCodium.
 - ADB available on PATH.
 - Rooted Android device with USB debugging enabled.
-- Internet access on first proxy start, or the Windows runtime zip for offline installation.
-- Allow the Windows firewall prompt on first proxy start.
+- Internet access on first proxy start, or the platform runtime zip for offline installation.
+- Allow OS network access prompts on first proxy start.
 
 ### Assets
 
-- `secmp-0.1.0.vsix`
-- `secmp-runtime-win32-x64-0.1.0.zip`
-- `secmp-runtime-win32-x64-0.1.0.zip.sha256`
+- `secmp-0.1.2.vsix`
+- `secmp-runtime-win32-x64-0.1.2.zip`
+- `secmp-runtime-win32-x64-0.1.2.zip.sha256`
+- `secmp-runtime-darwin-arm64-0.1.2.zip`
+- `secmp-runtime-darwin-arm64-0.1.2.zip.sha256`
 ```

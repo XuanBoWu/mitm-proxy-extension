@@ -17,21 +17,21 @@ SecMP is intended for authorized testing of devices and applications you own or 
 - Inspect request and response headers and bodies in a Burp-style viewer.
 - Filter by URL, headers, bodies, method, status, type, and protocol.
 - Export captures as HAR or JSON.
-- Run on Windows with a packaged runtime, without requiring users to install Python or mitmproxy.
+- Run on Windows and macOS with a packaged runtime, without requiring users to install Python or mitmproxy.
 
 ## Requirements
 
-### Windows
+### Windows / macOS
 
 - VS Code or VSCodium.
 - ADB available on `PATH`.
 - A rooted Android device with USB debugging enabled.
 - The SecMP VSIX package.
-- Internet access on first proxy start, or the SecMP Windows runtime zip from the same GitHub Release for offline installation.
+- Internet access on first proxy start, or the SecMP runtime zip from the same GitHub Release for offline installation.
 
-### macOS / Linux
+### Linux
 
-The extension can still run from source, but the packaged runtime flow currently targets Windows. macOS and Linux users need Python and the Python dependencies installed manually.
+Linux can still run from source, but the packaged runtime flow currently targets Windows and macOS. Linux users need Python and the Python dependencies installed manually.
 
 ## Install From GitHub Release
 
@@ -39,14 +39,14 @@ The extension can still run from source, but the packaged runtime flow currently
 2. In VS Code or VSCodium, run `Extensions: Install from VSIX...`.
 3. Select the downloaded VSIX.
 4. Run `SecMP: Start Proxy`.
-5. SecMP downloads the matching Windows runtime from the GitHub Release and caches it in VS Code global storage.
-6. If Windows asks for network access, allow Private network access.
+5. SecMP downloads the matching runtime from the GitHub Release and caches it in VS Code global storage.
+6. If the OS asks for network access, allow local network/private network access.
 
 The runtime is extracted into VS Code global storage and reused on later starts.
 
 SecMP can also check GitHub Releases for a newer VSIX without using the VS Code Marketplace. Run `SecMP: Check for Updates`, or keep the default automatic check enabled. When an update is available, SecMP downloads the VSIX from the release and starts VS Code's VSIX installation flow after you confirm.
 
-For offline installation, download `secmp-runtime-win32-x64-<version>.zip` from the same release and configure `secmp.windowsRuntimeArchivePath`, or select the zip if prompted.
+For offline installation, download the matching `secmp-runtime-<platform>-<arch>-<version>.zip` from the same release and configure `secmp.runtimeArchivePath`, or select the zip if prompted.
 
 ## Quick Start
 
@@ -78,25 +78,25 @@ Settings are optional for normal manual installation.
 
 ```json
 {
-  "secmp.windowsRuntimeVersion": "0.1.0",
+  "secmp.runtimeVersion": "0.1.2",
   "secmp.updateCheckEnabled": true,
   "secmp.updateCheckIntervalHours": 24
 }
 ```
 
-By default, SecMP downloads the matching Windows runtime from the GitHub Release and validates it with the built-in checksum when available.
+By default, SecMP downloads the matching runtime from the GitHub Release and validates it with the built-in checksum when available.
 
-The runtime version is separate from the VSIX version. SecMP reuses a cached runtime while `secmp.windowsRuntimeVersion` stays the same, and installs a new runtime when that setting changes.
+The runtime version is separate from the VSIX version. SecMP reuses a cached runtime while `secmp.runtimeVersion` stays the same, and installs a new runtime when that setting changes.
 
-The update checker only checks the extension VSIX version. Runtime upgrades are still controlled by `secmp.windowsRuntimeVersion`, so an extension update can reuse the existing runtime when the runtime API and version have not changed.
+The update checker only checks the extension VSIX version. Runtime upgrades are still controlled by `secmp.runtimeVersion`, so an extension update can reuse the existing runtime when the runtime API and version have not changed.
 
-Use `SecMP: Clean Runtime Cache` to remove old cached Windows runtimes. The command keeps the current runtime version and the newest previous version, deletes older runtime directories and stale downloaded runtime zips, and does not delete the mitmproxy CA/config directory.
+Use `SecMP: Clean Runtime Cache` to remove old cached runtimes for the current platform. The command keeps the current runtime version and the newest previous version, deletes older runtime directories and stale downloaded runtime zips, and does not delete the mitmproxy CA/config directory.
 
 For offline installation, configure a local runtime archive path:
 
 ```json
 {
-  "secmp.windowsRuntimeArchivePath": "C:\\Users\\me\\Downloads\\secmp-runtime-win32-x64-0.1.0.zip"
+  "secmp.runtimeArchivePath": "C:\\Users\\me\\Downloads\\secmp-runtime-win32-x64-0.1.2.zip"
 }
 ```
 
@@ -104,18 +104,20 @@ You can also point to an extracted runtime directory:
 
 ```json
 {
-  "secmp.windowsRuntimePath": "C:\\tools\\secmp-runtime\\runtime"
+  "secmp.runtimePath": "C:\\tools\\secmp-runtime\\runtime"
 }
 ```
 
 Runtime source priority:
 
 1. Cached runtime in VS Code global storage.
-2. `secmp.windowsRuntimePath`.
-3. `secmp.windowsRuntimeArchivePath`.
-4. `secmp.windowsRuntimeUrl`.
+2. `secmp.runtimePath`.
+3. `secmp.runtimeArchivePath`.
+4. `secmp.runtimeUrl`.
 5. Matching GitHub Release runtime.
 6. File picker prompt.
+
+The older `secmp.windowsRuntime*` settings still work as compatibility aliases, but new installations should use `secmp.runtime*`.
 
 ## Android Certificate Notes
 
@@ -162,7 +164,13 @@ python -m venv .venv
 Build the Windows runtime:
 
 ```powershell
-npm run runtime:windows -- -RuntimeVersion 0.1.0 -OutputDir dist
+npm run runtime:windows -- -RuntimeVersion 0.1.2 -OutputDir dist
+```
+
+Build the macOS runtime:
+
+```bash
+npm run runtime:macos -- --runtime-version 0.1.2 --output-dir dist
 ```
 
 Package the extension:
@@ -178,6 +186,8 @@ A GitHub Release contains:
 - `secmp-<version>.vsix`
 - `secmp-runtime-win32-x64-<version>.zip`
 - `secmp-runtime-win32-x64-<version>.zip.sha256`
+- `secmp-runtime-darwin-arm64-<version>.zip`
+- `secmp-runtime-darwin-arm64-<version>.zip.sha256`
 
 Release planning and validation steps are documented in [docs/release.md](docs/release.md).
 

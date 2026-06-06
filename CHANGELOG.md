@@ -4,8 +4,18 @@ All notable changes to SecMP are documented in this file.
 
 ## Unreleased
 
-- Added an Environment / About panel with extension, runtime, ADB, mitmproxy, platform, and update status.
-- Added in-panel controls for checking updates, changing the auto-check interval, cleaning runtime cache, opening the release page, and copying environment diagnostics.
+## 0.1.2 - 2026-06-06
+
+- Added packaged macOS runtime support and generic `secmp.runtime*` settings shared by Windows and macOS.
+- Added a compact Environment / About popover with combined extension/runtime version display, update settings, and diagnostics.
+- Added GitHub Release update-check fallback through `/releases/latest` when the GitHub API is rate-limited or returns HTTP 403.
+- Added the SecMP logo as the capture panel tab icon.
+- Fixed clear capture behavior so previously cleared flows do not reappear when new traffic arrives.
+- Added a confirmation prompt before clearing captured flows.
+- Fixed Environment / About status collection so runtime, ADB, platform, and diagnostics populate correctly.
+- Fixed update checking from the About popover so it reports success, update availability, or failure instead of staying in a loading state.
+- Fixed default runtime download fallback so a failed GitHub runtime download prompts for a local runtime zip.
+- Fixed packaged runtime startup detection so slow macOS runtime startup waits for real readiness instead of returning before the web API token is available.
 
 ## 0.1.1 - 2026-06-05
 

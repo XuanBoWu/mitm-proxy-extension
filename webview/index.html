@@ -139,92 +139,7 @@
         <button id="loadSessionBtn" class="btn btn-block btn-sm">加载会话</button>
       </div>
 
-      <button id="environmentSummary" class="environment-summary" type="button" aria-expanded="false">
-        <span class="environment-summary-main">SecMP v<span id="envSummaryVersion">-</span></span>
-        <span class="environment-summary-state">
-          <span id="envSummaryDot" class="dot neutral"></span>
-          <span id="envSummaryText">Checking</span>
-        </span>
-      </button>
         </div><!-- .panel-body -->
-
-        <div id="environmentPanel" class="environment-panel" hidden>
-          <div class="environment-panel-header">
-            <div>
-              <div class="environment-title">Environment / About</div>
-              <div id="environmentSubtitle" class="environment-subtitle">SecMP environment status</div>
-            </div>
-            <button id="environmentCloseBtn" class="collapse-btn" title="关闭">×</button>
-          </div>
-
-          <div class="environment-panel-body">
-            <section class="environment-section">
-              <h3>Version</h3>
-              <dl class="environment-dl">
-                <dt>Extension</dt><dd id="envExtensionVersion">-</dd>
-                <dt>Runtime</dt><dd id="envRuntimeVersion">-</dd>
-                <dt>Runtime API</dt><dd id="envRuntimeApi">-</dd>
-                <dt>mitmproxy</dt><dd id="envMitmproxyVersion">-</dd>
-              </dl>
-            </section>
-
-            <section class="environment-section">
-              <h3>Environment</h3>
-              <dl class="environment-dl">
-                <dt>ADB</dt><dd id="envAdbStatus">-</dd>
-                <dt>ADB version</dt><dd id="envAdbVersion">-</dd>
-                <dt>Device</dt><dd id="envDevice">-</dd>
-                <dt>Platform</dt><dd id="envPlatform">-</dd>
-              </dl>
-            </section>
-
-            <section class="environment-section">
-              <h3>Runtime</h3>
-              <dl class="environment-dl">
-                <dt>Status</dt><dd id="envRuntimeStatus">-</dd>
-                <dt>Source</dt><dd id="envRuntimeSource">-</dd>
-                <dt>Path</dt><dd id="envRuntimePath" class="mono-value">-</dd>
-              </dl>
-            </section>
-
-            <section class="environment-section">
-              <h3>Updates</h3>
-              <div class="environment-setting-row">
-                <label for="envUpdateEnabled">Auto check</label>
-                <label class="switch">
-                  <input type="checkbox" id="envUpdateEnabled">
-                  <span class="switch-track"></span>
-                </label>
-              </div>
-              <div class="environment-setting-row">
-                <label for="envUpdateInterval">Check interval</label>
-                <select id="envUpdateInterval">
-                  <option value="1">1 h</option>
-                  <option value="6">6 h</option>
-                  <option value="12">12 h</option>
-                  <option value="24">24 h</option>
-                  <option value="72">3 days</option>
-                  <option value="168">7 days</option>
-                </select>
-              </div>
-              <dl class="environment-dl">
-                <dt>Last checked</dt><dd id="envUpdateLastChecked">Never</dd>
-                <dt>Latest</dt><dd id="envUpdateLatest">-</dd>
-                <dt>Status</dt><dd id="envUpdateStatus">-</dd>
-              </dl>
-            </section>
-
-            <div id="environmentActionStatus" class="environment-action-status" hidden></div>
-          </div>
-
-          <div class="environment-actions">
-            <button id="envDownloadUpdateBtn" class="btn btn-sm btn-primary" style="display:none;">Download and Install</button>
-            <button id="envCheckUpdateBtn" class="btn btn-sm">Check Now</button>
-            <button id="envOpenReleaseBtn" class="btn btn-sm btn-outline">Open Release</button>
-            <button id="envCleanRuntimeBtn" class="btn btn-sm btn-outline">Clean Runtime</button>
-            <button id="envCopyInfoBtn" class="btn btn-sm btn-outline">Copy Info</button>
-          </div>
-        </div>
     </aside>
 
     <div id="leftGutter" class="gutter gutter-left"></div>
@@ -378,10 +293,80 @@
   <!-- Footer -->
   <footer id="footer">
     <span id="footerStatus">就绪</span>
-    <span class="footer-right" id="footerTime"></span>
+    <button id="footerVersionBtn" class="footer-version" type="button" aria-expanded="false">
+      SecMP v<span id="footerVersion">__EXTENSION_VERSION__</span>
+    </button>
+    <div id="aboutPopover" class="about-popover" hidden>
+      <div class="about-header">
+        <div>
+          <div class="about-title">SecMP</div>
+          <div id="aboutSummary" class="about-summary">Ready</div>
+        </div>
+        <button id="aboutCloseBtn" class="collapse-btn" title="关闭">×</button>
+      </div>
+
+      <div class="about-body">
+        <section class="about-section">
+          <dl class="about-dl">
+            <dt>Version</dt><dd id="envVersionInfo">Extension v__EXTENSION_VERSION__ · Runtime checking</dd>
+          </dl>
+        </section>
+
+        <section class="about-section">
+          <div class="about-setting-row">
+            <label for="envUpdateEnabled">Auto update check</label>
+            <label class="switch">
+              <input type="checkbox" id="envUpdateEnabled">
+              <span class="switch-track"></span>
+            </label>
+          </div>
+          <div class="about-setting-row">
+            <label for="envUpdateInterval">Interval</label>
+            <select id="envUpdateInterval">
+              <option value="1">1 h</option>
+              <option value="6">6 h</option>
+              <option value="12">12 h</option>
+              <option value="24">24 h</option>
+              <option value="72">3 days</option>
+              <option value="168">7 days</option>
+            </select>
+          </div>
+          <dl class="about-dl">
+            <dt>Latest</dt><dd id="envUpdateLatest">-</dd>
+            <dt>Checked</dt><dd id="envUpdateLastChecked">Never</dd>
+          </dl>
+        </section>
+
+        <details class="about-diagnostics">
+          <summary>Diagnostics</summary>
+          <dl class="about-dl">
+            <dt>Runtime</dt><dd id="envRuntimeVersion">Checking</dd>
+            <dt>Runtime API</dt><dd id="envRuntimeApi">-</dd>
+            <dt>mitmproxy</dt><dd id="envMitmproxyVersion">-</dd>
+            <dt>Runtime state</dt><dd id="envRuntimeStatus">-</dd>
+            <dt>Runtime source</dt><dd id="envRuntimeSource">-</dd>
+            <dt>ADB</dt><dd id="envAdbStatus">Checking</dd>
+            <dt>ADB version</dt><dd id="envAdbVersion">-</dd>
+            <dt>Android device</dt><dd id="envDevice">-</dd>
+            <dt>Platform</dt><dd id="envPlatform">-</dd>
+          </dl>
+        </details>
+
+        <div id="environmentActionStatus" class="about-action-status" hidden></div>
+      </div>
+
+      <div class="about-actions">
+        <button id="envDownloadUpdateBtn" class="btn btn-sm btn-primary" style="display:none;">Install Update</button>
+        <button id="envCheckUpdateBtn" class="btn btn-sm">Check Now</button>
+        <button id="envOpenReleaseBtn" class="btn btn-sm btn-outline">Open Release</button>
+      </div>
+    </div>
   </footer>
 </div>
 
+<script>
+  window.__SECMP_EXTENSION_VERSION__ = "__EXTENSION_VERSION__";
+</script>
 <script src="./app.js"></script>
 </body>
 </html>
