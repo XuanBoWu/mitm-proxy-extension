@@ -65,7 +65,7 @@ function getConfiguredLocale() {
   if (SUPPORTED_LOCALES.has(language)) {
     return language;
   }
-  return normalizeLocale(vscode.env.language);
+  return normalizeLocale(vscode.env?.language);
 }
 
 function loadL10nBundle(locale) {

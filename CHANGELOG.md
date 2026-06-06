@@ -4,6 +4,10 @@ All notable changes to SecMP are documented in this file.
 
 ## Unreleased
 
+## 0.1.7 - 2026-06-07
+
+- Hardened locale detection for test and fallback environments, and completed the VS Code `env` mock used by the release smoke test.
+
 ## 0.1.6 - 2026-06-07
 
 - Fixed the extension runtime install smoke-test mock so the release workflow supports the `secmp.language` configuration listener.

@@ -93,6 +93,13 @@ async function main() {
         },
       }),
     },
+    env: {
+      language: "en-US",
+      clipboard: {
+        writeText: async () => undefined,
+      },
+      openExternal: async () => undefined,
+    },
     window: {
       createOutputChannel: () => ({
         appendLine: (line) => logs.push(line),
