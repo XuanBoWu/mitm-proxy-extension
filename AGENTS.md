@@ -60,6 +60,7 @@ Webview UI (HTML/CSS/JS) → vscode.postMessage → extension.js (Node.js)
 - `package.json` 的 `version` 是测试构建标识，不只代表正式 GitHub Release。
 - 每完成一个可测试阶段，即使暂不发布，也必须更新 `package.json` 的 `version`。
 - bug 修复、小功能阶段、UI 调整、对测试有可验证影响的文档/流程修正，默认 bump `PATCH`。
+- 仅修改 `AGENTS.md` 等 agent 工作约束、协作规则或内部执行口径，且不改变扩展功能、用户文档、发布产物、CI 行为或测试流程时，不视为可测试阶段；默认不 bump `package.json`，也不新增正式 CHANGELOG 版本小节。
 - 新增一类用户可感知能力或完成较大阶段，bump `MINOR` 并将 `PATCH` 归零。
 - 不兼容配置、runtime 协议、用户迁移流程，或进入正式稳定大版本时，bump `MAJOR`。
 - 版本号不与每个 commit 绑定，而是与“可测试的阶段结果”绑定。
@@ -142,6 +143,7 @@ npx --yes @vscode/vsce package
 - `master` push 仍然只构建、测试、打包，不发布。
 - 正式发布从 `master` 打 `v*` tag，例如 `v0.1.0`。
 - tag workflow 会构建 runtime、运行 runtime/扩展安装烟测、打包 VSIX，并创建 GitHub Release。
+- 每次 release 发布提交说明和修改说明必须覆盖“上一个正式 release tag 到本次 release tag”的全部改动，不能只描述最后一个 commit 或最后一个补丁；准备前先对比上一 release tag 到当前 HEAD 的 `git log` / `git diff`。
 - release assets 应包含：
   - `secmp-<version>.vsix`
   - `secmp-runtime-win32-x64-<version>.zip`
