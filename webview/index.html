@@ -16,18 +16,18 @@
         <span class="logo">SecMP</span>
       </div>
       <span id="proxyIndicator" class="indicator stopped">●</span>
-      <span id="proxyStatusText">未启动</span>
+      <span id="proxyStatusText" data-i18n="webview.proxy.stopped">未启动</span>
     </div>
     <div class="header-center">
       <div class="filter-bar">
-        <input type="text" id="filterInput" placeholder="关键词过滤..." />
-        <button id="filterPanelBtn" class="btn btn-sm btn-outline" aria-expanded="false">过滤器</button>
-        <button id="applyFilterBtn" class="btn btn-sm">应用</button>
-        <button id="clearFilterBtn" class="btn btn-sm btn-outline">清除</button>
+        <input type="text" id="filterInput" placeholder="关键词过滤..." data-i18n-placeholder="webview.filter.urlPlaceholder" />
+        <button id="filterPanelBtn" class="btn btn-sm btn-outline" aria-expanded="false" data-i18n="webview.filter.filter">过滤器</button>
+        <button id="applyFilterBtn" class="btn btn-sm" data-i18n="webview.filter.apply">应用</button>
+        <button id="clearFilterBtn" class="btn btn-sm btn-outline" data-i18n="webview.filter.clear">清除</button>
       </div>
       <div id="filterPanel" class="filter-panel" style="display:none;">
         <div class="filter-row">
-          <span class="filter-label">关键词范围</span>
+          <span class="filter-label" data-i18n="webview.filter.scope">关键词范围</span>
           <label><input type="checkbox" class="filter-scope" value="url" checked> URL</label>
           <label><input type="checkbox" class="filter-scope" value="reqHeaders" checked> 请求头</label>
           <label><input type="checkbox" class="filter-scope" value="reqBody" checked> 请求体</label>
@@ -35,49 +35,49 @@
           <label><input type="checkbox" class="filter-scope" value="resBody" checked> 响应体</label>
         </div>
         <div class="filter-row">
-          <span class="filter-label">状态码</span>
+          <span class="filter-label" data-i18n="webview.filter.status">状态码</span>
           <button class="filter-chip" data-filter-group="status" data-filter-value="2xx">2xx</button>
           <button class="filter-chip" data-filter-group="status" data-filter-value="3xx">3xx</button>
           <button class="filter-chip" data-filter-group="status" data-filter-value="4xx">4xx</button>
           <button class="filter-chip" data-filter-group="status" data-filter-value="5xx">5xx</button>
-          <button class="filter-chip" data-filter-group="status" data-filter-value="pending">Pending</button>
+          <button class="filter-chip" data-filter-group="status" data-filter-value="pending" data-i18n="webview.filter.pending">Pending</button>
           <button class="filter-chip" data-filter-group="status" data-filter-value="err">ERR</button>
         </div>
         <div class="filter-row">
-          <span class="filter-label">方法</span>
+          <span class="filter-label" data-i18n="webview.filter.method">方法</span>
           <button class="filter-chip" data-filter-group="method" data-filter-value="GET">GET</button>
           <button class="filter-chip" data-filter-group="method" data-filter-value="POST">POST</button>
           <button class="filter-chip" data-filter-group="method" data-filter-value="PUT">PUT</button>
           <button class="filter-chip" data-filter-group="method" data-filter-value="DELETE">DELETE</button>
           <button class="filter-chip" data-filter-group="method" data-filter-value="PATCH">PATCH</button>
-          <button class="filter-chip" data-filter-group="method" data-filter-value="other">其他</button>
+          <button class="filter-chip" data-filter-group="method" data-filter-value="other" data-i18n="webview.filter.other">其他</button>
         </div>
         <div class="filter-row">
-          <span class="filter-label">类型</span>
+          <span class="filter-label" data-i18n="webview.filter.type">类型</span>
           <button class="filter-chip" data-filter-group="type" data-filter-value="json">JSON</button>
           <button class="filter-chip" data-filter-group="type" data-filter-value="html">HTML</button>
           <button class="filter-chip" data-filter-group="type" data-filter-value="js">JS</button>
           <button class="filter-chip" data-filter-group="type" data-filter-value="css">CSS</button>
           <button class="filter-chip" data-filter-group="type" data-filter-value="image">图片</button>
-          <button class="filter-chip" data-filter-group="type" data-filter-value="binary">二进制</button>
-          <button class="filter-chip" data-filter-group="type" data-filter-value="other">其他</button>
+          <button class="filter-chip" data-filter-group="type" data-filter-value="binary" data-i18n="webview.filter.binary">二进制</button>
+          <button class="filter-chip" data-filter-group="type" data-filter-value="other" data-i18n="webview.filter.other">其他</button>
         </div>
         <div class="filter-row">
-          <span class="filter-label">协议</span>
+          <span class="filter-label" data-i18n="webview.filter.protocol">协议</span>
           <button class="filter-chip" data-filter-group="protocol" data-filter-value="http">HTTP</button>
           <button class="filter-chip" data-filter-group="protocol" data-filter-value="https">HTTPS</button>
         </div>
-        <div id="filterStatusText" class="filter-status-text"></div>
+        <div id="filterStatusText" class="filter-status-text" data-i18n="webview.filter.defaultHint">关键词范围默认全选；应用请求体或响应体过滤时会先加载全部内容</div>
       </div>
     </div>
     <div class="header-right">
-      <span class="flow-count-summary" aria-label="请求数量">
+      <span class="flow-count-summary" aria-label="请求数量" data-i18n-aria-label="webview.header.requestCount">
         <span id="flowCount" class="badge">0</span>
-        <span class="flow-count-label">条请求</span>
+        <span class="flow-count-label" data-i18n="webview.flow.countLabel">条请求</span>
       </span>
-      <button id="clearBtn" class="btn btn-sm btn-outline">清空</button>
-      <button id="exportHarBtn" class="btn btn-sm">导出 HAR</button>
-      <button id="exportJsonBtn" class="btn btn-sm">导出 JSON</button>
+      <button id="clearBtn" class="btn btn-sm btn-outline" data-i18n="webview.header.clear">清空</button>
+      <button id="exportHarBtn" class="btn btn-sm" data-i18n="webview.header.exportHar">导出 HAR</button>
+      <button id="exportJsonBtn" class="btn btn-sm" data-i18n="webview.header.exportJson">导出 JSON</button>
     </div>
   </header>
 
@@ -86,60 +86,60 @@
     <!-- Left: Device Panel -->
     <aside id="devicePanel">
         <div class="panel-header">
-          <span class="panel-title">设备管理</span>
-          <button id="toggleLeftBtn" class="collapse-btn" title="折叠面板">◀</button>
+          <span class="panel-title" data-i18n="webview.device.management">设备管理</span>
+          <button id="toggleLeftBtn" class="collapse-btn" title="折叠面板" data-i18n-title="common.collapsePanel">◀</button>
         </div>
         <div class="panel-body">
 
       <div class="card">
-        <div class="card-title">ADB 状态</div>
+        <div class="card-title" data-i18n="webview.device.adbStatus">ADB 状态</div>
         <div id="adbStatus" class="status-row">
           <span class="dot disconnected"></span>
-          <span id="adbStatusText">未连接</span>
+          <span id="adbStatusText" data-i18n="common.notConnected">未连接</span>
         </div>
-        <button id="refreshDeviceBtn" class="btn btn-block btn-sm">刷新设备</button>
+        <button id="refreshDeviceBtn" class="btn btn-block btn-sm" data-i18n="webview.device.refresh">刷新设备</button>
       </div>
 
       <div id="deviceInfoCard" class="card" style="display:none;">
-        <div class="card-title">设备信息</div>
+        <div class="card-title" data-i18n="webview.device.info">设备信息</div>
         <dl>
-          <dt>型号</dt><dd id="devModel">-</dd>
+          <dt data-i18n="webview.device.model">型号</dt><dd id="devModel">-</dd>
           <dt>Android</dt><dd id="devVersion">-</dd>
           <dt>Root</dt><dd id="devRoot">-</dd>
         </dl>
-        <button id="rootDeviceBtn" class="btn btn-block btn-sm" style="margin-top:6px;">获取 Root</button>
+        <button id="rootDeviceBtn" class="btn btn-block btn-sm" style="margin-top:6px;" data-i18n="webview.device.rootAction">获取 Root</button>
       </div>
 
       <div class="card">
-        <div class="card-title">证书管理</div>
-        <button id="pushCertBtn" class="btn btn-block btn-sm">推送 CA 证书</button>
+        <div class="card-title" data-i18n="webview.device.certManagement">证书管理</div>
+        <button id="pushCertBtn" class="btn btn-block btn-sm" data-i18n="webview.device.pushCert">推送 CA 证书</button>
         <div id="certStatus" class="status-text" style="display:none;"></div>
       </div>
 
       <div class="card">
-        <div class="card-title">代理设置</div>
+        <div class="card-title" data-i18n="webview.device.proxySettings">代理设置</div>
         <div class="input-row">
-          <label>端口</label>
+          <label data-i18n="webview.device.port">端口</label>
           <input type="number" id="proxyPort" value="8080" min="1024" max="65535" />
         </div>
         <div class="input-row">
-          <label>网卡</label>
+          <label data-i18n="webview.device.interface">网卡</label>
           <select id="interfaceSelect">
-            <option value="">加载中...</option>
+            <option value="" data-i18n="common.checking">加载中...</option>
           </select>
-          <button id="refreshInterfaceBtn" class="btn btn-sm btn-outline" title="刷新网卡列表">↻</button>
+          <button id="refreshInterfaceBtn" class="btn btn-sm btn-outline" title="刷新网卡列表" data-i18n-title="webview.device.refreshInterfaces">↻</button>
         </div>
-        <button id="startProxyBtn" class="btn btn-block btn-primary">启动代理</button>
-        <button id="stopProxyBtn" class="btn btn-block btn-danger" style="display:none;">停止代理</button>
-        <button id="setDeviceProxyBtn" class="btn btn-block btn-sm">设置设备代理</button>
-        <button id="clearDeviceProxyBtn" class="btn btn-block btn-sm btn-outline">清除设备代理</button>
+        <button id="startProxyBtn" class="btn btn-block btn-primary" data-i18n="webview.device.startProxy">启动代理</button>
+        <button id="stopProxyBtn" class="btn btn-block btn-danger" style="display:none;" data-i18n="webview.device.stopProxy">停止代理</button>
+        <button id="setDeviceProxyBtn" class="btn btn-block btn-sm" data-i18n="webview.device.setProxy">设置设备代理</button>
+        <button id="clearDeviceProxyBtn" class="btn btn-block btn-sm btn-outline" data-i18n="webview.device.clearProxy">清除设备代理</button>
         <div id="proxySetupStatus" class="status-text" style="display:none;"></div>
       </div>
 
       <div class="card">
-        <div class="card-title">会话</div>
-        <button id="saveSessionBtn" class="btn btn-block btn-sm">保存会话</button>
-        <button id="loadSessionBtn" class="btn btn-block btn-sm">加载会话</button>
+        <div class="card-title" data-i18n="webview.device.session">会话</div>
+        <button id="saveSessionBtn" class="btn btn-block btn-sm" data-i18n="webview.device.saveSession">保存会话</button>
+        <button id="loadSessionBtn" class="btn btn-block btn-sm" data-i18n="webview.device.loadSession">加载会话</button>
       </div>
 
         </div><!-- .panel-body -->
@@ -156,21 +156,21 @@
             <tr id="flowTableHead">
               <th class="col-num" draggable="true">#</th>
               <th class="col-tls" draggable="true">TLS</th>
-              <th class="col-proto" draggable="true">Protocol</th>
-              <th class="col-host" draggable="true">Host</th>
-              <th class="col-path" draggable="true">Path</th>
-              <th class="col-method" draggable="true">Method</th>
-              <th class="col-status" draggable="true">Status</th>
-              <th class="col-time" draggable="true">Time</th>
-              <th class="col-size" draggable="true">Size</th>
-              <th class="col-mime" draggable="true">MIME</th>
+              <th class="col-proto" draggable="true" data-i18n="webview.table.protocol">Protocol</th>
+              <th class="col-host" draggable="true" data-i18n="webview.table.host">Host</th>
+              <th class="col-path" draggable="true" data-i18n="webview.table.path">Path</th>
+              <th class="col-method" draggable="true" data-i18n="webview.table.method">Method</th>
+              <th class="col-status" draggable="true" data-i18n="webview.table.status">Status</th>
+              <th class="col-time" draggable="true" data-i18n="webview.table.time">Time</th>
+              <th class="col-size" draggable="true" data-i18n="webview.table.size">Size</th>
+              <th class="col-mime" draggable="true" data-i18n="webview.table.mime">MIME</th>
               <th class="col-ip" draggable="true">IP</th>
-              <th class="col-port" draggable="true">Port</th>
+              <th class="col-port" draggable="true" data-i18n="webview.table.port">Port</th>
             </tr>
           </thead>
           <tbody id="flowTableBody">
             <tr class="empty-state">
-              <td colspan="12">等待抓包数据...</td>
+              <td colspan="12" data-i18n="webview.flow.empty">等待抓包数据...</td>
             </tr>
           </tbody>
         </table>
@@ -182,21 +182,21 @@
     <!-- Right: Detail Panel -->
     <section id="detailPanel">
       <div class="panel-header">
-        <span class="panel-title">详情</span>
+        <span class="panel-title" data-i18n="webview.detail.title">详情</span>
         <div class="search-group" id="detailSearchGroup" style="display:none;">
-          <button id="detailRegexBtn" class="search-btn-left" title="启用正则搜索" aria-label="启用正则搜索" aria-pressed="false">.*</button>
+          <button id="detailRegexBtn" class="search-btn-left" title="启用正则搜索" aria-label="启用正则搜索" aria-pressed="false" data-i18n-title="webview.detail.regexSearch" data-i18n-aria-label="webview.detail.regexSearch">.*</button>
           <div class="detail-search-box">
-            <input type="text" id="detailSearchInput" class="detail-search-input" placeholder="搜索请求/响应..." />
-            <button id="detailClearSearchBtn" class="search-clear-inline" title="清除搜索">&times;</button>
+            <input type="text" id="detailSearchInput" class="detail-search-input" placeholder="搜索请求/响应..." data-i18n-placeholder="webview.detail.searchPlaceholder" />
+            <button id="detailClearSearchBtn" class="search-clear-inline" title="清除搜索" data-i18n-title="webview.detail.clearSearch">&times;</button>
           </div>
-          <button id="detailPrevSearchBtn" class="search-nav-btn" title="上一个匹配">↑</button>
-          <button id="detailNextSearchBtn" class="search-nav-btn" title="下一个匹配">↓</button>
+          <button id="detailPrevSearchBtn" class="search-nav-btn" title="上一个匹配" data-i18n-title="webview.detail.prevMatch">↑</button>
+          <button id="detailNextSearchBtn" class="search-nav-btn" title="下一个匹配" data-i18n-title="webview.detail.nextMatch">↓</button>
         </div>
-        <button id="toggleRightBtn" class="collapse-btn" title="折叠面板">▶</button>
+        <button id="toggleRightBtn" class="collapse-btn" title="折叠面板" data-i18n-title="common.collapsePanel">▶</button>
       </div>
       <div class="panel-body">
       <div id="detailPlaceholder" class="placeholder">
-        <p>选择一个请求查看详情</p>
+        <p data-i18n="webview.detail.placeholder">选择一个请求查看详情</p>
       </div>
 
       <div id="detailContent" style="display:none; display:flex; flex-direction:column; height:100%;">
@@ -206,7 +206,7 @@
             <span class="section-collapse-icon">▼</span>
             <span class="section-title">Request</span>
             <span id="reqSearchCount" class="search-count"></span>
-            <button class="wrap-btn active" data-target="req" title="自动换行已开启" aria-label="切换请求自动换行">
+            <button class="wrap-btn active" data-target="req" title="自动换行已开启" aria-label="切换请求自动换行" data-i18n-title="webview.detail.autoWrapOn" data-i18n-aria-label="webview.detail.toggleRequestWrap">
               <svg viewBox="0 0 1024 1024" aria-hidden="true" focusable="false">
                 <path d="M640 768h64a106.752 106.752 0 0 0 0-213.312H170.688a42.688 42.688 0 0 1 0-85.376H704a192 192 0 0 1 0 384h-64V896a21.312 21.312 0 0 1-34.112 17.088L514.88 844.8a42.624 42.624 0 0 1 0-68.288l91.008-68.224a21.248 21.248 0 0 1 34.112 17.024V768zM170.688 170.688h682.624a42.688 42.688 0 0 1 0 85.312H170.688a42.688 42.688 0 1 1 0-85.312z m213.312 640a42.688 42.688 0 0 1-42.688 42.624H170.688a42.624 42.624 0 1 1 0-85.312h170.624a42.624 42.624 0 0 1 42.688 42.688z"></path>
               </svg>
@@ -234,7 +234,7 @@
             <span class="section-collapse-icon">▼</span>
             <span class="section-title">Response</span>
             <span id="resSearchCount" class="search-count"></span>
-            <button class="wrap-btn active" data-target="res" title="自动换行已开启" aria-label="切换响应自动换行">
+            <button class="wrap-btn active" data-target="res" title="自动换行已开启" aria-label="切换响应自动换行" data-i18n-title="webview.detail.autoWrapOn" data-i18n-aria-label="webview.detail.toggleResponseWrap">
               <svg viewBox="0 0 1024 1024" aria-hidden="true" focusable="false">
                 <path d="M640 768h64a106.752 106.752 0 0 0 0-213.312H170.688a42.688 42.688 0 0 1 0-85.376H704a192 192 0 0 1 0 384h-64V896a21.312 21.312 0 0 1-34.112 17.088L514.88 844.8a42.624 42.624 0 0 1 0-68.288l91.008-68.224a21.248 21.248 0 0 1 34.112 17.024V768zM170.688 170.688h682.624a42.688 42.688 0 0 1 0 85.312H170.688a42.688 42.688 0 1 1 0-85.312z m213.312 640a42.688 42.688 0 0 1-42.688 42.624H170.688a42.624 42.624 0 1 1 0-85.312h170.624a42.624 42.624 0 0 1 42.688 42.688z"></path>
               </svg>
@@ -270,20 +270,20 @@
           <div class="meta-row">
             <h4>TLS</h4>
             <dl class="meta-dl">
-              <dt>版本</dt><dd id="tlsVersion">-</dd>
-              <dt>加密套件</dt><dd id="tlsCipher">-</dd>
+            <dt data-i18n="webview.detail.tlsVersion">版本</dt><dd id="tlsVersion">-</dd>
+              <dt data-i18n="webview.detail.cipher">加密套件</dt><dd id="tlsCipher">-</dd>
               <dt>SNI</dt><dd id="tlsSni">-</dd>
               <dt>ALPN</dt><dd id="tlsAlpn">-</dd>
-              <dt>服务器 IP</dt><dd id="tlsServerIp">-</dd>
-              <dt>客户端 IP</dt><dd id="tlsClientIp">-</dd>
+              <dt data-i18n="webview.detail.serverIp">服务器 IP</dt><dd id="tlsServerIp">-</dd>
+              <dt data-i18n="webview.detail.clientIp">客户端 IP</dt><dd id="tlsClientIp">-</dd>
             </dl>
           </div>
           <div class="meta-row">
-            <h4>Timing</h4>
+            <h4 data-i18n="webview.detail.timing">Timing</h4>
             <dl class="meta-dl">
-              <dt>总耗时</dt><dd id="timingTotal">-</dd>
-              <dt>请求时间</dt><dd id="timingReq">-</dd>
-              <dt>响应时间</dt><dd id="timingRes">-</dd>
+              <dt data-i18n="webview.detail.totalTime">总耗时</dt><dd id="timingTotal">-</dd>
+              <dt data-i18n="webview.detail.requestTime">请求时间</dt><dd id="timingReq">-</dd>
+              <dt data-i18n="webview.detail.responseTime">响应时间</dt><dd id="timingRes">-</dd>
             </dl>
           </div>
         </div><!-- .meta-content -->
@@ -295,7 +295,7 @@
 
   <!-- Footer -->
   <footer id="footer">
-    <span id="footerStatus">就绪</span>
+    <span id="footerStatus" data-i18n="common.ready">就绪</span>
     <button id="footerVersionBtn" class="footer-version" type="button" aria-expanded="false">
       SecMP v<span id="footerVersion">__EXTENSION_VERSION__</span>
     </button>
@@ -303,55 +303,55 @@
       <div class="about-header">
         <div>
           <div class="about-title">SecMP</div>
-          <div id="aboutSummary" class="about-summary">Ready</div>
+          <div id="aboutSummary" class="about-summary" data-i18n="common.ready">Ready</div>
         </div>
-        <button id="aboutCloseBtn" class="collapse-btn" title="关闭">×</button>
+        <button id="aboutCloseBtn" class="collapse-btn" title="关闭" data-i18n-title="common.close">×</button>
       </div>
 
       <div class="about-body">
         <section class="about-section">
           <dl class="about-dl">
-            <dt>Version</dt><dd id="envVersionInfo">Extension v__EXTENSION_VERSION__ · Runtime checking</dd>
+            <dt data-i18n="webview.about.version">Version</dt><dd id="envVersionInfo">Extension v__EXTENSION_VERSION__ · Runtime checking</dd>
           </dl>
         </section>
 
         <section class="about-section">
           <div class="about-setting-row">
-            <label for="envUpdateEnabled">Auto update check</label>
+            <label for="envUpdateEnabled" data-i18n="webview.about.autoUpdate">Auto update check</label>
             <label class="switch">
               <input type="checkbox" id="envUpdateEnabled">
               <span class="switch-track"></span>
             </label>
           </div>
           <div class="about-setting-row">
-            <label for="envUpdateInterval">Interval</label>
+            <label for="envUpdateInterval" data-i18n="webview.about.interval">Interval</label>
             <select id="envUpdateInterval">
               <option value="1">1 h</option>
               <option value="6">6 h</option>
               <option value="12">12 h</option>
               <option value="24">24 h</option>
-              <option value="72">3 days</option>
-              <option value="168">7 days</option>
+              <option value="72" data-i18n="webview.about.days3">3 days</option>
+              <option value="168" data-i18n="webview.about.days7">7 days</option>
             </select>
           </div>
           <dl class="about-dl">
-            <dt>Latest</dt><dd id="envUpdateLatest">-</dd>
-            <dt>Checked</dt><dd id="envUpdateLastChecked">Never</dd>
+            <dt data-i18n="webview.about.latest">Latest</dt><dd id="envUpdateLatest">-</dd>
+            <dt data-i18n="webview.about.checked">Checked</dt><dd id="envUpdateLastChecked" data-i18n="common.never">Never</dd>
           </dl>
         </section>
 
         <details class="about-diagnostics">
-          <summary>Diagnostics</summary>
+          <summary data-i18n="webview.about.diagnostics">Diagnostics</summary>
           <dl class="about-dl">
-            <dt>Runtime</dt><dd id="envRuntimeVersion">Checking</dd>
-            <dt>Runtime API</dt><dd id="envRuntimeApi">-</dd>
+            <dt data-i18n="webview.about.runtime">Runtime</dt><dd id="envRuntimeVersion" data-i18n="common.checking">Checking</dd>
+            <dt data-i18n="webview.about.runtimeApi">Runtime API</dt><dd id="envRuntimeApi">-</dd>
             <dt>mitmproxy</dt><dd id="envMitmproxyVersion">-</dd>
-            <dt>Runtime state</dt><dd id="envRuntimeStatus">-</dd>
-            <dt>Runtime source</dt><dd id="envRuntimeSource">-</dd>
-            <dt>ADB</dt><dd id="envAdbStatus">Checking</dd>
+            <dt data-i18n="webview.about.runtimeState">Runtime state</dt><dd id="envRuntimeStatus">-</dd>
+            <dt data-i18n="webview.about.runtimeSource">Runtime source</dt><dd id="envRuntimeSource">-</dd>
+            <dt>ADB</dt><dd id="envAdbStatus" data-i18n="common.checking">Checking</dd>
             <dt>ADB version</dt><dd id="envAdbVersion">-</dd>
-            <dt>Android device</dt><dd id="envDevice">-</dd>
-            <dt>Platform</dt><dd id="envPlatform">-</dd>
+            <dt data-i18n="webview.about.androidDevice">Android device</dt><dd id="envDevice">-</dd>
+            <dt data-i18n="webview.about.platform">Platform</dt><dd id="envPlatform">-</dd>
           </dl>
         </details>
 
@@ -359,17 +359,15 @@
       </div>
 
       <div class="about-actions">
-        <button id="envDownloadUpdateBtn" class="btn btn-sm btn-primary" style="display:none;">Install Update</button>
-        <button id="envCheckUpdateBtn" class="btn btn-sm">Check Now</button>
-        <button id="envOpenReleaseBtn" class="btn btn-sm btn-outline">Open Release</button>
+        <button id="envDownloadUpdateBtn" class="btn btn-sm btn-primary" style="display:none;" data-i18n="webview.about.installUpdate">Install Update</button>
+        <button id="envCheckUpdateBtn" class="btn btn-sm" data-i18n="webview.about.checkNow">Check Now</button>
+        <button id="envOpenReleaseBtn" class="btn btn-sm btn-outline" data-i18n="webview.about.openRelease">Open Release</button>
       </div>
     </div>
   </footer>
 </div>
 
-<script>
-  window.__SECMP_EXTENSION_VERSION__ = "__EXTENSION_VERSION__";
-</script>
+<template id="secmpI18n" data-locale="__SECMP_LOCALE__">__SECMP_MESSAGES_JSON__</template>
 <script src="./app.js"></script>
 </body>
 </html>

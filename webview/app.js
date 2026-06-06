@@ -1,6 +1,22 @@
 /* ===== SecMP Webview App ===== */
 const vscode = acquireVsCodeApi();
 
+function readSecmpMessages() {
+  const template = document.getElementById("secmpI18n");
+  const raw = (template?.content?.textContent || template?.textContent || "").trim();
+  if (raw) {
+    try {
+      return JSON.parse(raw);
+    } catch (_) {}
+  }
+  return (window.__SECMP_MESSAGES__ && typeof window.__SECMP_MESSAGES__ === "object")
+    ? window.__SECMP_MESSAGES__
+    : {};
+}
+
+const SECMP_MESSAGES = readSecmpMessages();
+const SECMP_STATIC_FALLBACKS = readStaticI18nFallbacks();
+
 // State
 let flows = [];
 let selectedFlowId = null;
@@ -8,6 +24,54 @@ let proxyRunning = false;
 let environmentStatus = null;
 let aboutPopoverOpen = false;
 const EXTENSION_VERSION = window.__SECMP_EXTENSION_VERSION__ || document.getElementById("footerVersion")?.textContent?.trim() || "-";
+
+function t(key, values = {}, fallback = "") {
+  const template = SECMP_MESSAGES[key] || fallback || SECMP_STATIC_FALLBACKS[key] || "";
+  return String(template).replace(/\{([A-Za-z0-9_]+)\}/g, (match, name) => (
+    Object.prototype.hasOwnProperty.call(values, name) ? String(values[name]) : match
+  ));
+}
+
+function readStaticI18nFallbacks(root = document) {
+  const fallbacks = {};
+  const addFallback = (key, value) => {
+    if (!key || fallbacks[key]) return;
+    const text = String(value || "").trim();
+    if (text) fallbacks[key] = text;
+  };
+
+  root.querySelectorAll("[data-i18n]").forEach((el) => {
+    addFallback(el.dataset.i18n, el.textContent);
+  });
+  root.querySelectorAll("[data-i18n-title]").forEach((el) => {
+    addFallback(el.dataset.i18nTitle, el.getAttribute("title"));
+  });
+  root.querySelectorAll("[data-i18n-placeholder]").forEach((el) => {
+    addFallback(el.dataset.i18nPlaceholder, el.getAttribute("placeholder"));
+  });
+  root.querySelectorAll("[data-i18n-aria-label]").forEach((el) => {
+    addFallback(el.dataset.i18nAriaLabel, el.getAttribute("aria-label"));
+  });
+
+  return fallbacks;
+}
+
+function applyStaticI18n(root = document) {
+  root.querySelectorAll("[data-i18n]").forEach((el) => {
+    el.textContent = t(el.dataset.i18n, {}, el.textContent);
+  });
+  root.querySelectorAll("[data-i18n-title]").forEach((el) => {
+    el.setAttribute("title", t(el.dataset.i18nTitle, {}, el.getAttribute("title") || ""));
+  });
+  root.querySelectorAll("[data-i18n-placeholder]").forEach((el) => {
+    el.setAttribute("placeholder", t(el.dataset.i18nPlaceholder, {}, el.getAttribute("placeholder") || ""));
+  });
+  root.querySelectorAll("[data-i18n-aria-label]").forEach((el) => {
+    el.setAttribute("aria-label", t(el.dataset.i18nAriaLabel, {}, el.getAttribute("aria-label") || ""));
+  });
+}
+
+applyStaticI18n();
 let filterTextDraft = "";
 let filterText = "";
 const DEFAULT_FILTER_SCOPES = ["url", "reqHeaders", "reqBody", "resHeaders", "resBody"];
@@ -58,16 +122,16 @@ let detailViewState = { req: "formatted", res: "formatted" };
 const COLUMNS = [
   { id: "num",    title: "#",       width: 40,  sizing: "content", minWidth: 32  },
   { id: "tls",    title: "TLS",     width: 68,  sizing: "content", minWidth: 50  },
-  { id: "proto",  title: "Protocol",width: 68,  sizing: "content", minWidth: 52  },
-  { id: "host",   title: "Host",    width: 160, sizing: "fixed"   },  // ~20 chars
-  { id: "path",   title: "Path",    width: 220, sizing: "fixed"   },  // ~30 chars
-  { id: "method", title: "Method",  width: 68,  sizing: "content", minWidth: 52  },
-  { id: "status", title: "Status",  width: 55,  sizing: "content", minWidth: 42  },
-  { id: "time",   title: "Time",    width: 82,  sizing: "content", minWidth: 68  },
-  { id: "size",   title: "Size",    width: 62,  sizing: "content", minWidth: 48  },
-  { id: "mime",   title: "MIME",    width: 80,  sizing: "content", minWidth: 56  },
+  { id: "proto",  title: t("webview.table.protocol", {}, "Protocol"), width: 68,  sizing: "content", minWidth: 52  },
+  { id: "host",   title: t("webview.table.host", {}, "Host"),         width: 160, sizing: "fixed"   },  // ~20 chars
+  { id: "path",   title: t("webview.table.path", {}, "Path"),         width: 220, sizing: "fixed"   },  // ~30 chars
+  { id: "method", title: t("webview.table.method", {}, "Method"),     width: 68,  sizing: "content", minWidth: 52  },
+  { id: "status", title: t("webview.table.status", {}, "Status"),     width: 55,  sizing: "content", minWidth: 42  },
+  { id: "time",   title: t("webview.table.time", {}, "Time"),         width: 82,  sizing: "content", minWidth: 68  },
+  { id: "size",   title: t("webview.table.size", {}, "Size"),         width: 62,  sizing: "content", minWidth: 48  },
+  { id: "mime",   title: t("webview.table.mime", {}, "MIME"),         width: 80,  sizing: "content", minWidth: 56  },
   { id: "ip",     title: "IP",      width: 130, sizing: "content", minWidth: 90  },
-  { id: "port",   title: "Port",    width: 52,  sizing: "content", minWidth: 38  },
+  { id: "port",   title: t("webview.table.port", {}, "Port"),         width: 52,  sizing: "content", minWidth: 38  },
 ];
 
 // Column order / width persistence keyed by column id
@@ -136,7 +200,7 @@ window.addEventListener("message", (event) => {
     case "proxyStatus":
       proxyRunning = msg.running;
       updateProxyIndicator();
-      footerStatus.textContent = msg.message || (msg.running ? "代理运行中" : "代理已停止");
+      footerStatus.textContent = msg.message || (msg.running ? t("webview.proxy.runningStatus") : t("webview.proxy.stoppedStatus"));
       break;
     case "deviceStatus":
       updateDevicePanel(msg);
@@ -170,7 +234,7 @@ window.addEventListener("message", (event) => {
       resetFilterContentState();
       renderFlowList();
       renderEmptyDetail();
-      footerStatus.textContent = `已加载 ${msg.flows.length} 条记录`;
+      footerStatus.textContent = t("webview.flow.loaded", { count: msg.flows.length });
       break;
     case "filterContentProgress":
       if (msg.requestId !== filterContentState.requestId) break;
@@ -218,12 +282,12 @@ window.addEventListener("message", (event) => {
 function updateProxyIndicator() {
   if (proxyRunning) {
     proxyIndicator.className = "indicator running";
-    proxyStatusText.textContent = "运行中";
+    proxyStatusText.textContent = t("webview.proxy.running");
     $("startProxyBtn").style.display = "none";
     $("stopProxyBtn").style.display = "block";
   } else {
     proxyIndicator.className = "indicator stopped";
-    proxyStatusText.textContent = "未启动";
+    proxyStatusText.textContent = t("webview.proxy.stopped");
     $("startProxyBtn").style.display = "block";
     $("stopProxyBtn").style.display = "none";
   }
@@ -238,16 +302,16 @@ function updateDevicePanel(msg) {
 
   if (msg.connected) {
     adbStatus.querySelector(".dot").className = "dot connected";
-    adbStatusText.textContent = "已连接";
+    adbStatusText.textContent = t("common.available");
     deviceInfoCard.style.display = "block";
     if (msg.info) {
       $("devModel").textContent = msg.info.model || "-";
       $("devVersion").textContent = msg.info.androidVersion || "-";
-      $("devRoot").textContent = msg.info.isRoot ? "Yes" : "No";
+      $("devRoot").textContent = msg.info.isRoot ? t("device.root.yes") : t("device.root.no");
     }
   } else {
     adbStatus.querySelector(".dot").className = "dot disconnected";
-    adbStatusText.textContent = "未连接";
+    adbStatusText.textContent = t("common.notConnected");
     deviceInfoCard.style.display = "none";
   }
 }
@@ -274,47 +338,47 @@ function setText(id, value) {
 }
 
 function formatEnvTime(value) {
-  if (!value) return "Never";
+  if (!value) return t("common.never");
   try {
     return new Date(value).toLocaleString();
   } catch (_) {
-    return "Never";
+    return t("common.never");
   }
 }
 
 function runtimeStatusText(runtime) {
-  if (!runtime) return "Unknown";
-  if (runtime.status === "notRequired") return "Source/dev";
-  if (runtime.status === "ready") return "Ready";
-  if (runtime.status === "missing") return "Missing";
-  if (runtime.status === "invalid") return "Invalid";
-  return runtime.status || "Unknown";
+  if (!runtime) return t("common.unknown");
+  if (runtime.status === "notRequired") return t("common.sourceDev");
+  if (runtime.status === "ready") return t("common.ready");
+  if (runtime.status === "missing") return t("common.missing");
+  if (runtime.status === "invalid") return t("common.invalid");
+  return runtime.status || t("common.unknown");
 }
 
 function updateStatusText(updates) {
   const latest = updates?.latest;
-  if (!latest || latest.status === "unknown") return "Not checked";
-  if (latest.status === "updateAvailable") return `Update available: ${latest.update?.version || latest.latestVersion}`;
-  if (latest.status === "upToDate") return "Up to date";
-  if (latest.status === "error") return `Error: ${latest.error || "check failed"}`;
+  if (!latest || latest.status === "unknown") return t("common.notChecked");
+  if (latest.status === "updateAvailable") return t("webview.update.latestAvailable", { version: latest.update?.version || latest.latestVersion });
+  if (latest.status === "upToDate") return t("common.upToDate");
+  if (latest.status === "error") return `${t("common.checkFailed")}: ${latest.error || t("common.checkFailed")}`;
   return latest.status;
 }
 
 function getEnvironmentSummary(status) {
   const latest = status?.updates?.latest;
   if (latest?.status === "updateAvailable") {
-    return { text: "Update available", dot: "info" };
+    return { text: t("webview.update.available"), dot: "info" };
   }
   if (status?.runtime && !status.runtime.valid) {
-    return { text: status.runtime.status === "missing" ? "Runtime missing" : "Runtime invalid", dot: "disconnected" };
+    return { text: status.runtime.status === "missing" ? `runtime ${t("common.missing")}` : `runtime ${t("common.invalid")}`, dot: "disconnected" };
   }
   if (status?.adb && !status.adb.available) {
-    return { text: "ADB missing", dot: "disconnected" };
+    return { text: `ADB ${t("common.missing")}`, dot: "disconnected" };
   }
   if (latest?.status === "error") {
-    return { text: "Update check failed", dot: "warning" };
+    return { text: t("webview.update.checkFailed"), dot: "warning" };
   }
-  return { text: "Ready", dot: "connected" };
+  return { text: t("common.ready"), dot: "connected" };
 }
 
 function renderEnvironmentStatus() {
@@ -328,11 +392,11 @@ function renderEnvironmentStatus() {
   setText("envVersionInfo", versionDisplayText(status));
   setText("envRuntimeVersion", runtimeDisplayText(status.runtime));
   setText("envRuntimeApi", status.runtime?.apiVersion ?? "-");
-  setText("envMitmproxyVersion", status.mitmproxy?.version || (status.mitmproxy?.running ? "Running" : "Not running"));
+  setText("envMitmproxyVersion", status.mitmproxy?.version || (status.mitmproxy?.running ? t("common.running") : t("common.notRunning")));
 
-  setText("envAdbStatus", status.adb?.available ? `Available${status.adb.version ? ` · ${status.adb.version}` : ""}` : "Missing");
+  setText("envAdbStatus", status.adb?.available ? `${t("common.available")}${status.adb.version ? ` · ${status.adb.version}` : ""}` : t("common.missing"));
   setText("envAdbVersion", status.adb?.version || status.adb?.detail || "-");
-  setText("envDevice", status.device?.model ? `${status.device.model} · Android ${status.device.androidVersion || "-"}` : "Not connected");
+  setText("envDevice", status.device?.model ? `${status.device.model} · Android ${status.device.androidVersion || "-"}` : t("common.notConnected"));
   setText("envPlatform", `${status.platform?.os || "-"} ${status.platform?.arch || ""}`);
 
   setText("envRuntimeStatus", runtimeStatusText(status.runtime));
@@ -354,23 +418,23 @@ function renderEnvironmentStatus() {
 
 function versionDisplayText(status) {
   const extensionVersion = status?.extension?.version || EXTENSION_VERSION;
-  return `Extension v${extensionVersion} · Runtime ${runtimeDisplayText(status?.runtime)}`;
+  return t("webview.version.display", { extensionVersion, runtime: runtimeDisplayText(status?.runtime) });
 }
 
 function runtimeDisplayText(runtime) {
-  if (!runtime) return "Checking";
-  if (runtime.status === "notRequired") return "Source";
-  if (runtime.status === "missing") return runtime.version ? `v${runtime.version} · Not installed` : "Not installed";
-  if (runtime.status === "invalid") return `Invalid${runtime.version ? ` · v${runtime.version}` : ""}`;
+  if (!runtime) return t("common.checking");
+  if (runtime.status === "notRequired") return t("common.source");
+  if (runtime.status === "missing") return runtime.version ? `v${runtime.version} · ${t("common.notInstalled")}` : t("common.notInstalled");
+  if (runtime.status === "invalid") return `${t("common.invalid")}${runtime.version ? ` · v${runtime.version}` : ""}`;
   return runtime.version ? `v${runtime.version}` : runtimeStatusText(runtime);
 }
 
 function latestDisplayText(updates) {
   const latest = updates?.latest;
-  if (!latest || latest.status === "unknown") return "Not checked";
-  if (latest.status === "updateAvailable") return `v${latest.update?.version || latest.latestVersion} available`;
-  if (latest.status === "upToDate") return latest.latestVersion ? `v${latest.latestVersion} · Up to date` : "Up to date";
-  if (latest.status === "error") return "Check failed";
+  if (!latest || latest.status === "unknown") return t("common.notChecked");
+  if (latest.status === "updateAvailable") return t("webview.update.latestAvailable", { version: latest.update?.version || latest.latestVersion });
+  if (latest.status === "upToDate") return latest.latestVersion ? t("webview.update.latestVersion", { version: latest.latestVersion }) : t("common.upToDate");
+  if (latest.status === "error") return t("common.checkFailed");
   return updateStatusText(updates);
 }
 
@@ -813,7 +877,7 @@ function renderFlowList() {
   if (waitingForContent || filtered.length === 0) {
     flowTableBody.innerHTML =
       '<tr class="empty-state"><td colspan="' + COLUMNS.length + '">' +
-      (waitingForContent ? filterContentMessage() : (flows.length === 0 ? "等待抓包数据..." : "无匹配结果")) +
+      (waitingForContent ? filterContentMessage() : (flows.length === 0 ? t("webview.flow.empty") : t("webview.flow.noMatches"))) +
       "</td></tr>";
     return;
   }
@@ -970,7 +1034,7 @@ function renderCell(col, flow, rowNum) {
     case "status": {
       const code = flow.status_code;
       if (code === 0 && !flow.error) {
-        return `<td class="col-status"><span class="status pending" title="等待响应...">...</span></td>`;
+        return `<td class="col-status"><span class="status pending" title="${escapeHtml(t("webview.flow.waitingResponse"))}">...</span></td>`;
       }
       if (code === 0 && flow.error) {
         return `<td class="col-status"><span class="status s0xx" title="${escapeHtml(flow.error)}">ERR</span></td>`;
@@ -2101,19 +2165,19 @@ $("refreshDeviceBtn").addEventListener("click", () => {
 });
 
 $("rootDeviceBtn").addEventListener("click", () => {
-  showCertStatus("", "正在获取 Root...");
+  showCertStatus("", t("webview.device.gettingRoot"));
   vscode.postMessage({ command: "ensureRoot" });
 });
 
 $("pushCertBtn").addEventListener("click", () => {
-  showCertStatus("", "正在推送证书...");
+  showCertStatus("", t("webview.device.pushingCert"));
   vscode.postMessage({ command: "pushCert" });
 });
 
 $("startProxyBtn").addEventListener("click", () => {
   const ip = getSelectedInterface();
   if (availableInterfaces.length > 1 && !ip) {
-    showProxySetupStatus("error", "请先选择网卡接口");
+    showProxySetupStatus("error", t("webview.interfaces.needSelect"));
     return;
   }
   const port = parseInt($("proxyPort").value) || 8080;
@@ -2127,7 +2191,7 @@ $("stopProxyBtn").addEventListener("click", () => {
 $("setDeviceProxyBtn").addEventListener("click", () => {
   const ip = getSelectedInterface();
   if (availableInterfaces.length > 1 && !ip) {
-    showProxySetupStatus("error", "请先选择网卡接口");
+    showProxySetupStatus("error", t("webview.interfaces.needSelect"));
     return;
   }
   const port = parseInt($("proxyPort").value) || 8080;
@@ -2189,12 +2253,12 @@ $("aboutCloseBtn").addEventListener("click", () => {
 });
 
 $("envCheckUpdateBtn").addEventListener("click", () => {
-  showEnvironmentActionStatus("Checking GitHub Release...", true);
+  showEnvironmentActionStatus(t("webview.about.action.checkingRelease"), true);
   vscode.postMessage({ command: "checkEnvironmentUpdates" });
 });
 
 $("envDownloadUpdateBtn").addEventListener("click", () => {
-  showEnvironmentActionStatus("Downloading update...", true);
+  showEnvironmentActionStatus(t("webview.about.action.downloadingUpdate"), true);
   vscode.postMessage({ command: "installEnvironmentUpdate" });
 });
 
@@ -2227,7 +2291,7 @@ function updateInterfaceSelect(interfaces) {
   const saved = localStorage.getItem("secmp-selected-interface") || "";
 
   if (interfaces.length === 0) {
-    sel.innerHTML = '<option value="">无可用网卡</option>';
+    sel.innerHTML = `<option value="">${escapeHtml(t("webview.device.noInterfaces"))}</option>`;
     return;
   }
 
@@ -2237,7 +2301,7 @@ function updateInterfaceSelect(interfaces) {
     return;
   }
 
-  sel.innerHTML = '<option value="">请选择网卡...</option>' +
+  sel.innerHTML = `<option value="">${escapeHtml(t("webview.device.selectInterface"))}</option>` +
     interfaces.map((iface) => {
       const selAttr = iface.ip === saved ? " selected" : "";
       return `<option value="${iface.ip}"${selAttr}>${iface.name} — ${iface.ip}</option>`;
@@ -2272,9 +2336,12 @@ function isFilterContentPending() {
 
 function filterContentMessage() {
   if (filterContentState.preparing) {
-    return `正在加载全部内容用于过滤... ${filterContentState.completed}/${filterContentState.total}`;
+    return t("webview.flow.waitingForFilter", {
+      completed: filterContentState.completed,
+      total: filterContentState.total,
+    });
   }
-  return "正在准备内容过滤...";
+  return t("webview.filter.contentPreparing");
 }
 
 function resetFilterContentState(blocking = false) {
@@ -2351,21 +2418,25 @@ function updateFilterUi() {
 
   const activeCount = getActiveFilterCount();
   $("filterPanelBtn").classList.toggle("active", activeCount > 0);
-  $("filterPanelBtn").textContent = activeCount > 0 ? `过滤器 ${activeCount}` : "过滤器";
+  const filterLabel = t("webview.filter.filter", {}, "过滤器");
+  $("filterPanelBtn").textContent = activeCount > 0 ? `${filterLabel} ${activeCount}` : filterLabel;
   $("applyFilterBtn").classList.toggle("pending", hasDraftFilterChanges());
 
   const status = $("filterStatusText");
   if (!status) return;
   if (needsFilterContent() && filterContentState.preparing) {
-    status.textContent = `正在加载全部请求/响应内容用于过滤 ${filterContentState.completed}/${filterContentState.total}`;
+    status.textContent = t("webview.filter.contentLoading", {
+      completed: filterContentState.completed,
+      total: filterContentState.total,
+    });
   } else if (needsFilterContent() && filterContentState.failed > 0) {
-    status.textContent = `内容过滤已完成，${filterContentState.failed} 条内容加载失败`;
+    status.textContent = t("webview.filter.contentFailed", { count: filterContentState.failed });
   } else if (needsFilterContent() && filterContentState.ready) {
-    status.textContent = "内容过滤已就绪";
+    status.textContent = t("webview.filter.contentReady");
   } else if (hasDraftFilterChanges()) {
-    status.textContent = "过滤条件已修改，点击“应用”后生效";
+    status.textContent = t("webview.filter.modified");
   } else {
-    status.textContent = "关键词范围默认全选；应用请求体或响应体过滤时会先加载全部内容";
+    status.textContent = t("webview.filter.defaultHint");
   }
 }
 
@@ -2435,7 +2506,7 @@ function discardDraftFilterChanges() {
 function closeFilterPanel(options = {}) {
   if (!filterPanelOpen) return true;
   if (!options.force && hasDraftFilterChanges()) {
-    const shouldClose = window.confirm("过滤条件已修改但尚未应用，关闭后会放弃这些修改。确定关闭吗？");
+    const shouldClose = window.confirm(t("webview.filter.unsavedConfirm"));
     if (!shouldClose) return false;
     discardDraftFilterChanges();
   }
@@ -2580,7 +2651,7 @@ document.addEventListener("keydown", (e) => {
 // ===== Init =====
 
 setText("footerVersion", EXTENSION_VERSION);
-setText("envVersionInfo", `Extension v${EXTENSION_VERSION} · Runtime checking`);
+setText("envVersionInfo", t("webview.about.runtimeChecking", { version: EXTENSION_VERSION }, `Extension v${EXTENSION_VERSION} · Runtime checking`));
 colOrder = getColumnOrder();
 colWidths = loadColumnWidths();
 loadPanelState();

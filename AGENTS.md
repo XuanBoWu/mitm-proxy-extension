@@ -42,6 +42,16 @@ Webview UI (HTML/CSS/JS) → vscode.postMessage → extension.js (Node.js)
 - Webview panel type 是 `secmpPanel`，输出通道名称是 `SecMP`。
 - 新增 UI 或文档时不要再使用旧的 `MITM Proxy` / `mitmProxy` / `mitm-proxy` 品牌命名；GitHub 仓库 URL 保持原仓库名不变。
 
+## 语言与术语规则
+
+- 当前产品语言以简体中文为主，同时通过 i18n 语言包为英文版本保留完整 key。
+- 用户动作、状态、提示、帮助说明优先使用自然中文，参照专业工具类软件中文版本的表达，不做生硬直译。
+- 专业名词按“中文优先、必要英文保留”处理：`SecMP`、`VS Code`、`VSCodium`、`Android`、`ADB`、`mitmproxy`、`runtime`、`Webview`、`HTTP`、`HTTPS`、`TLS`、`SNI`、`ALPN`、`HAR`、`JSON`、`MIME`、`IP`、`Port` 保留英文。
+- 抓包报文详情区保留 `Request` / `Response` 等专业面板名；正文说明中可写作“请求（Request）/ 响应（Response）”。
+- 新增用户可见文本必须先加入 `l10n/secmp.zh-CN.json` 和 `l10n/secmp.en-US.json`，不得继续在 Webview 或 extension 逻辑里散落硬编码中英文混写。
+- `secmp.language` 只控制 Webview 和 extension 运行时消息；命令面板标题与设置说明使用 VS Code `package.nls*` 静态本地化，跟随 VS Code 显示语言。
+- 修改语言包或用户可见文案后必须运行 `npm run l10n:check`，确保中英文 key 集合一致，并确认 Webview、extension 运行时与 `package.nls*` 引用没有缺失 key。
+
 ## 开发、版本与提交规范
 
 后续 agent 必须默认遵守本节规则，不需要用户每次额外强调。

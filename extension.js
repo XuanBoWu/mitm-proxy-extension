@@ -30,6 +30,8 @@ const DEFAULT_UPDATE_CHECK_INTERVAL_HOURS = 24;
 const UPDATE_LAST_CHECK_KEY = "secmp.lastUpdateCheckAt";
 const extensionPackage = loadExtensionPackage();
 const SUPPORTED_RUNTIME_PLATFORMS = new Set(["win32", "darwin"]);
+const SUPPORTED_LOCALES = new Set(["zh-CN", "en-US"]);
+const DEFAULT_LOCALE = "zh-CN";
 const DEFAULT_RUNTIME_SOURCES = {
   "0.1.0:win32:x64": {
     url: "https://github.com/XuanBoWu/mitm-proxy-extension/releases/download/v0.1.0/secmp-runtime-win32-x64-0.1.0.zip",
@@ -40,6 +42,7 @@ let extensionStorageDir = null;
 let certDir = path.join(__dirname, "certificate");
 let windowsRuntimeReadyPromise = null;
 let latestExtensionReleaseStatus = null;
+let l10nBundles = new Map();
 
 function loadExtensionPackage() {
   try {
@@ -47,6 +50,54 @@ function loadExtensionPackage() {
   } catch (_) {
     return { version: "0.0.0" };
   }
+}
+
+function normalizeLocale(locale) {
+  const value = String(locale || "").toLowerCase();
+  if (value.startsWith("zh")) return "zh-CN";
+  if (value.startsWith("en")) return "en-US";
+  return DEFAULT_LOCALE;
+}
+
+function getConfiguredLocale() {
+  const config = vscode.workspace.getConfiguration("secmp");
+  const language = String(config.get("language", "auto") || "auto").trim();
+  if (SUPPORTED_LOCALES.has(language)) {
+    return language;
+  }
+  return normalizeLocale(vscode.env.language);
+}
+
+function loadL10nBundle(locale) {
+  const normalized = SUPPORTED_LOCALES.has(locale) ? locale : DEFAULT_LOCALE;
+  if (l10nBundles.has(normalized)) {
+    return l10nBundles.get(normalized);
+  }
+  const filePath = path.join(__dirname, "l10n", `secmp.${normalized}.json`);
+  const bundle = JSON.parse(fs.readFileSync(filePath, "utf8"));
+  l10nBundles.set(normalized, bundle);
+  return bundle;
+}
+
+function formatL10n(template, values = {}) {
+  return String(template).replace(/\{([A-Za-z0-9_]+)\}/g, (match, key) => (
+    Object.prototype.hasOwnProperty.call(values, key) ? String(values[key]) : match
+  ));
+}
+
+function t(key, values = {}) {
+  const locale = getConfiguredLocale();
+  const bundle = loadL10nBundle(locale);
+  const fallback = locale === DEFAULT_LOCALE ? bundle : loadL10nBundle(DEFAULT_LOCALE);
+  return formatL10n(bundle[key] || fallback[key] || key, values);
+}
+
+function getCurrentL10nPayload() {
+  const locale = getConfiguredLocale();
+  return {
+    locale,
+    messages: loadL10nBundle(locale),
+  };
 }
 
 function getPythonCmd() {
@@ -643,7 +694,7 @@ function downloadFile(url, destinationPath, expectedSha256, progress, label = "D
 }
 
 async function expandZipWindows(zipPath, destinationDir, progress) {
-  progress?.report({ message: "Extracting SecMP runtime..." });
+  progress?.report({ message: t("extension.progress.extractRuntime") });
   fs.rmSync(destinationDir, { recursive: true, force: true });
   fs.mkdirSync(destinationDir, { recursive: true });
   if (process.platform === "win32") {
@@ -696,7 +747,7 @@ async function installWindowsRuntime(progress, selectedArchivePath = null) {
   const config = getRuntimeConfig();
   const configuredRuntimeDir = getConfiguredWindowsRuntimePath();
   if (configuredRuntimeDir) {
-    progress?.report({ message: "Using configured local SecMP runtime..." });
+    progress?.report({ message: t("extension.progress.useConfiguredRuntime") });
     if (!isWindowsRuntimeReady(configuredRuntimeDir)) {
       throw new Error(`Configured SecMP runtime path is invalid: ${configuredRuntimeDir}`);
     }
@@ -708,13 +759,13 @@ async function installWindowsRuntime(progress, selectedArchivePath = null) {
     if (!fs.existsSync(archivePath)) {
       throw new Error(`SecMP runtime archive not found: ${archivePath}`);
     }
-    progress?.report({ message: "Installing SecMP runtime from local archive..." });
+    progress?.report({ message: t("extension.progress.installRuntimeArchive") });
     await installWindowsRuntimeFromZip(archivePath, progress);
     return;
   }
 
   if (selectedArchivePath) {
-    progress?.report({ message: "Installing SecMP runtime from selected package..." });
+    progress?.report({ message: t("extension.progress.installRuntimeSelected") });
     await installWindowsRuntimeFromZip(selectedArchivePath, progress);
     return;
   }
@@ -734,10 +785,10 @@ async function installWindowsRuntime(progress, selectedArchivePath = null) {
     await downloadFile(runtimeUrl, zipPath, getExpectedWindowsRuntimeSha256(), progress, "Downloading SecMP runtime");
   } catch (err) {
     if (usingDefaultRuntimeUrl) {
-      progress?.report({ message: "Default runtime download failed. Select a local runtime package..." });
+      progress?.report({ message: t("extension.progress.runtimeDownloadFailed") });
       const archivePath = await promptForWindowsRuntimeArchive();
       if (archivePath) {
-        progress?.report({ message: "Installing SecMP runtime from selected package..." });
+        progress?.report({ message: t("extension.progress.installRuntimeSelected") });
         await installWindowsRuntimeFromZip(archivePath, progress);
         return;
       }
@@ -857,20 +908,23 @@ async function openUpdateFolder(updateDir) {
 async function installDownloadedVsix(vsixPath, update) {
   try {
     await vscode.commands.executeCommand("workbench.extensions.installExtension", vscode.Uri.file(vsixPath));
-    vscode.window.showInformationMessage("SecMP update installation started. Reload VS Code if prompted.");
+    vscode.window.showInformationMessage(t("extension.update.installStarted"));
   } catch (err) {
+    const openFolder = getConfiguredLocale() === "zh-CN" ? "打开文件夹" : "Open Folder";
+    const copyPath = t("extension.update.copyPath");
+    const openReleaseAction = getConfiguredLocale() === "zh-CN" ? "打开 Release" : "Open Release";
     const action = await vscode.window.showWarningMessage(
-      `Downloaded SecMP ${update.version}, but automatic VSIX installation failed: ${err.message}`,
-      "Open Folder",
-      "Copy Path",
-      "Open Release"
+      t("extension.update.installAutoFailed", { version: update.version, message: err.message }),
+      openFolder,
+      copyPath,
+      openReleaseAction
     );
-    if (action === "Open Folder") {
+    if (action === openFolder) {
       await openUpdateFolder(path.dirname(vsixPath));
-    } else if (action === "Copy Path") {
+    } else if (action === copyPath) {
       await vscode.env.clipboard.writeText(vsixPath);
-      vscode.window.showInformationMessage("VSIX path copied.");
-    } else if (action === "Open Release") {
+      vscode.window.showInformationMessage(t("extension.update.pathCopied"));
+    } else if (action === openReleaseAction) {
       await openRelease(update);
     }
   }
@@ -893,16 +947,19 @@ async function downloadAndInstallExtensionUpdate(update) {
 }
 
 async function promptForExtensionUpdate(update) {
+  const download = t("extension.update.download");
+  const openReleaseAction = getConfiguredLocale() === "zh-CN" ? "打开 Release" : "Open Release";
+  const later = getConfiguredLocale() === "zh-CN" ? "稍后" : "Later";
   const action = await vscode.window.showInformationMessage(
-    `SecMP ${update.version} is available. Current version: ${update.currentVersion}.`,
-    "Download and Install",
-    "Open Release",
-    "Later"
+    t("extension.update.available", { version: update.version }),
+    download,
+    openReleaseAction,
+    later
   );
 
-  if (action === "Download and Install") {
+  if (action === download) {
     await downloadAndInstallExtensionUpdate(update);
-  } else if (action === "Open Release") {
+  } else if (action === openReleaseAction) {
     await openRelease(update);
   }
 }
@@ -933,17 +990,17 @@ async function checkForExtensionUpdate(context, options = {}) {
     const status = manual && showProgress
       ? await vscode.window.withProgress({
         location: vscode.ProgressLocation.Notification,
-        title: "Checking SecMP updates",
+        title: t("extension.progress.checkingRelease"),
         cancellable: false,
       }, async (progress) => {
-        progress.report({ message: "Checking GitHub Release..." });
+        progress.report({ message: t("extension.progress.checkingRelease") });
         return fetchLatestExtensionReleaseStatus();
       })
       : await fetchLatestExtensionReleaseStatus();
 
     if (!status.update) {
       if (manual && notify) {
-        vscode.window.showInformationMessage(`SecMP is up to date (${extensionPackage.version}).`);
+        vscode.window.showInformationMessage(t("extension.update.upToDate", { version: extensionPackage.version }));
       }
       return status;
     }
@@ -965,7 +1022,7 @@ async function checkForExtensionUpdate(context, options = {}) {
       error: err.message,
     };
     if (manual && notify) {
-      vscode.window.showErrorMessage(`Failed to check SecMP updates: ${err.message}`);
+      vscode.window.showErrorMessage(t("extension.update.checkFailed", { message: err.message }));
     }
     return latestExtensionReleaseStatus;
   }
@@ -1092,20 +1149,20 @@ function getUpdateEnvironmentInfo(context) {
 
 function getUpdateActionMessage(status) {
   if (!status || status.status === "unknown") {
-    return "Update check finished.";
+    return t("extension.update.checkFinished");
   }
   if (status.status === "error") {
-    return `Update check failed: ${status.error || "unknown error"}`;
+    return t("extension.update.checkFailed", { message: status.error || t("common.unknown") });
   }
   if (status.status === "updateAvailable") {
     const version = status.update?.version || status.latestVersion || "";
-    return `SecMP ${version} is available.`;
+    return t("extension.update.versionAvailable", { version });
   }
   if (status.status === "upToDate") {
     const version = status.currentVersion || normalizeVersion(extensionPackage.version);
-    return `SecMP is up to date (${version}).`;
+    return t("extension.update.upToDate", { version });
   }
-  return "Update check finished.";
+  return t("extension.update.checkFinished");
 }
 
 function getFallbackEnvironmentStatus(context, error) {
@@ -1157,23 +1214,23 @@ async function getEnvironmentStatus(context) {
 }
 
 function formatTimestamp(timestamp) {
-  if (!timestamp) return "Never";
+  if (!timestamp) return t("common.never");
   return new Date(timestamp).toLocaleString();
 }
 
 function formatEnvironmentInfoForClipboard(status) {
   const lines = [
     `SecMP Extension: ${status.extension.version}`,
-    `Runtime: ${status.runtime.valid ? "Ready" : status.runtime.status} ${status.runtime.version || ""}`.trim(),
+    `Runtime: ${status.runtime.valid ? t("common.ready") : status.runtime.status} ${status.runtime.version || ""}`.trim(),
     `Runtime API: ${status.runtime.apiVersion ?? "-"}`,
     `Runtime source: ${status.runtime.source}`,
     `Runtime path: ${status.runtime.path}`,
-    `ADB: ${status.adb.available ? "Available" : "Missing"}`,
+    `ADB: ${status.adb.available ? t("common.available") : t("common.missing")}`,
     `ADB version: ${status.adb.version || "-"}`,
     `Device: ${status.device?.model || "-"}`,
     `Android: ${status.device?.androidVersion || "-"}`,
-    `Root: ${status.device?.isRoot ? "Yes" : "No"}`,
-    `mitmproxy: ${status.mitmproxy.version || (status.mitmproxy.running ? "Running" : "Not running")}`,
+    `Root: ${status.device?.isRoot ? t("device.root.yes") : t("device.root.no")}`,
+    `mitmproxy: ${status.mitmproxy.version || (status.mitmproxy.running ? t("common.running") : t("common.notRunning"))}`,
     `Platform: ${status.platform.os} ${status.platform.arch}`,
     `Node: ${status.platform.node}`,
     `Update check: ${status.updates.enabled ? "Enabled" : "Disabled"}`,
@@ -1496,12 +1553,12 @@ async function ensureRoot() {
   return new Promise((resolve) => {
     exec("adb root", { timeout: 10000 }, async (err) => {
       if (err) {
-        resolve({ success: false, message: "adb root failed" });
+        resolve({ success: false, message: t("extension.proxy.rootStartFailed") });
         return;
       }
       setTimeout(async () => {
         const info = await getDeviceInfo();
-        resolve({ success: info.isRoot, message: info.isRoot ? "Root access confirmed" : "Root failed" });
+        resolve({ success: info.isRoot, message: info.isRoot ? t("extension.proxy.rootConfirmed") : t("extension.proxy.rootFailed") });
       }, 1000);
     });
   });
@@ -1526,7 +1583,7 @@ async function setDeviceProxy(proxyHost, proxyPort) {
       if (err) {
         resolve({ success: false, message: err.message });
       } else {
-        resolve({ success: true, message: `Proxy set to ${proxyHost}:${proxyPort}` });
+        resolve({ success: true, message: t("extension.proxy.setResult", { host: proxyHost, port: proxyPort }) });
       }
     });
   });
@@ -1538,7 +1595,7 @@ async function clearDeviceProxy() {
       if (err) {
         resolve({ success: false, message: err.message });
       } else {
-        resolve({ success: true, message: "Proxy cleared" });
+        resolve({ success: true, message: t("extension.proxy.clearDeviceResult") });
       }
     });
   });
@@ -1548,7 +1605,7 @@ async function clearDeviceProxy() {
 
 async function startProxyEngine(port) {
   if (proxyProcess) {
-    return { success: true, message: "Proxy already running" };
+    return { success: true, message: t("extension.proxy.alreadyRunning") };
   }
 
   const engine = await getProxyEngineCommand();
@@ -1587,7 +1644,7 @@ async function startProxyEngine(port) {
         startupTimer = null;
       }
       startFlowPolling();
-      resolve({ success: true, message: `Proxy started on port ${port}`, webPort: wPort });
+      resolve({ success: true, message: t("extension.proxy.started", { port }), webPort: wPort });
     }
 
     proxyProcess.stderr.on("data", (data) => {
@@ -1647,7 +1704,7 @@ async function startProxyEngine(port) {
       }
       if (!started) {
         started = true;
-        reject(new Error(`Proxy engine exited before startup completed (code ${code})`));
+        reject(new Error(t("extension.proxy.startupExited", { code })));
       }
       if (panel) {
         panel.webview.postMessage({
@@ -1663,7 +1720,7 @@ async function startProxyEngine(port) {
       if (!started) {
         started = true;
         const detail = stderrBuffer.trim();
-        reject(new Error(`Proxy engine did not report readiness within 45s${detail ? `: ${detail}` : ""}`));
+        reject(new Error(t("extension.proxy.startupTimeout", { detail: detail ? `: ${detail}` : "" })));
       }
     }, 45000);
   });
@@ -1672,7 +1729,7 @@ async function startProxyEngine(port) {
 function stopProxyEngine() {
   return new Promise((resolve) => {
     if (!proxyProcess) {
-      resolve({ success: true, message: "Proxy not running" });
+      resolve({ success: true, message: t("extension.proxy.notRunning") });
       return;
     }
 
@@ -1682,7 +1739,7 @@ function stopProxyEngine() {
       proxyProcess = null;
       webPort = null;
       authToken = null;
-      resolve({ success: true, message: "Proxy stopped" });
+      resolve({ success: true, message: t("extension.proxy.stopped") });
     });
 
     if (process.platform === "win32") {
@@ -1715,6 +1772,9 @@ function getWebviewContent(webview) {
   html = html.replace("./app.js", scriptUri.toString());
   html = html.replace("./assets/header-icon.png", headerIconUri.toString());
   html = html.replaceAll("__EXTENSION_VERSION__", normalizeVersion(extensionPackage.version));
+  const l10n = getCurrentL10nPayload();
+  html = html.replace("__SECMP_LOCALE__", l10n.locale);
+  html = html.replace("__SECMP_MESSAGES_JSON__", JSON.stringify(l10n.messages).replace(/</g, "\\u003c"));
 
   return html;
 }
@@ -1794,7 +1854,7 @@ async function createPanel() {
           command: "environmentActionResult",
           action: "checkUpdates",
           running: true,
-          message: "Checking GitHub Release...",
+          message: t("webview.about.action.checkingRelease"),
         });
         {
           const status = await checkForExtensionUpdate(context, { manual: true, notify: false, progress: false });
@@ -1819,7 +1879,7 @@ async function createPanel() {
             command: "environmentActionResult",
             action: "installUpdate",
             running: false,
-            message: "No extension update is available.",
+            message: t("extension.update.noUpdate"),
           });
           await postEnvironmentStatus(context);
           break;
@@ -1830,14 +1890,14 @@ async function createPanel() {
             command: "environmentActionResult",
             action: "installUpdate",
             running: false,
-            message: `Downloaded SecMP ${update.version}. VS Code may ask you to reload.`,
+            message: t("extension.update.installDownloaded", { version: update.version }),
           });
         } catch (err) {
           panel.webview.postMessage({
             command: "environmentActionResult",
             action: "installUpdate",
             running: false,
-            message: `Update installation failed: ${err.message}`,
+            message: t("extension.update.installFailed", { message: err.message }),
           });
         }
         await postEnvironmentStatus(context);
@@ -1871,7 +1931,7 @@ async function createPanel() {
             command: "environmentActionResult",
             action: "cleanRuntimeCache",
             running: false,
-            message: "Stop the SecMP proxy before cleaning the runtime cache.",
+            message: t("webview.about.action.cleanRuntimeStopProxy"),
           });
           break;
         }
@@ -1881,17 +1941,19 @@ async function createPanel() {
             command: "environmentActionResult",
             action: "cleanRuntimeCache",
             running: false,
-            message:
-              `Kept ${result.keptVersions.join(", ") || "none"}. ` +
-              `Removed ${result.runtimeDirsRemoved} runtime dirs, ${result.downloadFilesRemoved} downloads. ` +
-              `Freed ${formatBytes(result.bytesFreed)}.`,
+            message: t("extension.cache.environmentSummary", {
+              versions: result.keptVersions.join(", ") || "none",
+              runtimeDirs: result.runtimeDirsRemoved,
+              downloads: result.downloadFilesRemoved,
+              bytes: formatBytes(result.bytesFreed),
+            }),
           });
         } catch (err) {
           panel.webview.postMessage({
             command: "environmentActionResult",
             action: "cleanRuntimeCache",
             running: false,
-            message: `Failed to clean runtime cache: ${err.message}`,
+            message: t("extension.cache.cleanFailed", { message: err.message }),
           });
         }
         await postEnvironmentStatus(context);
@@ -1905,7 +1967,7 @@ async function createPanel() {
           command: "environmentActionResult",
           action: "copyEnvironmentInfo",
           running: false,
-          message: "Environment info copied.",
+          message: t("webview.about.action.copied"),
         });
         break;
       }
@@ -1997,12 +2059,13 @@ async function createPanel() {
         break;
 
       case "clearFlows": {
+        const clearAction = t("extension.clear.confirmAction");
         const choice = await vscode.window.showWarningMessage(
-          "Clear the current SecMP capture list? This will not save the current session.",
+          t("extension.clear.confirm"),
           { modal: true },
-          "Clear"
+          clearAction
         );
-        if (choice !== "Clear") {
+        if (choice !== clearAction) {
           break;
         }
         for (const id of knownFlowIds) {
@@ -2039,7 +2102,7 @@ async function createPanel() {
           panel.webview.postMessage({
             command: "certStatus",
             success: false,
-            message: "CA cert not found. Start the proxy once first.",
+            message: t("extension.cert.missing"),
           });
           break;
         }
@@ -2066,7 +2129,7 @@ async function createPanel() {
             panel.webview.postMessage({
               command: "certStatus",
               success: code === 0,
-              message: output || "Certificate operation completed",
+              message: output || t("extension.cert.completed"),
             });
           }
         });
@@ -2204,7 +2267,7 @@ async function prepareFilterContent(requestId, scopes) {
 
 async function exportHar() {
   if (capturedFlows.length === 0) {
-    vscode.window.showWarningMessage("No flows to export");
+    vscode.window.showWarningMessage(t("extension.export.noFlows"));
     return;
   }
 
@@ -2255,12 +2318,12 @@ async function exportHar() {
   };
 
   fs.writeFileSync(result.fsPath, JSON.stringify(har, null, 2));
-  vscode.window.showInformationMessage(`Exported ${capturedFlows.length} flows to ${result.fsPath}`);
+  vscode.window.showInformationMessage(t("extension.export.completed", { count: capturedFlows.length, path: result.fsPath }));
 }
 
 async function exportJson() {
   if (capturedFlows.length === 0) {
-    vscode.window.showWarningMessage("No flows to export");
+    vscode.window.showWarningMessage(t("extension.export.noFlows"));
     return;
   }
 
@@ -2278,12 +2341,12 @@ async function exportJson() {
 
   const flowsWithSeq = capturedFlows.map((f, i) => ({ _num: i + 1, ...f }));
   fs.writeFileSync(result.fsPath, JSON.stringify(flowsWithSeq, null, 2));
-  vscode.window.showInformationMessage(`Exported ${capturedFlows.length} flows to ${result.fsPath}`);
+  vscode.window.showInformationMessage(t("extension.export.completed", { count: capturedFlows.length, path: result.fsPath }));
 }
 
 async function saveSession() {
   if (capturedFlows.length === 0) {
-    vscode.window.showWarningMessage("No flows to save");
+    vscode.window.showWarningMessage(t("extension.session.noFlows"));
     return;
   }
 
@@ -2301,7 +2364,7 @@ async function saveSession() {
   };
 
   fs.writeFileSync(result.fsPath, JSON.stringify(session, null, 2));
-  vscode.window.showInformationMessage(`Session saved to ${result.fsPath}`);
+  vscode.window.showInformationMessage(t("extension.session.saved", { path: result.fsPath }));
 }
 
 async function loadSession() {
@@ -2319,7 +2382,7 @@ async function loadSession() {
     } else if (Array.isArray(data)) {
       capturedFlows = data;
     } else {
-      vscode.window.showErrorMessage("Invalid session file format");
+      vscode.window.showErrorMessage(t("extension.session.invalid"));
       return;
     }
 
@@ -2336,9 +2399,9 @@ async function loadSession() {
       });
     }
 
-    vscode.window.showInformationMessage(`Loaded ${capturedFlows.length} flows`);
+    vscode.window.showInformationMessage(t("extension.session.loaded", { count: capturedFlows.length }));
   } catch (e) {
-    vscode.window.showErrorMessage("Failed to parse session file");
+    vscode.window.showErrorMessage(t("extension.session.parseFailed"));
   }
 }
 
@@ -2358,9 +2421,9 @@ function activate(context) {
   const startProxyCmd = vscode.commands.registerCommand("secmp.startProxy", async () => {
     await createPanel();
     const port = await vscode.window.showInputBox({
-      prompt: "Proxy port",
+      prompt: t("extension.input.proxyPort"),
       value: "8080",
-      validateInput: (v) => isNaN(Number(v)) ? "Must be a number" : null,
+      validateInput: (v) => isNaN(Number(v)) ? t("extension.input.mustBeNumber") : null,
     });
     if (!port) return;
 
@@ -2380,7 +2443,7 @@ function activate(context) {
   const pushCertCmd = vscode.commands.registerCommand("secmp.pushCert", async () => {
     const caPath = path.join(certDir, "mitmproxy-ca-cert.pem");
     if (!fs.existsSync(caPath)) {
-      vscode.window.showErrorMessage("CA certificate not found. Run the proxy once first to generate it.");
+      vscode.window.showErrorMessage(t("extension.cert.missing"));
       return;
     }
 
@@ -2404,7 +2467,7 @@ function activate(context) {
           vscode.window.showErrorMessage(result.message);
         }
       } catch (_) {
-        vscode.window.showInformationMessage(output || "Certificate operation completed");
+        vscode.window.showInformationMessage(output || t("extension.cert.completed"));
       }
     });
   });
@@ -2412,14 +2475,14 @@ function activate(context) {
   const setupProxyCmd = vscode.commands.registerCommand("secmp.setupProxy", async () => {
     const localIp = await getLocalIp();
     const port = await vscode.window.showInputBox({
-      prompt: "Proxy port",
+      prompt: t("extension.input.proxyPort"),
       value: "8080",
     });
     if (!port) return;
 
     const result = await setDeviceProxy(localIp, parseInt(port));
     if (result.success) {
-      vscode.window.showInformationMessage(`Device proxy set to ${localIp}:${port}`);
+      vscode.window.showInformationMessage(t("extension.proxy.set", { host: localIp, port }));
     } else {
       vscode.window.showErrorMessage(result.message);
     }
@@ -2428,7 +2491,7 @@ function activate(context) {
   const clearProxyCmd = vscode.commands.registerCommand("secmp.clearProxy", async () => {
     const result = await clearDeviceProxy();
     if (result.success) {
-      vscode.window.showInformationMessage("Device proxy cleared");
+      vscode.window.showInformationMessage(t("extension.proxy.cleared"));
     } else {
       vscode.window.showErrorMessage(result.message);
     }
@@ -2436,18 +2499,22 @@ function activate(context) {
 
   const cleanRuntimeCacheCmd = vscode.commands.registerCommand("secmp.cleanRuntimeCache", async () => {
     if (proxyProcess) {
-      vscode.window.showWarningMessage("Stop the SecMP proxy before cleaning the runtime cache.");
+      vscode.window.showWarningMessage(t("extension.cache.stopProxyFirst"));
       return;
     }
     try {
       const result = cleanWindowsRuntimeCache();
       vscode.window.showInformationMessage(
-        `Runtime cache cleaned. Kept versions: ${result.keptVersions.join(", ") || "none"}. ` +
-        `Removed ${result.runtimeDirsRemoved} runtime directories, ${result.downloadFilesRemoved} downloads, ` +
-        `${result.stagingDirsRemoved} staging directories. Freed ${formatBytes(result.bytesFreed)}.`
+        t("extension.cache.cleaned", {
+          versions: result.keptVersions.join(", ") || "none",
+          runtimeDirs: result.runtimeDirsRemoved,
+          downloads: result.downloadFilesRemoved,
+          stagingDirs: result.stagingDirsRemoved,
+          bytes: formatBytes(result.bytesFreed),
+        })
       );
     } catch (err) {
-      vscode.window.showErrorMessage(`Failed to clean runtime cache: ${err.message}`);
+      vscode.window.showErrorMessage(t("extension.cache.cleanFailed", { message: err.message }));
     }
   });
 
@@ -2457,10 +2524,17 @@ function activate(context) {
 
   const exportHarCmd = vscode.commands.registerCommand("secmp.exportHar", () => exportHar());
   const exportJsonCmd = vscode.commands.registerCommand("secmp.exportJson", () => exportJson());
+  const languageConfigListener = vscode.workspace.onDidChangeConfiguration((event) => {
+    if (event.affectsConfiguration("secmp.language") && panel) {
+      panel.webview.html = getWebviewContent(panel.webview);
+      postEnvironmentStatus(context);
+    }
+  });
 
   context.subscriptions.push(
     showPanelCmd, startProxyCmd, stopProxyCmd, pushCertCmd,
     setupProxyCmd, clearProxyCmd, cleanRuntimeCacheCmd, checkForUpdatesCmd, exportHarCmd, exportJsonCmd,
+    languageConfigListener,
     outputChannel
   );
 

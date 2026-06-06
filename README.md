@@ -79,12 +79,15 @@ Settings are optional for normal manual installation.
 ```json
 {
   "secmp.runtimeVersion": "0.1.2",
+  "secmp.language": "auto",
   "secmp.updateCheckEnabled": true,
   "secmp.updateCheckIntervalHours": 24
 }
 ```
 
 By default, SecMP downloads the matching runtime from the GitHub Release and validates it with the built-in checksum when available.
+
+`secmp.language` controls Webview and extension runtime messages. Use `auto` to follow the VS Code display language, `zh-CN` to force Simplified Chinese, or `en-US` to force English. Command Palette titles and Settings descriptions follow VS Code's `package.nls*` localization and the editor display language.
 
 The runtime version is separate from the VSIX version. SecMP reuses a cached runtime while `secmp.runtimeVersion` stays the same, and installs a new runtime when that setting changes.
 

@@ -4,6 +4,13 @@ All notable changes to SecMP are documented in this file.
 
 ## Unreleased
 
+## 0.1.5 - 2026-06-07
+
+- Added Chinese-first i18n infrastructure with `secmp.language`, Webview/runtime language bundles, and VS Code package NLS metadata.
+- Standardized language and terminology rules for future Chinese and English product text.
+- Fixed Webview i18n injection so table column names, filter controls, and other dynamic UI text no longer fall back to visible keys or blank labels.
+- Expanded the l10n check to validate Webview, extension runtime, and `package.nls*` key references.
+
 ## 0.1.4 - 2026-06-06
 
 - Fixed the capture header count layout so four-digit request counts stay on one line and do not deform the action buttons.

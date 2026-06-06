@@ -1,13 +1,15 @@
-# SecMP 0.1.3
+# SecMP 0.1.5
 
-Patch release for the capture-list clear button and project workflow rules.
+Patch release for the capture header layout and the Chinese-first i18n foundation.
 
 ## Highlights
 
-- Fixed the capture-list clear button so it works reliably in VS Code / VSCodium Webviews.
-- The clear confirmation now uses a native VS Code modal prompt instead of Webview `window.confirm()`.
-- Cleared flows remain suppressed if mitmweb still returns old flow IDs, so old traffic does not reappear when new traffic arrives.
-- Added project rules for staged version bumps, runtime version independence, and commit/release workflow in `AGENTS.md`.
+- Fixed the capture header count layout so four-digit request counts stay on one line and do not deform the clear/export buttons.
+- Added `secmp.language` with `auto`, `zh-CN`, and `en-US` options for Webview and extension runtime messages.
+- Added Chinese and English runtime language bundles, plus VS Code `package.nls*` metadata for command titles and settings descriptions.
+- Standardized the product language rules: Chinese-first UI, with professional terms such as `Request`, `Response`, `HTTP`, `TLS`, `HAR`, `JSON`, `ADB`, and `mitmproxy` preserved where appropriate.
+- Fixed Webview i18n injection so table column names, filter controls, footer status, and other dynamic text no longer fall back to visible keys, blank labels, or the wrong language.
+- Added l10n validation for Webview, extension runtime, and `package.nls*` key references.
 
 ## Requirements
 
@@ -19,20 +21,37 @@ Patch release for the capture-list clear button and project workflow rules.
 
 ## Installation
 
-1. Download `secmp-0.1.3.vsix`.
+1. Download `secmp-0.1.5.vsix`.
 2. In VS Code or VSCodium, run `Extensions: Install from VSIX...`.
-3. Run `SecMP: Start Proxy`.
-4. SecMP downloads and caches the configured runtime automatically when needed.
+3. Run `SecMP: Show Capture Panel`.
+4. Run `SecMP: Start Proxy`.
+5. SecMP downloads and caches the configured runtime automatically when needed.
 
-## Update From 0.1.2
+## Language
 
-Run `SecMP: Check for Updates`, or install `secmp-0.1.3.vsix` manually from the GitHub Release.
+SecMP defaults to `secmp.language: auto`. In `auto` mode, supported VS Code locales are used automatically; unsupported locales fall back to Simplified Chinese.
 
-This release uses runtime `0.1.2`. The VSIX version changed for testing and release traceability, but the packaged runtime did not change.
+To force English for Webview and runtime messages:
+
+```json
+{
+  "secmp.language": "en-US"
+}
+```
+
+Command Palette titles and Settings descriptions follow VS Code's static `package.nls*` localization mechanism and the editor display language.
+
+## Update From 0.1.3
+
+This release includes every change since the previous release tag `v0.1.3`: the capture header count layout fix from `0.1.4`, plus the language system, English-language preparation, Webview i18n fixes, and stronger l10n checks from `0.1.5`.
+
+Run `SecMP: Check for Updates`, or install `secmp-0.1.5.vsix` manually from the GitHub Release.
+
+This release uses runtime `0.1.2`. The VSIX version changed for UI, extension, and documentation updates, but the packaged runtime did not change.
 
 ## Assets
 
-- `secmp-0.1.3.vsix`
+- `secmp-0.1.5.vsix`
 
 Runtime assets remain available from the `v0.1.2` release:
 
