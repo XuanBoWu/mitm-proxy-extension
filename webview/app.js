@@ -2161,9 +2161,6 @@ $("tlsTimingToggle").addEventListener("click", () => {
 });
 
 $("clearBtn").addEventListener("click", () => {
-  if (!window.confirm("确定清空当前抓包列表吗？此操作不会保存当前会话。")) {
-    return;
-  }
   vscode.postMessage({ command: "clearFlows" });
 });
 

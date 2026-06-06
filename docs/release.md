@@ -16,11 +16,13 @@ Installed extensions can check GitHub Releases for newer VSIX packages through `
 Use SemVer-style versions for both the VSIX and the packaged runtime:
 
 ```text
-0.1.2
-v0.1.2
+0.1.3
+v0.1.3
 ```
 
 The Git tag includes the leading `v`. The package version and runtime version do not.
+
+`package.json` version identifies each testable VSIX build, even before a public release. Bump the patch version for each completed bug fix or feature stage. `secmp.runtimeVersion` is independent and only changes when the packaged runtime actually changes.
 
 ## Release Checklist
 
@@ -79,34 +81,36 @@ After the final code is on `master`, create and push a tag:
 ```powershell
 git checkout master
 git pull --ff-only
-git tag v0.1.2
-git push origin v0.1.2
+git tag v0.1.3
+git push origin v0.1.3
 ```
 
 The `Build Runtime Packages` workflow will:
 
-- build `secmp-runtime-win32-x64-<version>.zip`
-- build `secmp-runtime-darwin-arm64-<version>.zip`
-- generate `secmp-runtime-win32-x64-<version>.zip.sha256`
-- generate `secmp-runtime-darwin-arm64-<version>.zip.sha256`
+- resolve the runtime version from `secmp.runtimeVersion` unless `runtime_version` is provided manually
+- build `secmp-runtime-win32-x64-<runtimeVersion>.zip`
+- build `secmp-runtime-darwin-arm64-<runtimeVersion>.zip`
+- generate `secmp-runtime-win32-x64-<runtimeVersion>.zip.sha256`
+- generate `secmp-runtime-darwin-arm64-<runtimeVersion>.zip.sha256`
 - run runtime and extension install smoke tests
-- package `secmp-<version>.vsix`
-- attach the runtime zips, checksums, and VSIX to the GitHub Release
+- package `secmp-<extensionVersion>.vsix`
+- attach the VSIX to the GitHub Release
+- attach runtime zips and checksums only when `runtimeVersion` equals the extension version
 
 For a manual release run, trigger the workflow with:
 
 ```text
 publish=true
 runtime_version=0.1.2
-release_tag=v0.1.2
+release_tag=v0.1.3
 ```
 
 ## Release Notes Template
 
 ```markdown
-## SecMP 0.1.2
+## SecMP 0.1.3
 
-Patch release for packaged macOS runtime support, Environment / About reliability, and GitHub Release update-check fallback.
+Patch release for a focused bug fix or feature stage.
 
 ### Highlights
 
@@ -127,9 +131,7 @@ Patch release for packaged macOS runtime support, Environment / About reliabilit
 
 ### Assets
 
-- `secmp-0.1.2.vsix`
-- `secmp-runtime-win32-x64-0.1.2.zip`
-- `secmp-runtime-win32-x64-0.1.2.zip.sha256`
-- `secmp-runtime-darwin-arm64-0.1.2.zip`
-- `secmp-runtime-darwin-arm64-0.1.2.zip.sha256`
+- `secmp-0.1.3.vsix`
+
+Runtime assets are included only when `secmp.runtimeVersion` changes.
 ```

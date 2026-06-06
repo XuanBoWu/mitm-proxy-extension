@@ -1997,6 +1997,14 @@ async function createPanel() {
         break;
 
       case "clearFlows": {
+        const choice = await vscode.window.showWarningMessage(
+          "Clear the current SecMP capture list? This will not save the current session.",
+          { modal: true },
+          "Clear"
+        );
+        if (choice !== "Clear") {
+          break;
+        }
         for (const id of knownFlowIds) {
           ignoredFlowIdsAfterClear.add(id);
         }

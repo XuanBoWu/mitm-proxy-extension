@@ -24,6 +24,8 @@ secmp-runtime-darwin-arm64-<runtimeVersion>.zip
 secmp-runtime-darwin-arm64-<runtimeVersion>.zip.sha256
 ```
 
+For tag releases, `<runtimeVersion>` is resolved from `secmp.runtimeVersion` in `package.json` unless a manual workflow dispatch provides `runtime_version`. VSIX-only patch releases can therefore publish a new `secmp-<extensionVersion>.vsix` while reusing an older runtime release.
+
 Before release, CI smoke-tests the runtime by:
 
 - validating `runtime/manifest.json`
@@ -34,7 +36,7 @@ Before release, CI smoke-tests the runtime by:
 - installing the runtime through the extension runtime path and requesting mitmweb `/state.json`
 - packaging the VSIX and checking it does not contain build/runtime directories
 
-The released runtime zips are attached to the GitHub Release with the VSIX package.
+The VSIX is always attached to the GitHub Release. Runtime zips are attached only when the runtime version matches the extension version; otherwise the extension continues to download the runtime from the release matching `secmp.runtimeVersion`.
 
 ## Manual Installation
 

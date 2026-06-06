@@ -6,7 +6,7 @@ on:
       runtime_version:
         description: "Runtime package version"
         required: true
-        default: "0.1.0"
+        default: "0.1.2"
       publish:
         description: "Publish a GitHub Release after build and tests pass"
         required: true
@@ -65,11 +65,8 @@ jobs:
         shell: pwsh
         run: |
           $version = "${{ github.event.inputs.runtime_version }}"
-          if (-not $version -and "${{ github.ref_type }}" -eq "tag") {
-            $version = "${{ github.ref_name }}" -replace '^v', ''
-          }
           if (-not $version) {
-            $version = "0.1.0"
+            $version = node -p "require('./package.json').contributes.configuration.properties['secmp.runtimeVersion'].default || require('./package.json').version"
           }
           "runtime_version=$version" >> $env:GITHUB_OUTPUT
 
@@ -150,11 +147,8 @@ jobs:
         id: version
         run: |
           version="${{ github.event.inputs.runtime_version }}"
-          if [[ -z "$version" && "${{ github.ref_type }}" == "tag" ]]; then
-            version="${GITHUB_REF_NAME#v}"
-          fi
           if [[ -z "$version" ]]; then
-            version="0.1.0"
+            version="$(node -p "require('./package.json').contributes.configuration.properties['secmp.runtimeVersion'].default || require('./package.json').version")"
           fi
           echo "runtime_version=$version" >> "$GITHUB_OUTPUT"
 
@@ -296,6 +290,12 @@ jobs:
         with:
           name: extension-vsix
           path: release-assets
+
+      - name: Remove reused runtime assets from VSIX-only release
+        if: needs.build-runtime.outputs.runtime_version != needs.package-vsix.outputs.extension_version
+        run: |
+          set -euo pipefail
+          find release-assets -type f \( -name 'secmp-runtime-*.zip' -o -name 'secmp-runtime-*.zip.sha256' \) -delete
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2

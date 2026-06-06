@@ -181,13 +181,18 @@ npx --yes @vscode/vsce package --allow-missing-repository
 
 ## 发布产物
 
-GitHub Release 包含：
+GitHub Release 总是包含：
 
 - `secmp-<version>.vsix`
+
+当 `secmp.runtimeVersion` 变化时，Release 还会包含匹配的 runtime 包：
+
 - `secmp-runtime-win32-x64-<version>.zip`
 - `secmp-runtime-win32-x64-<version>.zip.sha256`
 - `secmp-runtime-darwin-arm64-<version>.zip`
 - `secmp-runtime-darwin-arm64-<version>.zip.sha256`
+
+只修改 VSIX 的 patch release 可以复用已有 runtime release。
 
 发布规划和验证流程见 [docs/release.md](docs/release.md)。
 

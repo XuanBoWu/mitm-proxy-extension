@@ -42,6 +42,61 @@ Webview UI (HTML/CSS/JS) → vscode.postMessage → extension.js (Node.js)
 - Webview panel type 是 `secmpPanel`，输出通道名称是 `SecMP`。
 - 新增 UI 或文档时不要再使用旧的 `MITM Proxy` / `mitmProxy` / `mitm-proxy` 品牌命名；GitHub 仓库 URL 保持原仓库名不变。
 
+## 开发、版本与提交规范
+
+后续 agent 必须默认遵守本节规则，不需要用户每次额外强调。
+
+### 工作流程
+
+- 解决 bug 或开发功能时，先查当前实现、相关提交历史和消息链，再修改代码。
+- 改动范围保持最小，不做无关重构，不覆盖用户或其他 agent 已有改动。
+- 修复回归问题时，要同时确认“当前症状”和“上一次修复想解决的问题”，避免把旧 bug 带回来。
+- 涉及 Webview 的改动必须说明消息链影响：Webview → extension.js → runtime/mitmweb → Webview。
+- 涉及平台差异的改动必须明确影响范围：Windows / macOS / Linux / source-dev。
+- 修改后必须运行与风险匹配的验证；至少做语法或静态检查，能跑 smoke test 时优先跑 smoke test。
+
+### 版本更新规则
+
+- `package.json` 的 `version` 是测试构建标识，不只代表正式 GitHub Release。
+- 每完成一个可测试阶段，即使暂不发布，也必须更新 `package.json` 的 `version`。
+- bug 修复、小功能阶段、UI 调整、对测试有可验证影响的文档/流程修正，默认 bump `PATCH`。
+- 新增一类用户可感知能力或完成较大阶段，bump `MINOR` 并将 `PATCH` 归零。
+- 不兼容配置、runtime 协议、用户迁移流程，或进入正式稳定大版本时，bump `MAJOR`。
+- 版本号不与每个 commit 绑定，而是与“可测试的阶段结果”绑定。
+- 每次准备交给用户测试或准备提交阶段性成果前，至少更新：
+  - `package.json`
+  - `CHANGELOG.md`
+- 正式发布前再额外更新：
+  - `RELEASE_NOTES.md`
+  - `README.md`
+  - `README.zh-CN.md`
+  - 相关 `docs/`
+
+### runtimeVersion 独立规则
+
+- VSIX/package 版本可以随着每个可测试阶段递增。
+- `secmp.runtimeVersion` 与 VSIX 版本独立，只有 runtime 产物实际变化时才更新。
+- 需要更新 `secmp.runtimeVersion` 的情况：
+  - 修改 `tools/proxy_engine.py`
+  - 修改 `tools/cert_manager.py`
+  - 修改 `requirements-runtime.txt`
+  - 修改 runtime package layout
+  - 修改 extension ↔ runtime 命令、参数或输出协议
+- 只修改 Webview、extension 侧逻辑、文档或发布流程时，默认不更新 `secmp.runtimeVersion`。
+- 例如只修复清空按钮这类 extension/Webview 问题时，VSIX 可从 `0.1.2` bump 到 `0.1.3`，runtime 继续使用 `0.1.2`。
+
+### 提交规范
+
+- 未经用户明确说“提交”或“commit”，只修改代码和文档，不创建 Git commit。
+- 提交前必须向用户汇报：
+  - `git status --short`
+  - 本次改动摘要
+  - 已运行的验证命令
+  - 是否涉及 `package.json` 版本、`secmp.runtimeVersion`、CHANGELOG 或发布文档更新
+- commit message 使用 Conventional Commits，例如 `fix: ...`、`feat: ...`、`docs: ...`、`chore: ...`、`test: ...`、`refactor: ...`。
+- 一个提交只做一类事情；bugfix、版本发布、文档整理尽量分开。
+- 创建 Git commits 时，不添加 agent/AI co-author trailer，不添加 agent attribution。
+
 ## Windows Runtime 打包
 
 Windows 用户默认走打包 runtime，不要求本机安装 Python 或 mitmproxy：

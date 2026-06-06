@@ -181,13 +181,18 @@ npx --yes @vscode/vsce package --allow-missing-repository
 
 ## Release Artifacts
 
-A GitHub Release contains:
+A GitHub Release always contains:
 
 - `secmp-<version>.vsix`
+
+When `secmp.runtimeVersion` changes, the release also contains the matching runtime packages:
+
 - `secmp-runtime-win32-x64-<version>.zip`
 - `secmp-runtime-win32-x64-<version>.zip.sha256`
 - `secmp-runtime-darwin-arm64-<version>.zip`
 - `secmp-runtime-darwin-arm64-<version>.zip.sha256`
+
+VSIX-only patch releases can reuse the existing runtime release.
 
 Release planning and validation steps are documented in [docs/release.md](docs/release.md).
 

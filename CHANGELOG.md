@@ -4,6 +4,12 @@ All notable changes to SecMP are documented in this file.
 
 ## Unreleased
 
+## 0.1.3 - 2026-06-06
+
+- Fixed the clear capture button by moving the confirmation prompt from Webview `window.confirm()` to a native VS Code modal prompt.
+- Kept cleared-flow suppression so old mitmweb flows do not reappear after new traffic arrives.
+- Added project rules for staged version bumps, runtime version independence, and commit/release workflow.
+
 ## 0.1.2 - 2026-06-06
 
 - Added packaged macOS runtime support and generic `secmp.runtime*` settings shared by Windows and macOS.
