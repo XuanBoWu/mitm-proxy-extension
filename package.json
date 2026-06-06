@@ -3,7 +3,7 @@
   "displayName": "SecMP",
   "icon": "media/icon.png",
   "description": "Android security testing proxy with ADB certificate injection and traffic capture",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "publisher": "xbowu",
   "license": "MIT",
   "repository": {

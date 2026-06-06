@@ -4,6 +4,10 @@ All notable changes to SecMP are documented in this file.
 
 ## Unreleased
 
+## 0.1.4 - 2026-06-06
+
+- Fixed the capture header count layout so four-digit request counts stay on one line and do not deform the action buttons.
+
 ## 0.1.3 - 2026-06-06
 
 - Fixed the clear capture button by moving the confirmation prompt from Webview `window.confirm()` to a native VS Code modal prompt.

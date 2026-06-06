@@ -193,15 +193,28 @@ body {
   align-items: center;
   justify-content: flex-end;
   gap: 8px;
-  flex: 0 0 300px;
+  flex: 0 0 340px;
   min-width: 0;
   font-size: 11px;
   color: var(--text-secondary);
+  white-space: nowrap;
+}
+.flow-count-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+  min-width: 118px;
+  white-space: nowrap;
+}
+.flow-count-label {
+  flex: 0 0 auto;
 }
 .badge {
   display: inline-flex;
   justify-content: center;
-  min-width: 58px;
+  flex: 0 0 auto;
+  min-width: 78px;
   background: var(--badge-bg);
   color: var(--badge-fg);
   padding: 1px 6px;
@@ -209,6 +222,10 @@ body {
   font-size: 11px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
+}
+.header-right .btn {
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 
 /* ===== Buttons ===== */
