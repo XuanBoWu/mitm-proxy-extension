@@ -17,6 +17,7 @@ SecMP is intended for authorized testing of devices and applications you own or 
 - Inspect request and response headers and bodies in a Burp-style viewer.
 - Filter by URL, headers, bodies, method, status, type, and protocol.
 - Export captures as HAR or JSON.
+- Use the SecMP Activity Bar icon and sidebar quick actions to open the capture panel, control the proxy, configure the device proxy, and push certificates.
 - Run on Windows and macOS with a packaged runtime, without requiring users to install Python or mitmproxy.
 
 ## Requirements
@@ -38,7 +39,7 @@ Linux can still run from source, but the packaged runtime flow currently targets
 1. Download `secmp-<version>.vsix` from the GitHub Release.
 2. In VS Code or VSCodium, run `Extensions: Install from VSIX...`.
 3. Select the downloaded VSIX.
-4. Run `SecMP: Start Proxy`.
+4. Click the SecMP icon in the Activity Bar and choose "Start Proxy", or run `SecMP: Start Proxy`.
 5. SecMP downloads the matching runtime from the GitHub Release and caches it in VS Code global storage.
 6. If the OS asks for network access, allow local network/private network access.
 
@@ -51,7 +52,7 @@ For offline installation, download the matching `secmp-runtime-<platform>-<arch>
 ## Quick Start
 
 1. Connect the Android device with USB debugging enabled.
-2. Run `SecMP: Show Capture Panel`.
+2. Click the SecMP icon in the Activity Bar and choose "Open Capture Panel", or run `SecMP: Show Capture Panel`.
 3. Click refresh in the device panel and confirm that the device is visible.
 4. Start the proxy, usually on port `8080`.
 5. Push the CA certificate after the proxy has generated it.
@@ -60,6 +61,8 @@ For offline installation, download the matching `secmp-runtime-<platform>-<arch>
 8. Inspect captured flows in SecMP.
 
 ## Commands
+
+The SecMP icon in the Activity Bar also provides quick access to common actions.
 
 - `SecMP: Show Capture Panel`
 - `SecMP: Start Proxy`

@@ -7,6 +7,7 @@ All notable changes to SecMP are documented in this file.
 ## 0.1.8 - 2026-06-07
 
 - Added a SecMP Activity Bar entry with a monochrome sidebar icon and localized quick actions for opening the capture panel, controlling the proxy, configuring the device proxy, and pushing the CA certificate.
+- Documented the Activity Bar quick actions in the English and Simplified Chinese README files.
 
 ## 0.1.7 - 2026-06-07
 
