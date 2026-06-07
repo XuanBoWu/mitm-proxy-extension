@@ -25,5 +25,7 @@
   "secmp.command.checkForUpdates": "SecMP: Check for Updates",
   "secmp.command.exportHar": "SecMP: Export as HAR",
   "secmp.command.exportJson": "SecMP: Export as JSON",
-  "secmp.command.showPanel": "SecMP: Show Capture Panel"
+  "secmp.command.showPanel": "SecMP: Show Capture Panel",
+  "secmp.viewsContainer.title": "SecMP",
+  "secmp.view.sidebar.name": "Quick Actions"
 }

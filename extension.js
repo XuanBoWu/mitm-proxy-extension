@@ -2407,12 +2407,52 @@ async function loadSession() {
 
 // ===== Extension Activation =====
 
+const SIDEBAR_ACTIONS = [
+  { labelKey: "extension.sidebar.openPanel", command: "secmp.showPanel", icon: "window" },
+  { labelKey: "extension.sidebar.startProxy", command: "secmp.startProxy", icon: "play" },
+  { labelKey: "extension.sidebar.stopProxy", command: "secmp.stopProxy", icon: "debug-stop" },
+  { labelKey: "extension.sidebar.setupProxy", command: "secmp.setupProxy", icon: "plug" },
+  { labelKey: "extension.sidebar.clearProxy", command: "secmp.clearProxy", icon: "circle-slash" },
+  { labelKey: "extension.sidebar.pushCert", command: "secmp.pushCert", icon: "shield" },
+];
+
+class SecmpSidebarProvider {
+  constructor() {
+    this._onDidChangeTreeData = new vscode.EventEmitter();
+    this.onDidChangeTreeData = this._onDidChangeTreeData.event;
+  }
+
+  refresh() {
+    this._onDidChangeTreeData.fire();
+  }
+
+  getTreeItem(item) {
+    return item;
+  }
+
+  getChildren() {
+    return SIDEBAR_ACTIONS.map(({ labelKey, command, icon }) => {
+      const label = t(labelKey);
+      const item = new vscode.TreeItem(label, vscode.TreeItemCollapsibleState.None);
+      item.command = { command, title: label };
+      item.iconPath = new vscode.ThemeIcon(icon);
+      item.tooltip = label;
+      return item;
+    });
+  }
+}
+
 function activate(context) {
   extensionContext = context;
   outputChannel = vscode.window.createOutputChannel("SecMP");
   log("SecMP extension activated");
   initializeRuntimeStorage(context);
   checkForExtensionUpdate(context, { manual: false });
+  const sidebarProvider = new SecmpSidebarProvider();
+  const sidebarView = vscode.window.createTreeView("secmp.sidebar", {
+    treeDataProvider: sidebarProvider,
+    showCollapseAll: false,
+  });
 
   const showPanelCmd = vscode.commands.registerCommand("secmp.showPanel", () => {
     createPanel();
@@ -2525,9 +2565,12 @@ function activate(context) {
   const exportHarCmd = vscode.commands.registerCommand("secmp.exportHar", () => exportHar());
   const exportJsonCmd = vscode.commands.registerCommand("secmp.exportJson", () => exportJson());
   const languageConfigListener = vscode.workspace.onDidChangeConfiguration((event) => {
-    if (event.affectsConfiguration("secmp.language") && panel) {
-      panel.webview.html = getWebviewContent(panel.webview);
-      postEnvironmentStatus(context);
+    if (event.affectsConfiguration("secmp.language")) {
+      sidebarProvider.refresh();
+      if (panel) {
+        panel.webview.html = getWebviewContent(panel.webview);
+        postEnvironmentStatus(context);
+      }
     }
   });
 
@@ -2535,6 +2578,7 @@ function activate(context) {
     showPanelCmd, startProxyCmd, stopProxyCmd, pushCertCmd,
     setupProxyCmd, clearProxyCmd, cleanRuntimeCacheCmd, checkForUpdatesCmd, exportHarCmd, exportJsonCmd,
     languageConfigListener,
+    sidebarView,
     outputChannel
   );
 

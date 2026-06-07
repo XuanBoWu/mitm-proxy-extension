@@ -3,7 +3,7 @@
   "displayName": "SecMP",
   "icon": "media/icon.png",
   "description": "%secmp.description%",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "publisher": "xbowu",
   "license": "MIT",
   "repository": {
@@ -36,7 +36,8 @@
     "l10n:check": "node scripts/check-l10n.js"
   },
   "activationEvents": [
-    "onStartupFinished"
+    "onStartupFinished",
+    "onView:secmp.sidebar"
   ],
   "main": "./extension.js",
   "contributes": {
@@ -120,6 +121,23 @@
           "description": "%secmp.config.updateCheckIntervalHours%"
         }
       }
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "secmp",
+          "title": "%secmp.viewsContainer.title%",
+          "icon": "media/activitybar.svg"
+        }
+      ]
+    },
+    "views": {
+      "secmp": [
+        {
+          "id": "secmp.sidebar",
+          "name": "%secmp.view.sidebar.name%"
+        }
+      ]
     },
     "commands": [
       {

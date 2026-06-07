@@ -25,5 +25,7 @@
   "secmp.command.checkForUpdates": "SecMP: 检查更新",
   "secmp.command.exportHar": "SecMP: 导出 HAR",
   "secmp.command.exportJson": "SecMP: 导出 JSON",
-  "secmp.command.showPanel": "SecMP: 显示抓包面板"
+  "secmp.command.showPanel": "SecMP: 显示抓包面板",
+  "secmp.viewsContainer.title": "SecMP",
+  "secmp.view.sidebar.name": "快捷操作"
 }
