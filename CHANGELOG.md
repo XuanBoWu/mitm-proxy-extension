@@ -4,6 +4,10 @@ All notable changes to SecMP are documented in this file.
 
 ## Unreleased
 
+## 0.1.12 - 2026-06-08
+
+- Fixed request list select-all so it selects only captured rows and does not leave native Webview text selected outside the packet list.
+
 ## 0.1.11 - 2026-06-08
 
 - Hardened the extension runtime install smoke test cleanup on Windows runners by retrying recursive temporary directory removal.

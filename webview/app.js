@@ -970,6 +970,8 @@ function getFlowRowClass(flowId) {
 
 function handleFlowRowClick(flowId, event) {
   if (!flowId) return;
+  focusFlowList();
+  clearNativeSelection();
   const visibleIds = getVisibleFlowIds();
   if (event.shiftKey) {
     selectFlowRange(flowId, {
@@ -2807,6 +2809,20 @@ function isEditableShortcutTarget(target = document.activeElement) {
     target?.classList?.contains("message-textarea");
 }
 
+function focusFlowList() {
+  const wrapper = document.querySelector(".table-wrapper");
+  if (wrapper && document.activeElement !== wrapper) {
+    wrapper.focus({ preventScroll: true });
+  }
+}
+
+function clearNativeSelection() {
+  const selection = window.getSelection ? window.getSelection() : null;
+  if (selection && selection.rangeCount > 0) {
+    selection.removeAllRanges();
+  }
+}
+
 function scrollFlowRowIntoView(flowId) {
   const row = [...flowTableBody.querySelectorAll("tr[data-id]")]
     .find((item) => item.dataset.id === flowId);
@@ -2825,11 +2841,14 @@ document.addEventListener("keydown", (e) => {
     const filtered = isFilterContentPending() ? [] : getVisibleFlows();
     if (filtered.length === 0) return;
     e.preventDefault();
+    e.stopPropagation();
+    focusFlowList();
     selectedFlowIds = new Set(filtered.map((flow) => flow.id));
     if (!selectedFlowId || !selectedFlowIds.has(selectedFlowId)) {
       selectedFlowId = filtered[0].id;
     }
     selectionAnchorFlowId = selectedFlowId;
+    clearNativeSelection();
     renderFlowList();
     return;
   }
@@ -2837,6 +2856,8 @@ document.addEventListener("keydown", (e) => {
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "c" && !isEditableShortcutTarget()) {
     if (selectedFlowIds.size === 0) return;
     e.preventDefault();
+    e.stopPropagation();
+    clearNativeSelection();
     copySelectedFlows();
     return;
   }
@@ -2869,6 +2890,8 @@ document.addEventListener("keydown", (e) => {
     const flow = filtered[idx];
     if (!flow) return;
 
+    focusFlowList();
+    clearNativeSelection();
     if (e.shiftKey) {
       selectFlowRange(flow.id, { visibleIds: filtered.map((item) => item.id) });
     } else {
