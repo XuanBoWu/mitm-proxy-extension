@@ -36,6 +36,8 @@ const SUPPORTED_RUNTIME_PLATFORMS = new Set(["win32", "darwin"]);
 const SUPPORTED_LOCALES = new Set(["zh-CN", "en-US"]);
 const DEFAULT_LOCALE = "zh-CN";
 const FLOW_POLL_INTERVAL_MS = 1000;
+const MITMWEB_REQUEST_TIMEOUT_MS = 5000;
+const FILTER_BODY_FETCH_CONCURRENCY = 4;
 const DEFAULT_RUNTIME_SOURCES = {
   "0.1.0:win32:x64": {
     url: "https://github.com/XuanBoWu/mitm-proxy-extension/releases/download/v0.1.0/secmp-runtime-win32-x64-0.1.0.zip",
@@ -1334,12 +1336,23 @@ async function getCertManagerCommand() {
 function mitmwebGet(path) {
   return new Promise((resolve, reject) => {
     const url = `http://127.0.0.1:${webPort}${path}?token=${encodeURIComponent(authToken)}`;
-    http.get(url, { timeout: 5000 }, (res) => {
+    const req = http.get(url, { timeout: MITMWEB_REQUEST_TIMEOUT_MS }, (res) => {
       const chunks = [];
       res.on("data", (chunk) => chunks.push(chunk));
-      res.on("end", () => resolve(Buffer.concat(chunks)));
+      res.on("end", () => {
+        const data = Buffer.concat(chunks);
+        if (res.statusCode && res.statusCode >= 400) {
+          reject(new Error(`mitmweb GET ${path} failed with HTTP ${res.statusCode}`));
+          return;
+        }
+        resolve(data);
+      });
       res.on("error", reject);
-    }).on("error", reject);
+    });
+    req.on("timeout", () => {
+      req.destroy(new Error(`mitmweb GET ${path} timed out after ${MITMWEB_REQUEST_TIMEOUT_MS}ms`));
+    });
+    req.on("error", reject);
   });
 }
 
@@ -1381,6 +1394,22 @@ function replaceCapturedFlow(id, nextFlow) {
   capturedFlowById.set(id, nextFlow);
   capturedFlowIndexById.set(id, idx);
   return true;
+}
+
+function syncFetchedBodiesToCurrentFlow(flow) {
+  const current = capturedFlowById.get(flow.id);
+  if (!current || current === flow) return;
+  if (flow._reqBodyFetched) {
+    current._reqBodyFetched = true;
+    current.req_body = flow.req_body;
+    current.req_body_base64 = flow.req_body_base64;
+  }
+  if (flow._resBodyFetched) {
+    current._resBodyFetched = true;
+    current.res_body = flow.res_body;
+    current.res_body_base64 = flow.res_body_base64;
+  }
+  current._bodyFetched = !!(current._reqBodyFetched && current._resBodyFetched);
 }
 
 // ===== Flow transformation =====
@@ -1450,7 +1479,9 @@ function transformFlow(f) {
     req_headers: reqHeaders,
     res_headers: resHeaders,
     req_body: "",
+    req_body_base64: "",
     res_body: "",
+    res_body_base64: "",
     req_timestamp: reqTs,
     res_timestamp: resTs,
     duration_ms: resTs ? Math.round((resTs - reqTs) * 1000) : 0,
@@ -1523,6 +1554,7 @@ async function pollFlows() {
         if (existing._reqBodyFetched || existing._bodyFetched) {
           transformed._reqBodyFetched = true;
           transformed.req_body = existing.req_body;
+          transformed.req_body_base64 = existing.req_body_base64;
         }
         if (existing._resBodyFetched || existing._bodyFetched) {
           transformed._resBodyFetched = true;
@@ -2201,11 +2233,20 @@ async function createPanel() {
 function mitmwebRequest(method, path) {
   return new Promise((resolve, reject) => {
     const url = `http://127.0.0.1:${webPort}${path}?token=${encodeURIComponent(authToken)}`;
-    const req = http.request(url, { method, timeout: 5000 }, (res) => {
+    const req = http.request(url, { method, timeout: MITMWEB_REQUEST_TIMEOUT_MS }, (res) => {
       let data = "";
       res.on("data", (chunk) => (data += chunk));
-      res.on("end", () => resolve(data));
+      res.on("end", () => {
+        if (res.statusCode && res.statusCode >= 400) {
+          reject(new Error(`mitmweb ${method} ${path} failed with HTTP ${res.statusCode}`));
+          return;
+        }
+        resolve(data);
+      });
       res.on("error", reject);
+    });
+    req.on("timeout", () => {
+      req.destroy(new Error(`mitmweb ${method} ${path} timed out after ${MITMWEB_REQUEST_TIMEOUT_MS}ms`));
     });
     req.on("error", reject);
     req.end();
@@ -2214,10 +2255,43 @@ function mitmwebRequest(method, path) {
 
 // ===== Export Functions =====
 
+function isBinaryContentType(contentType) {
+  const ct = (contentType || "").toLowerCase();
+  if (!ct) return false;
+  if (ct.startsWith("text/")) return false;
+  if (ct.includes("json") || ct.includes("javascript") || ct.includes("xml") || ct.includes("html")) return false;
+  if (ct.includes("x-www-form-urlencoded")) return false;
+  return ct.startsWith("image/") ||
+    ct.startsWith("audio/") ||
+    ct.startsWith("video/") ||
+    ct.startsWith("font/") ||
+    ct.includes("octet-stream") ||
+    ct.includes("protobuf") ||
+    ct.includes("binary") ||
+    ct.includes("wasm") ||
+    ct.includes("zip") ||
+    ct.includes("gzip") ||
+    ct.includes("pdf");
+}
+
+function isLikelyBinaryBuffer(buf) {
+  if (!Buffer.isBuffer(buf) || buf.length === 0) return false;
+  const sampleLength = Math.min(buf.length, 512);
+  let controlBytes = 0;
+  for (let i = 0; i < sampleLength; i += 1) {
+    const byte = buf[i];
+    if (byte === 0) return true;
+    if (byte < 32 && byte !== 9 && byte !== 10 && byte !== 12 && byte !== 13) {
+      controlBytes += 1;
+    }
+  }
+  return controlBytes / sampleLength > 0.1;
+}
+
 async function fetchFlowBodies(flow, scopes = { request: true, response: true }) {
   const fetchRequest = scopes.request !== false;
   const fetchResponse = scopes.response !== false;
-  if (flow._bodyFetched) {
+  if ((!fetchRequest || flow._reqBodyFetched) && (!fetchResponse || flow._resBodyFetched)) {
     return { requestOk: true, responseOk: true };
   }
   if (!webPort || !authToken) {
@@ -2231,10 +2305,17 @@ async function fetchFlowBodies(flow, scopes = { request: true, response: true })
   if (fetchRequest && !flow._reqBodyFetched) {
     try {
       const buf = await mitmwebGet(`/flows/${flow.id}/request/content.data`);
-      flow.req_body = buf.toString("utf-8");
+      const ct = flow.req_headers?.["content-type"] || "";
+      if (isBinaryContentType(ct) || isLikelyBinaryBuffer(buf)) {
+        flow.req_body_base64 = buf.toString("base64");
+        flow.req_body = "";
+      } else {
+        flow.req_body = buf.toString("utf-8");
+      }
       flow._reqBodyFetched = true;
     } catch (_) {
       flow.req_body = "";
+      flow.req_body_base64 = "";
       requestOk = false;
     }
   }
@@ -2242,8 +2323,7 @@ async function fetchFlowBodies(flow, scopes = { request: true, response: true })
     try {
       const buf = await mitmwebGet(`/flows/${flow.id}/response/content.data`);
       const ct = (flow.content_type || "").toLowerCase();
-      if (ct.startsWith("image/") || ct.startsWith("audio/") || ct.startsWith("video/") ||
-          ct.includes("octet-stream") || ct.includes("protobuf")) {
+      if (isBinaryContentType(ct) || isLikelyBinaryBuffer(buf)) {
         flow.res_body_base64 = buf.toString("base64");
         flow.res_body = "";
       } else {
@@ -2256,6 +2336,7 @@ async function fetchFlowBodies(flow, scopes = { request: true, response: true })
     }
   }
   flow._bodyFetched = !!(flow._reqBodyFetched && flow._resBodyFetched);
+  syncFetchedBodiesToCurrentFlow(flow);
   return { requestOk, responseOk };
 }
 
@@ -2273,7 +2354,8 @@ async function prepareFilterContent(requestId, scopes) {
 
   let completed = 0;
   let failed = 0;
-  const total = capturedFlows.length;
+  const flowsToPrepare = capturedFlows.slice();
+  const total = flowsToPrepare.length;
   panel.webview.postMessage({
     command: "filterContentProgress",
     requestId,
@@ -2281,24 +2363,32 @@ async function prepareFilterContent(requestId, scopes) {
     total,
   });
 
-  for (const flow of capturedFlows) {
-    const result = await fetchFlowBodies(flow, {
-      request: !!scopes.reqBody,
-      response: !!scopes.resBody,
-    });
-    if (!result.requestOk || !result.responseOk) {
-      failed += 1;
-    }
-    completed += 1;
-    if (panel && (completed === total || completed % 5 === 0)) {
-      panel.webview.postMessage({
-        command: "filterContentProgress",
-        requestId,
-        completed,
-        total,
+  let nextIndex = 0;
+  async function prepareNextFlow() {
+    while (nextIndex < total) {
+      const flow = flowsToPrepare[nextIndex];
+      nextIndex += 1;
+      const result = await fetchFlowBodies(flow, {
+        request: !!scopes.reqBody,
+        response: !!scopes.resBody,
       });
+      if (!result.requestOk || !result.responseOk) {
+        failed += 1;
+      }
+      completed += 1;
+      if (panel && (completed === total || completed % 5 === 0)) {
+        panel.webview.postMessage({
+          command: "filterContentProgress",
+          requestId,
+          completed,
+          total,
+        });
+      }
     }
   }
+
+  const workerCount = Math.min(FILTER_BODY_FETCH_CONCURRENCY, total);
+  await Promise.all(Array.from({ length: workerCount }, () => prepareNextFlow()));
 
   if (panel) {
     panel.webview.postMessage({

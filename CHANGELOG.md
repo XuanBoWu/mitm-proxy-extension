@@ -4,6 +4,12 @@ All notable changes to SecMP are documented in this file.
 
 ## Unreleased
 
+## 0.1.14 - 2026-06-08
+
+- Fixed content filtering so slow or failed mitmweb body requests time out, count as failed, and do not leave the filter progress stuck.
+- Prepared filter body content with bounded concurrency so large captured sessions finish faster without a single slow flow blocking the queue.
+- Removed the display length cap for text request and response bodies while keeping bounded previews for binary, image, audio, and video content.
+
 ## 0.1.13 - 2026-06-08
 
 - Improved capture performance by indexing flow updates in the extension, preventing overlapping polling, reducing flow polling frequency, batching Webview list renders, and virtualizing the request table rows.

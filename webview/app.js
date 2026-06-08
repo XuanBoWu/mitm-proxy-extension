@@ -116,8 +116,7 @@ let _searchRegex = false;
 let _searchMatches = []; // flat array of highlighted mark elements, grouped by section
 let _searchCurrentIdx = -1;
 let _searchSavedTexts = new Map(); // element → searchable editor text
-const BODY_TEXT_LIMIT = 256 * 1024;
-const BINARY_TEXT_LIMIT = 10 * 1024;
+const BINARY_PREVIEW_LIMIT = 10 * 1024;
 
 // Panel state
 let leftPanelWidth = 220;
@@ -744,18 +743,36 @@ function updateAllLineNumbers() {
   document.querySelectorAll(".message-textarea").forEach((editor) => updateLineNumbers(editor));
 }
 
-function truncateBodyText(text, totalBytes) {
-  const value = text == null ? "" : String(text);
-  if (value.length <= BODY_TEXT_LIMIT) return value;
-  const total = totalBytes || value.length;
-  return value.slice(0, BODY_TEXT_LIMIT) +
-    `\n\n[Truncated: showing first ${formatSize(BODY_TEXT_LIMIT)} of ${formatSize(total)}]`;
+function isBinaryContentType(contentType) {
+  const ct = (contentType || "").toLowerCase();
+  if (!ct) return false;
+  if (ct.startsWith("text/")) return false;
+  if (ct.includes("json") || ct.includes("javascript") || ct.includes("xml") || ct.includes("html")) return false;
+  if (ct.includes("x-www-form-urlencoded")) return false;
+  return ct.startsWith("image/") ||
+    ct.startsWith("audio/") ||
+    ct.startsWith("video/") ||
+    ct.startsWith("font/") ||
+    ct.includes("octet-stream") ||
+    ct.includes("protobuf") ||
+    ct.includes("binary") ||
+    ct.includes("wasm") ||
+    ct.includes("zip") ||
+    ct.includes("gzip") ||
+    ct.includes("pdf");
 }
 
-function decodeBase64Body(base64, totalBytes) {
+function binaryPreviewSuffix(shownBytes, totalBytes) {
+  const total = totalBytes || shownBytes;
+  if (!total || total <= shownBytes) return "";
+  return `\n\n[Binary preview: showing first ${formatSize(shownBytes)} of ${formatSize(total)}]`;
+}
+
+function decodeBase64Body(base64, totalBytes, options = {}) {
   if (!base64) return "";
   try {
-    const byteLimit = Math.min(BINARY_TEXT_LIMIT, totalBytes || Number.MAX_SAFE_INTEGER);
+    const limit = options.limitBytes || BINARY_PREVIEW_LIMIT;
+    const byteLimit = Math.min(limit, totalBytes || Number.MAX_SAFE_INTEGER);
     const base64Limit = Math.ceil(byteLimit / 3) * 4;
     const binary = atob(base64.slice(0, base64Limit));
     const sliceLen = Math.min(binary.length, byteLimit);
@@ -769,10 +786,16 @@ function decodeBase64Body(base64, totalBytes) {
     } catch (_) {
       text = Array.from(bytes, b => String.fromCharCode(b)).join("");
     }
-    return truncateBodyText(sanitizeBinaryText(text), totalBytes || Math.floor(base64.length * 0.75));
+    return sanitizeBinaryText(text) + binaryPreviewSuffix(sliceLen, totalBytes || Math.floor(base64.length * 0.75));
   } catch (_) {
     return "[Unable to decode binary body]";
   }
+}
+
+function previewBinaryText(text, totalBytes) {
+  const value = sanitizeBinaryText(text || "");
+  const shown = value.slice(0, BINARY_PREVIEW_LIMIT);
+  return shown + binaryPreviewSuffix(shown.length, totalBytes || value.length);
 }
 
 function sanitizeBinaryText(text) {
@@ -1778,9 +1801,13 @@ function renderDetail(flow) {
 
   // Request body — use request Content-Type, not response's
   const reqBody = flow.req_body || "";
+  const reqBase64 = flow.req_body_base64 || "";
   const reqContentType = (flow.req_headers && flow.req_headers["content-type"]) || "";
-  const reqFormatted = formatBodyForEditor(reqBody, reqContentType, flow.req_size);
-  const reqRaw = truncateBodyText(reqBody || "(empty)", flow.req_size);
+  const reqDisplayBody = reqBody || (reqBase64 ? decodeBase64Body(reqBase64, flow.req_size) : "");
+  const reqFormatted = formatBodyForEditor(reqDisplayBody, reqContentType, flow.req_size);
+  const reqRaw = isBinaryContentType(reqContentType)
+    ? previewBinaryText(reqDisplayBody, flow.req_size)
+    : (reqDisplayBody || "(empty)");
   const reqFormattedMessage = composeHttpMessage(requestStartLine(flow), reqHeadersText, reqFormatted.text);
   setMessageClass($("reqMessageFormatted"), reqFormatted.className);
   setEditorHtml(
@@ -1799,7 +1826,9 @@ function renderDetail(flow) {
   const resBase64 = flow.res_body_base64 || "";
   const resDisplayBody = resBody || (resBase64 ? decodeBase64Body(resBase64, flow.res_size) : "");
   const resFormatted = formatBodyForEditor(resDisplayBody, flow.content_type, flow.res_size);
-  const resRaw = truncateBodyText(resDisplayBody || "(empty)", flow.res_size);
+  const resRaw = isBinaryContentType(flow.content_type)
+    ? previewBinaryText(resDisplayBody, flow.res_size)
+    : (resDisplayBody || "(empty)");
   const resFormattedMessage = composeHttpMessage(responseStartLine(flow), resHeadersText, resFormatted.text);
   setMessageClass($("resMessageFormatted"), resFormatted.className);
   setEditorHtml(
@@ -1871,14 +1900,19 @@ function formatBodyForEditor(body, contentType, totalBytes) {
   }
 
   const ct = (contentType || "").toLowerCase();
-  const displayBody = truncateBodyText(body, totalBytes);
+  const isBinary = isBinaryContentType(ct);
+  const displayBody = isBinary ? previewBinaryText(body, totalBytes) : body;
+
+  if (isBinary) {
+    return { text: displayBody, className: "body-view binary" };
+  }
 
   // Sniff JSON by first non-whitespace char — catches mismatched Content-Type
   const firstChar = body[body.search(/\S/)] || "";
   if (firstChar === "{" || firstChar === "[") {
     try {
       const parsed = JSON.parse(body);
-      const text = truncateBodyText(JSON.stringify(parsed, null, 2), totalBytes);
+      const text = JSON.stringify(parsed, null, 2);
       return {
         text,
         html: highlightJsonText(text),
@@ -1891,7 +1925,7 @@ function formatBodyForEditor(body, contentType, totalBytes) {
   if (ct.includes("json") || ct.includes("javascript")) {
     try {
       const parsed = JSON.parse(body);
-      const text = truncateBodyText(JSON.stringify(parsed, null, 2), totalBytes);
+      const text = JSON.stringify(parsed, null, 2);
       return {
         text,
         html: highlightJsonText(text),
@@ -1907,7 +1941,7 @@ function formatBodyForEditor(body, contentType, totalBytes) {
 
   // Binary-looking text stays visible, similar to Burp's raw message viewer.
   if (/[^\x20-\x7e\n\r\t一-鿿　-〿]/.test(body.substring(0, 200))) {
-    return { text: displayBody, className: "body-view binary" };
+    return { text: previewBinaryText(body, totalBytes), className: "body-view binary" };
   }
 
   return { text: displayBody, className: "body-view" };
