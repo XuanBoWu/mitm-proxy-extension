@@ -3,7 +3,7 @@
   "displayName": "SecMP",
   "icon": "media/icon.png",
   "description": "%secmp.description%",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "publisher": "xbowu",
   "license": "MIT",
   "repository": {

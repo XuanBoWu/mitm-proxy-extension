@@ -4,6 +4,10 @@ All notable changes to SecMP are documented in this file.
 
 ## Unreleased
 
+## 0.1.11 - 2026-06-08
+
+- Hardened the extension runtime install smoke test cleanup on Windows runners by retrying recursive temporary directory removal.
+
 ## 0.1.10 - 2026-06-08
 
 - Fixed the extension runtime install smoke-test VS Code mock so Activity Bar sidebar activation works in CI.

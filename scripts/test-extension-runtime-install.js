@@ -53,6 +53,15 @@ function readJsonFile(filePath) {
   return JSON.parse(fs.readFileSync(filePath, "utf-8").replace(/^\uFEFF/, ""));
 }
 
+function removeDirRecursive(filePath) {
+  fs.rmSync(filePath, {
+    recursive: true,
+    force: true,
+    maxRetries: 10,
+    retryDelay: 500,
+  });
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const repoRoot = path.resolve(__dirname, "..");
@@ -219,7 +228,7 @@ async function main() {
     try {
       sandbox.module.exports.deactivate();
     } catch (_) {}
-    fs.rmSync(storageDir, { recursive: true, force: true });
+    removeDirRecursive(storageDir);
   }
 }
 
