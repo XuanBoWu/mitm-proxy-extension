@@ -162,6 +162,7 @@
   "webview.flow.empty": "等待抓包数据...",
   "webview.flow.noMatches": "无匹配结果",
   "webview.flow.countLabel": "条请求",
+  "webview.flow.copied": "已复制 {count} 条请求",
   "webview.flow.loaded": "已加载 {count} 条记录",
   "webview.flow.waitingResponse": "等待响应...",
   "webview.flow.waitingForFilter": "正在加载全部内容用于过滤... {completed}/{total}",

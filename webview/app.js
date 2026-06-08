@@ -20,6 +20,8 @@ const SECMP_STATIC_FALLBACKS = readStaticI18nFallbacks();
 // State
 let flows = [];
 let selectedFlowId = null;
+let selectedFlowIds = new Set();
+let selectionAnchorFlowId = null;
 let proxyRunning = false;
 let environmentStatus = null;
 let aboutPopoverOpen = false;
@@ -221,6 +223,7 @@ window.addEventListener("message", (event) => {
     case "flowsCleared":
       flows = [];
       nextSeq = 1;
+      clearFlowSelection();
       userResizedCols.clear();
       resetFilterContentState();
       renderFlowList();
@@ -230,6 +233,7 @@ window.addEventListener("message", (event) => {
       flows = msg.flows;
       flows.forEach((f, i) => { if (f._seq == null) f._seq = i + 1; });
       nextSeq = flows.length + 1;
+      clearFlowSelection();
       userResizedCols.clear();
       resetFilterContentState();
       renderFlowList();
@@ -870,6 +874,7 @@ function applySearchHighlight(el, start, end, matchText) {
 function renderFlowList() {
   const waitingForContent = isFilterContentPending();
   let filtered = waitingForContent ? [] : getVisibleFlows();
+  pruneFlowSelection();
 
   flowCount.textContent = `${filtered.length} / ${flows.length}`;
   updateFilterUi();
@@ -900,18 +905,19 @@ function renderFlowRows(filtered) {
     if (!row) {
       row = document.createElement("tr");
       row.dataset.id = flow.id;
-      row.addEventListener("click", () => {
-        selectedFlowId = row.dataset.id;
-        renderFlowList();
-        vscode.postMessage({ command: "selectFlow", flowId: row.dataset.id });
+      row.addEventListener("click", (event) => {
+        handleFlowRowClick(row.dataset.id, event);
       });
     }
 
     const rowNum = flows.indexOf(flow) + 1;
     const cells = colOrder.map(col => renderCell(col, flow, rowNum)).join("");
-    const rowKey = `${selectedFlowId === flow.id ? "1" : "0"}|${cells}`;
+    const isSelected = selectedFlowIds.has(flow.id);
+    const isFocused = selectedFlowId === flow.id;
+    const rowKey = `${isSelected ? "1" : "0"}|${isFocused ? "1" : "0"}|${cells}`;
     if (row.dataset.renderKey !== rowKey) {
-      row.className = selectedFlowId === flow.id ? "selected" : "";
+      row.className = getFlowRowClass(flow.id);
+      row.setAttribute("aria-selected", isSelected ? "true" : "false");
       row.innerHTML = cells;
       row.dataset.renderKey = rowKey;
     }
@@ -935,6 +941,96 @@ function getVisibleFlows() {
     filtered = sortFlows(filtered);
   }
   return filtered;
+}
+
+function getVisibleFlowIds() {
+  return getVisibleFlows().map((flow) => flow.id);
+}
+
+function clearFlowSelection() {
+  selectedFlowId = null;
+  selectedFlowIds = new Set();
+  selectionAnchorFlowId = null;
+}
+
+function pruneFlowSelection() {
+  if (selectedFlowIds.size === 0 && !selectedFlowId && !selectionAnchorFlowId) return;
+  const existingIds = new Set(flows.map((flow) => flow.id));
+  selectedFlowIds = new Set([...selectedFlowIds].filter((id) => existingIds.has(id)));
+  if (selectedFlowId && !existingIds.has(selectedFlowId)) selectedFlowId = null;
+  if (selectionAnchorFlowId && !existingIds.has(selectionAnchorFlowId)) selectionAnchorFlowId = null;
+}
+
+function getFlowRowClass(flowId) {
+  const classes = [];
+  if (selectedFlowIds.has(flowId)) classes.push("selected");
+  if (selectedFlowId === flowId) classes.push("focused");
+  return classes.join(" ");
+}
+
+function handleFlowRowClick(flowId, event) {
+  if (!flowId) return;
+  const visibleIds = getVisibleFlowIds();
+  if (event.shiftKey) {
+    selectFlowRange(flowId, {
+      append: event.ctrlKey || event.metaKey,
+      visibleIds,
+    });
+  } else if (event.ctrlKey || event.metaKey) {
+    toggleFlowSelection(flowId);
+    selectionAnchorFlowId = flowId;
+  } else {
+    selectSingleFlow(flowId);
+  }
+
+  setFocusedFlow(flowId, { requestDetail: true });
+  renderFlowList();
+}
+
+function selectSingleFlow(flowId) {
+  selectedFlowIds = new Set([flowId]);
+  selectionAnchorFlowId = flowId;
+}
+
+function toggleFlowSelection(flowId) {
+  const next = new Set(selectedFlowIds);
+  if (next.has(flowId)) {
+    next.delete(flowId);
+  } else {
+    next.add(flowId);
+  }
+  selectedFlowIds = next;
+}
+
+function selectFlowRange(flowId, options = {}) {
+  const visibleIds = options.visibleIds || getVisibleFlowIds();
+  if (visibleIds.length === 0) return;
+
+  let anchorId = selectionAnchorFlowId || selectedFlowId || flowId;
+  if (!visibleIds.includes(anchorId)) anchorId = flowId;
+
+  const start = visibleIds.indexOf(anchorId);
+  const end = visibleIds.indexOf(flowId);
+  if (start === -1 || end === -1) {
+    selectSingleFlow(flowId);
+    return;
+  }
+
+  const [from, to] = start < end ? [start, end] : [end, start];
+  const next = options.append ? new Set(selectedFlowIds) : new Set();
+  for (const id of visibleIds.slice(from, to + 1)) {
+    next.add(id);
+  }
+  selectedFlowIds = next;
+  selectionAnchorFlowId = anchorId;
+}
+
+function setFocusedFlow(flowId, options = {}) {
+  if (!flowId) return;
+  selectedFlowId = flowId;
+  if (options.requestDetail) {
+    vscode.postMessage({ command: "selectFlow", flowId });
+  }
 }
 
 function matchesFlowFilters(flow) {
@@ -1054,6 +1150,110 @@ function renderCell(col, flow, rowNum) {
     default:
       return "<td></td>";
   }
+}
+
+function getCellText(col, flow, rowNum) {
+  switch (col) {
+    case "num":
+      return flow._seq || rowNum || "";
+    case "tls":
+      return getTlsText(flow);
+    case "proto":
+      return getProtocolText(flow);
+    case "host":
+      return flow.host || "";
+    case "path":
+      return flow.path || "";
+    case "method":
+      return flow.method || "";
+    case "status":
+      if (flow.status_code === 0 && !flow.error) return "...";
+      if (flow.status_code === 0 && flow.error) return "ERR";
+      return flow.status_code || "";
+    case "time":
+      return formatTimestamp(flow.req_timestamp);
+    case "size":
+      return formatSize(flow.res_size);
+    case "mime":
+      return flow.content_type || "";
+    case "ip":
+      return flow.server_ip || "";
+    case "port":
+      return flow.port || "";
+    default:
+      return "";
+  }
+}
+
+function getTlsText(flow) {
+  if (flow.tls_version) return flow.tls_version;
+  if (flow.scheme === "http" || (flow.url && flow.url.startsWith("http:"))) return "HTTP";
+  return "-";
+}
+
+function getProtocolText(flow) {
+  let scheme = "";
+  if (flow.url) {
+    try {
+      scheme = flow.url.split("://")[0].toLowerCase();
+    } catch (_) {}
+  }
+  if (!scheme && flow.scheme) scheme = flow.scheme;
+  if (scheme) return scheme.toUpperCase();
+  if (flow.type === "tcp") return "TCP";
+  if (flow.type === "udp") return "UDP";
+  if (flow.type === "dns") return "DNS";
+  return "HTTP";
+}
+
+function toTsvCell(value) {
+  return String(value == null ? "" : value).replace(/[\t\r\n]+/g, " ").trim();
+}
+
+function buildSelectedFlowsTsv() {
+  const selected = getSelectedVisibleFlows();
+  if (selected.length === 0) return "";
+
+  const header = colOrder.map((colId) => {
+    const colDef = COLUMNS.find((col) => col.id === colId);
+    return toTsvCell(colDef ? colDef.title : colId);
+  });
+  const rows = selected.map((flow) => {
+    const rowNum = flows.indexOf(flow) + 1;
+    return colOrder.map((colId) => toTsvCell(getCellText(colId, flow, rowNum)));
+  });
+  return [header, ...rows].map((row) => row.join("\t")).join("\n");
+}
+
+function getSelectedVisibleFlows() {
+  if (selectedFlowIds.size === 0) return [];
+  return getVisibleFlows().filter((flow) => selectedFlowIds.has(flow.id));
+}
+
+async function copySelectedFlows() {
+  const text = buildSelectedFlowsTsv();
+  if (!text) return false;
+
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch (_) {
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.style.position = "fixed";
+    textarea.style.left = "-9999px";
+    textarea.style.top = "0";
+    document.body.appendChild(textarea);
+    textarea.focus();
+    textarea.select();
+    try {
+      document.execCommand("copy");
+    } finally {
+      document.body.removeChild(textarea);
+    }
+  }
+
+  footerStatus.textContent = t("webview.flow.copied", { count: getSelectedVisibleFlows().length });
+  return true;
 }
 
 // ===== Column Sorting =====
@@ -2598,6 +2798,21 @@ $("clearFilterBtn").addEventListener("click", () => {
 });
 
 // ===== Keyboard =====
+function isEditableShortcutTarget(target = document.activeElement) {
+  const tag = target ? target.tagName?.toLowerCase() : "";
+  return tag === "input" ||
+    tag === "textarea" ||
+    tag === "select" ||
+    target?.isContentEditable ||
+    target?.classList?.contains("message-textarea");
+}
+
+function scrollFlowRowIntoView(flowId) {
+  const row = [...flowTableBody.querySelectorAll("tr[data-id]")]
+    .find((item) => item.dataset.id === flowId);
+  if (row) row.scrollIntoView({ block: "nearest", behavior: "smooth" });
+}
+
 document.addEventListener("keydown", (e) => {
   // Ctrl/Cmd+F: focus filter
   if ((e.ctrlKey || e.metaKey) && e.key === "f") {
@@ -2606,12 +2821,29 @@ document.addEventListener("keydown", (e) => {
     return;
   }
 
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "a" && !isEditableShortcutTarget()) {
+    const filtered = isFilterContentPending() ? [] : getVisibleFlows();
+    if (filtered.length === 0) return;
+    e.preventDefault();
+    selectedFlowIds = new Set(filtered.map((flow) => flow.id));
+    if (!selectedFlowId || !selectedFlowIds.has(selectedFlowId)) {
+      selectedFlowId = filtered[0].id;
+    }
+    selectionAnchorFlowId = selectedFlowId;
+    renderFlowList();
+    return;
+  }
+
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "c" && !isEditableShortcutTarget()) {
+    if (selectedFlowIds.size === 0) return;
+    e.preventDefault();
+    copySelectedFlows();
+    return;
+  }
+
   // ArrowUp/ArrowDown: navigate flows
   if ((e.key === "ArrowUp" || e.key === "ArrowDown") && !e.ctrlKey && !e.metaKey && !e.altKey) {
-    // Don't navigate if user is typing in an input
-    const tag = document.activeElement ? document.activeElement.tagName.toLowerCase() : "";
-    if (tag === "input" || tag === "textarea" || tag === "select" ||
-        document.activeElement?.classList?.contains("message-textarea")) return;
+    if (isEditableShortcutTarget()) return;
 
     e.preventDefault();
 
@@ -2637,14 +2869,14 @@ document.addEventListener("keydown", (e) => {
     const flow = filtered[idx];
     if (!flow) return;
 
-    selectedFlowId = flow.id;
+    if (e.shiftKey) {
+      selectFlowRange(flow.id, { visibleIds: filtered.map((item) => item.id) });
+    } else {
+      selectSingleFlow(flow.id);
+    }
+    setFocusedFlow(flow.id, { requestDetail: true });
     renderFlowList();
-
-    // Scroll selected row into view
-    const row = flowTableBody.querySelector(`tr[data-id="${flow.id}"]`);
-    if (row) row.scrollIntoView({ block: "nearest", behavior: "smooth" });
-
-    vscode.postMessage({ command: "selectFlow", flowId: flow.id });
+    scrollFlowRowIntoView(flow.id);
   }
 });
 

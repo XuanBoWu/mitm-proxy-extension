@@ -4,6 +4,10 @@ All notable changes to SecMP are documented in this file.
 
 ## Unreleased
 
+## 0.1.9 - 2026-06-08
+
+- Added Burp-style multi-selection for the captured request list, including standard range selection, additive selection, select-all, and TSV clipboard copy using the current table column order.
+
 ## 0.1.8 - 2026-06-07
 
 - Added a SecMP Activity Bar entry with a monochrome sidebar icon and localized quick actions for opening the capture panel, controlling the proxy, configuring the device proxy, and pushing the CA certificate.

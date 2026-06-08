@@ -162,6 +162,7 @@
   "webview.flow.empty": "Waiting for captured traffic...",
   "webview.flow.noMatches": "No matching results",
   "webview.flow.countLabel": "requests",
+  "webview.flow.copied": "Copied {count} requests",
   "webview.flow.loaded": "Loaded {count} records",
   "webview.flow.waitingResponse": "Waiting for response...",
   "webview.flow.waitingForFilter": "Loading all content for filtering... {completed}/{total}",
