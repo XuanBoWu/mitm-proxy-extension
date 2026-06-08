@@ -19,6 +19,7 @@ const SECMP_STATIC_FALLBACKS = readStaticI18nFallbacks();
 
 // State
 let flows = [];
+let flowIndexById = new Map();
 let selectedFlowId = null;
 let selectedFlowIds = new Set();
 let selectionAnchorFlowId = null;
@@ -102,6 +103,12 @@ let filterContentState = {
 let nextSeq = 1;
 let sortState = { colId: null, direction: null }; // null | 'asc' | 'desc'
 let userResizedCols = new Set(); // columns user manually resized — skip auto-fit
+let pendingFlowListRender = false;
+let lastVisibleFlows = [];
+let virtualStartIndex = 0;
+const FLOW_ROW_HEIGHT = 26;
+const FLOW_RENDER_BUFFER_ROWS = 12;
+const FLOW_AUTOFIT_SAMPLE_ROWS = 80;
 
 // Search state
 let _searchTerm = "";
@@ -149,6 +156,29 @@ const flowCount = $("flowCount");
 const proxyIndicator = $("proxyIndicator");
 const proxyStatusText = $("proxyStatusText");
 const footerStatus = $("footerStatus");
+const flowTableWrapper = document.querySelector(".table-wrapper");
+
+function rebuildFlowIndex() {
+  flowIndexById = new Map();
+  flows.forEach((flow, index) => {
+    if (flow?.id) flowIndexById.set(flow.id, index);
+  });
+}
+
+function getFlowIndex(flowOrId) {
+  const id = typeof flowOrId === "string" ? flowOrId : flowOrId?.id;
+  const index = flowIndexById.get(id);
+  return Number.isInteger(index) ? index : -1;
+}
+
+function scheduleFlowListRender() {
+  if (pendingFlowListRender) return;
+  pendingFlowListRender = true;
+  requestAnimationFrame(() => {
+    pendingFlowListRender = false;
+    renderFlowList();
+  });
+}
 
 // ===== Message Handlers =====
 
@@ -156,38 +186,42 @@ window.addEventListener("message", (event) => {
   const msg = event.data;
   switch (msg.command) {
     case "addFlows":
-      for (const f of msg.flows) {
+      for (const f of msg.flows || []) {
         f._seq = nextSeq++;
-        flows.unshift(f);
       }
+      flows = [...(msg.flows || [])].reverse().concat(flows);
+      rebuildFlowIndex();
       handleFlowsChanged();
-      renderFlowList();
+      scheduleFlowListRender();
       break;
     case "addFlow": // kept for backwards compat, not used by current extension.js
       msg.flow._seq = nextSeq++;
       flows.unshift(msg.flow);
+      rebuildFlowIndex();
       handleFlowsChanged();
-      renderFlowList();
+      scheduleFlowListRender();
       break;
     case "updateFlows":
       for (const f of msg.flows) {
-        const idx = flows.findIndex(cf => cf.id === f.id);
-        if (idx !== -1) {
+        const idx = flowIndexById.get(f.id);
+        if (Number.isInteger(idx)) {
           f._seq = flows[idx]._seq;
           flows[idx] = f;
           if (selectedFlowId === f.id) renderDetail(f);
         }
       }
+      rebuildFlowIndex();
       handleFlowsChanged();
-      renderFlowList();
+      scheduleFlowListRender();
       break;
     case "updateFlow": { // kept for backwards compat
-      const idx = flows.findIndex(f => f.id === msg.flow.id);
-      if (idx !== -1) {
+      const idx = flowIndexById.get(msg.flow.id);
+      if (Number.isInteger(idx)) {
         msg.flow._seq = flows[idx]._seq;
         flows[idx] = msg.flow;
+        rebuildFlowIndex();
         handleFlowsChanged();
-        renderFlowList();
+        scheduleFlowListRender();
         if (selectedFlowId === msg.flow.id) renderDetail(msg.flow);
       }
       break;
@@ -196,7 +230,7 @@ window.addEventListener("message", (event) => {
       proxyRunning = msg.proxyRunning;
       updateProxyIndicator();
       if (msg.flowCount != null) {
-        renderFlowList();
+        scheduleFlowListRender();
       }
       break;
     case "proxyStatus":
@@ -222,6 +256,7 @@ window.addEventListener("message", (event) => {
       break;
     case "flowsCleared":
       flows = [];
+      rebuildFlowIndex();
       nextSeq = 1;
       clearFlowSelection();
       userResizedCols.clear();
@@ -232,6 +267,7 @@ window.addEventListener("message", (event) => {
     case "sessionLoaded":
       flows = msg.flows;
       flows.forEach((f, i) => { if (f._seq == null) f._seq = i + 1; });
+      rebuildFlowIndex();
       nextSeq = flows.length + 1;
       clearFlowSelection();
       userResizedCols.clear();
@@ -246,7 +282,7 @@ window.addEventListener("message", (event) => {
       filterContentState.completed = msg.completed || 0;
       filterContentState.total = msg.total || 0;
       updateFilterUi();
-      if (filterContentState.blocking) renderFlowList();
+      if (filterContentState.blocking) scheduleFlowListRender();
       break;
     case "filterContentReady":
       if (msg.requestId !== filterContentState.requestId) break;
@@ -547,11 +583,16 @@ function mimeShort(flow) {
 
 function escapeHtml(str) {
   if (!str) return "";
-  return str
+  return String(str)
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
+}
+
+function cssEscape(value) {
+  if (window.CSS?.escape) return window.CSS.escape(String(value));
+  return String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }
 
 function setEditorText(el, text) {
@@ -874,6 +915,7 @@ function applySearchHighlight(el, start, end, matchText) {
 function renderFlowList() {
   const waitingForContent = isFilterContentPending();
   let filtered = waitingForContent ? [] : getVisibleFlows();
+  lastVisibleFlows = filtered;
   pruneFlowSelection();
 
   flowCount.textContent = `${filtered.length} / ${flows.length}`;
@@ -884,6 +926,7 @@ function renderFlowList() {
       '<tr class="empty-state"><td colspan="' + COLUMNS.length + '">' +
       (waitingForContent ? filterContentMessage() : (flows.length === 0 ? t("webview.flow.empty") : t("webview.flow.noMatches"))) +
       "</td></tr>";
+    virtualStartIndex = 0;
     return;
   }
 
@@ -893,46 +936,36 @@ function renderFlowList() {
 }
 
 function renderFlowRows(filtered) {
-  flowTableBody.querySelectorAll("tr:not([data-id])").forEach((row) => row.remove());
-  const existingRows = new Map();
-  flowTableBody.querySelectorAll("tr[data-id]").forEach((row) => {
-    existingRows.set(row.dataset.id, row);
-  });
+  const wrapperHeight = flowTableWrapper ? flowTableWrapper.clientHeight : 600;
+  const scrollTop = flowTableWrapper ? flowTableWrapper.scrollTop : 0;
+  const viewportRows = Math.max(1, Math.ceil(wrapperHeight / FLOW_ROW_HEIGHT));
+  const start = Math.max(0, Math.floor(scrollTop / FLOW_ROW_HEIGHT) - FLOW_RENDER_BUFFER_ROWS);
+  const end = Math.min(filtered.length, start + viewportRows + FLOW_RENDER_BUFFER_ROWS * 2);
+  const rows = [];
+  const topHeight = start * FLOW_ROW_HEIGHT;
+  const bottomHeight = Math.max(0, (filtered.length - end) * FLOW_ROW_HEIGHT);
 
-  let cursor = flowTableBody.firstElementChild;
-  for (const flow of filtered) {
-    let row = existingRows.get(flow.id);
-    if (!row) {
-      row = document.createElement("tr");
-      row.dataset.id = flow.id;
-      row.addEventListener("click", (event) => {
-        handleFlowRowClick(row.dataset.id, event);
-      });
-    }
+  virtualStartIndex = start;
+  if (topHeight > 0) {
+    rows.push(`<tr class="virtual-spacer" aria-hidden="true"><td colspan="${COLUMNS.length}" style="height:${topHeight}px"></td></tr>`);
+  }
 
-    const rowNum = flows.indexOf(flow) + 1;
-    const cells = colOrder.map(col => renderCell(col, flow, rowNum)).join("");
+  for (let i = start; i < end; i += 1) {
+    const flow = filtered[i];
+    const rowNum = getFlowIndex(flow) + 1;
     const isSelected = selectedFlowIds.has(flow.id);
     const isFocused = selectedFlowId === flow.id;
-    const rowKey = `${isSelected ? "1" : "0"}|${isFocused ? "1" : "0"}|${cells}`;
-    if (row.dataset.renderKey !== rowKey) {
-      row.className = getFlowRowClass(flow.id);
-      row.setAttribute("aria-selected", isSelected ? "true" : "false");
-      row.innerHTML = cells;
-      row.dataset.renderKey = rowKey;
-    }
-
-    if (row !== cursor) {
-      flowTableBody.insertBefore(row, cursor);
-    } else {
-      cursor = cursor.nextElementSibling;
-    }
-    existingRows.delete(flow.id);
+    rows.push(
+      `<tr data-id="${escapeHtml(flow.id)}" class="${getFlowRowClass(flow.id)}" aria-selected="${isSelected ? "true" : "false"}">` +
+      colOrder.map(col => renderCell(col, flow, rowNum)).join("") +
+      "</tr>"
+    );
   }
 
-  for (const row of existingRows.values()) {
-    row.remove();
+  if (bottomHeight > 0) {
+    rows.push(`<tr class="virtual-spacer" aria-hidden="true"><td colspan="${COLUMNS.length}" style="height:${bottomHeight}px"></td></tr>`);
   }
+  flowTableBody.innerHTML = rows.join("");
 }
 
 function getVisibleFlows() {
@@ -955,10 +988,9 @@ function clearFlowSelection() {
 
 function pruneFlowSelection() {
   if (selectedFlowIds.size === 0 && !selectedFlowId && !selectionAnchorFlowId) return;
-  const existingIds = new Set(flows.map((flow) => flow.id));
-  selectedFlowIds = new Set([...selectedFlowIds].filter((id) => existingIds.has(id)));
-  if (selectedFlowId && !existingIds.has(selectedFlowId)) selectedFlowId = null;
-  if (selectionAnchorFlowId && !existingIds.has(selectionAnchorFlowId)) selectionAnchorFlowId = null;
+  selectedFlowIds = new Set([...selectedFlowIds].filter((id) => flowIndexById.has(id)));
+  if (selectedFlowId && !flowIndexById.has(selectedFlowId)) selectedFlowId = null;
+  if (selectionAnchorFlowId && !flowIndexById.has(selectionAnchorFlowId)) selectionAnchorFlowId = null;
 }
 
 function getFlowRowClass(flowId) {
@@ -988,6 +1020,12 @@ function handleFlowRowClick(flowId, event) {
   setFocusedFlow(flowId, { requestDetail: true });
   renderFlowList();
 }
+
+flowTableBody.addEventListener("click", (event) => {
+  const row = event.target.closest("tr[data-id]");
+  if (!row || !flowTableBody.contains(row)) return;
+  handleFlowRowClick(row.dataset.id, event);
+});
 
 function selectSingleFlow(flowId) {
   selectedFlowIds = new Set([flowId]);
@@ -1221,7 +1259,7 @@ function buildSelectedFlowsTsv() {
     return toTsvCell(colDef ? colDef.title : colId);
   });
   const rows = selected.map((flow) => {
-    const rowNum = flows.indexOf(flow) + 1;
+    const rowNum = getFlowIndex(flow) + 1;
     return colOrder.map((colId) => toTsvCell(getCellText(colId, flow, rowNum)));
   });
   return [header, ...rows].map((row) => row.join("\t")).join("\n");
@@ -1405,7 +1443,7 @@ function _autoFitContentColumns() {
     maxWidth = Math.max(maxWidth, measureEl.offsetWidth + 28);
 
     // Measure all visible cell contents
-    const rows = flowTableBody.querySelectorAll("tr:not(.empty-state)");
+    const rows = Array.from(flowTableBody.querySelectorAll("tr[data-id]")).slice(0, FLOW_AUTOFIT_SAMPLE_ROWS);
     rows.forEach(row => {
       const cell = row.children[colIndex];
       if (cell) {
@@ -2596,12 +2634,15 @@ function handleFlowsChanged() {
 }
 
 function mergeUpdatedFlows(updatedFlows) {
+  let changed = false;
   for (const next of updatedFlows) {
-    const idx = flows.findIndex((flow) => flow.id === next.id);
-    if (idx === -1) continue;
+    const idx = flowIndexById.get(next.id);
+    if (!Number.isInteger(idx)) continue;
     next._seq = flows[idx]._seq;
     flows[idx] = next;
+    changed = true;
   }
+  if (changed) rebuildFlowIndex();
 }
 
 function updateFilterUi() {
@@ -2824,9 +2865,15 @@ function clearNativeSelection() {
 }
 
 function scrollFlowRowIntoView(flowId) {
-  const row = [...flowTableBody.querySelectorAll("tr[data-id]")]
-    .find((item) => item.dataset.id === flowId);
-  if (row) row.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  const row = flowTableBody.querySelector(`tr[data-id="${cssEscape(flowId)}"]`);
+  if (row) {
+    row.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    return;
+  }
+  const index = lastVisibleFlows.findIndex((flow) => flow.id === flowId);
+  if (index === -1 || !flowTableWrapper) return;
+  flowTableWrapper.scrollTop = Math.max(0, index * FLOW_ROW_HEIGHT - FLOW_RENDER_BUFFER_ROWS * FLOW_ROW_HEIGHT);
+  renderFlowList();
 }
 
 document.addEventListener("keydown", (e) => {
@@ -2941,7 +2988,14 @@ updateFilterUi();
 window.addEventListener("resize", () => {
   updateTableWidth();
   updateAllLineNumbers();
+  scheduleFlowListRender();
 });
+
+if (flowTableWrapper) {
+  flowTableWrapper.addEventListener("scroll", () => {
+    scheduleFlowListRender();
+  }, { passive: true });
+}
 
 // Request initial status
 vscode.postMessage({ command: "getStatus" });

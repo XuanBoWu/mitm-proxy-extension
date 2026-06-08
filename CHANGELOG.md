@@ -4,6 +4,10 @@ All notable changes to SecMP are documented in this file.
 
 ## Unreleased
 
+## 0.1.13 - 2026-06-08
+
+- Improved capture performance by indexing flow updates in the extension, preventing overlapping polling, reducing flow polling frequency, batching Webview list renders, and virtualizing the request table rows.
+
 ## 0.1.12 - 2026-06-08
 
 - Fixed request list select-all so it selects only captured rows and does not leave native Webview text selected outside the packet list.

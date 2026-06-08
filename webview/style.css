@@ -656,6 +656,17 @@ dd { color: var(--text-primary); }
   height: 26px;
   user-select: none;
 }
+#flowTable tbody tr.virtual-spacer {
+  cursor: default;
+  border-bottom: none;
+}
+#flowTable tbody tr.virtual-spacer:hover {
+  background: transparent;
+}
+#flowTable tbody tr.virtual-spacer td {
+  padding: 0;
+  border: 0;
+}
 #flowTable tbody tr:hover { background: var(--bg-hover); }
 #flowTable tbody tr.selected { background: var(--bg-active); }
 #flowTable tbody tr.selected:hover { background: var(--bg-active); }

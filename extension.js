@@ -11,10 +11,13 @@ let proxyProcess = null;
 let outputChannel = null;
 let panel = null;
 let capturedFlows = [];
+let capturedFlowById = new Map();
+let capturedFlowIndexById = new Map();
 let deviceInfo = null;
 let webPort = null;
 let authToken = null;
 let pollingTimer = null;
+let pollingInProgress = false;
 let knownFlowIds = new Set();
 let ignoredFlowIdsAfterClear = new Set();
 let extensionContext = null;
@@ -32,6 +35,7 @@ const extensionPackage = loadExtensionPackage();
 const SUPPORTED_RUNTIME_PLATFORMS = new Set(["win32", "darwin"]);
 const SUPPORTED_LOCALES = new Set(["zh-CN", "en-US"]);
 const DEFAULT_LOCALE = "zh-CN";
+const FLOW_POLL_INTERVAL_MS = 1000;
 const DEFAULT_RUNTIME_SOURCES = {
   "0.1.0:win32:x64": {
     url: "https://github.com/XuanBoWu/mitm-proxy-extension/releases/download/v0.1.0/secmp-runtime-win32-x64-0.1.0.zip",
@@ -1343,6 +1347,42 @@ function mitmwebGetJson(path) {
   return mitmwebGet(path).then((data) => JSON.parse(data.toString("utf-8")));
 }
 
+function resetCapturedFlows() {
+  capturedFlows = [];
+  capturedFlowById.clear();
+  capturedFlowIndexById.clear();
+}
+
+function setCapturedFlows(flows) {
+  capturedFlows = Array.isArray(flows) ? flows : [];
+  capturedFlowById = new Map();
+  capturedFlowIndexById = new Map();
+  capturedFlows.forEach((flow, index) => {
+    if (flow?.id) {
+      capturedFlowById.set(flow.id, flow);
+      capturedFlowIndexById.set(flow.id, index);
+    }
+  });
+}
+
+function addCapturedFlow(flow) {
+  const index = capturedFlows.length;
+  capturedFlows.push(flow);
+  if (flow?.id) {
+    capturedFlowById.set(flow.id, flow);
+    capturedFlowIndexById.set(flow.id, index);
+  }
+}
+
+function replaceCapturedFlow(id, nextFlow) {
+  const idx = capturedFlowIndexById.get(id);
+  if (!Number.isInteger(idx)) return false;
+  capturedFlows[idx] = nextFlow;
+  capturedFlowById.set(id, nextFlow);
+  capturedFlowIndexById.set(id, idx);
+  return true;
+}
+
 // ===== Flow transformation =====
 
 function transformFlow(f) {
@@ -1431,13 +1471,15 @@ function transformFlow(f) {
 
 async function pollFlows() {
   if (!webPort || !authToken) return;
+  if (pollingInProgress) return;
 
+  pollingInProgress = true;
   try {
     const flows = await mitmwebGetJson("/flows.json");
 
     // Detect if flows were cleared (e.g., via clearFlows command)
     if (flows.length === 0 && capturedFlows.length > 0) {
-      capturedFlows = [];
+      resetCapturedFlows();
       knownFlowIds.clear();
       ignoredFlowIdsAfterClear.clear();
       if (panel) {
@@ -1461,7 +1503,7 @@ async function pollFlows() {
     // Add new flows (in order from mitmproxy) — batch into single message
     if (newFlows.length > 0 && panel) {
       const transformedFlows = newFlows.map(f => transformFlow(f));
-      transformedFlows.forEach(f => capturedFlows.push(f));
+      transformedFlows.forEach(addCapturedFlow);
       panel.webview.postMessage({
         command: "addFlows",
         flows: transformedFlows,
@@ -1472,7 +1514,7 @@ async function pollFlows() {
     const updatedFlows = [];
     for (const f of flows) {
       if (!knownFlowIds.has(f.id)) continue;
-      const existing = capturedFlows.find(cf => cf.id === f.id);
+      const existing = capturedFlowById.get(f.id);
       if (!existing) continue;
       if (existing.status_code !== (f.response?.status_code || 0) ||
           existing.res_size !== (f.response?.contentLength || 0) ||
@@ -1488,9 +1530,9 @@ async function pollFlows() {
           transformed.res_body_base64 = existing.res_body_base64;
         }
         transformed._bodyFetched = !!(transformed._reqBodyFetched && transformed._resBodyFetched);
-        const idx = capturedFlows.indexOf(existing);
-        capturedFlows[idx] = transformed;
-        updatedFlows.push(transformed);
+        if (replaceCapturedFlow(f.id, transformed)) {
+          updatedFlows.push(transformed);
+        }
       }
     }
     if (updatedFlows.length > 0 && panel) {
@@ -1501,6 +1543,8 @@ async function pollFlows() {
     }
   } catch (_) {
     // Silently skip polling errors (server might not be ready yet)
+  } finally {
+    pollingInProgress = false;
   }
 }
 
@@ -1508,8 +1552,9 @@ function startFlowPolling() {
   stopFlowPolling();
   knownFlowIds.clear();
   ignoredFlowIdsAfterClear.clear();
-  capturedFlows = [];
-  pollingTimer = setInterval(pollFlows, 500);
+  resetCapturedFlows();
+  pollFlows();
+  pollingTimer = setInterval(pollFlows, FLOW_POLL_INTERVAL_MS);
 }
 
 function stopFlowPolling() {
@@ -2043,7 +2088,7 @@ async function createPanel() {
       }
 
       case "selectFlow": {
-        const flow = capturedFlows.find(f => f.id === message.flowId);
+        const flow = capturedFlowById.get(message.flowId);
         if (flow && panel) {
           await fetchFlowBodies(flow);
           panel.webview.postMessage({
@@ -2074,7 +2119,7 @@ async function createPanel() {
         for (const flow of capturedFlows) {
           ignoredFlowIdsAfterClear.add(flow.id);
         }
-        capturedFlows = [];
+        resetCapturedFlows();
         knownFlowIds.clear();
         // Also clear flows in mitmproxy via REST API
         if (webPort && authToken) {
@@ -2378,9 +2423,9 @@ async function loadSession() {
   try {
     const data = JSON.parse(fs.readFileSync(fileUri.fsPath, "utf-8"));
     if (data.flows) {
-      capturedFlows = data.flows;
+      setCapturedFlows(data.flows);
     } else if (Array.isArray(data)) {
-      capturedFlows = data;
+      setCapturedFlows(data);
     } else {
       vscode.window.showErrorMessage(t("extension.session.invalid"));
       return;
