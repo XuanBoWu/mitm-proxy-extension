@@ -6,6 +6,7 @@ const os = require("os");
 const http = require("http");
 const https = require("https");
 const crypto = require("crypto");
+const { CaptureSession } = require("./secmp_session");
 
 let proxyProcess = null;
 let outputChannel = null;
@@ -21,6 +22,8 @@ let pollingInProgress = false;
 let knownFlowIds = new Set();
 let ignoredFlowIdsAfterClear = new Set();
 let extensionContext = null;
+let activeSession = null;
+let allowPanelDispose = false;
 
 const TOOLS_DIR = path.join(__dirname, "tools");
 const DEFAULT_RUNTIME_VERSION = "0.1.2";
@@ -1360,6 +1363,140 @@ function mitmwebGetJson(path) {
   return mitmwebGet(path).then((data) => JSON.parse(data.toString("utf-8")));
 }
 
+function getSessionCacheDir() {
+  const root = extensionStorageDir || path.join(__dirname, ".secmp-storage");
+  return path.join(root, "session-cache");
+}
+
+function getResumeMarkerPath() {
+  const root = extensionStorageDir || path.join(__dirname, ".secmp-storage");
+  return path.join(root, "active-session.json");
+}
+
+function ensureActiveSession() {
+  if (activeSession) return activeSession;
+  const session = CaptureSession.createTemporary(getSessionCacheDir(), extensionPackage.version);
+  activeSession = session;
+  writeResumeMarker({ running: !!proxyProcess });
+  log(`Created temporary SecMP session: ${session.filePath}`);
+  return session;
+}
+
+function flushActiveSession() {
+  if (!activeSession) return;
+  try {
+    activeSession.flush();
+    writeResumeMarker({ running: !!proxyProcess });
+  } catch (err) {
+    log(`Failed to flush SecMP session: ${err.message}`);
+  }
+}
+
+function closeActiveSession() {
+  if (!activeSession) return;
+  try {
+    activeSession.close();
+  } catch (err) {
+    log(`Failed to close SecMP session: ${err.message}`);
+  }
+  activeSession = null;
+  clearResumeMarker();
+}
+
+function writeResumeMarker(extra = {}) {
+  if (!activeSession) return;
+  try {
+    const markerPath = getResumeMarkerPath();
+    fs.mkdirSync(path.dirname(markerPath), { recursive: true });
+    fs.writeFileSync(markerPath, JSON.stringify({
+      sessionId: activeSession.sessionId,
+      sessionName: activeSession.sessionName,
+      filePath: activeSession.filePath,
+      temporary: activeSession.temporary,
+      proxyRunning: !!proxyProcess,
+      webPort,
+      writtenAt: new Date().toISOString(),
+      ...extra,
+    }, null, 2));
+  } catch (err) {
+    log(`Failed to write session resume marker: ${err.message}`);
+  }
+}
+
+function clearResumeMarker() {
+  try {
+    const markerPath = getResumeMarkerPath();
+    if (fs.existsSync(markerPath)) fs.unlinkSync(markerPath);
+  } catch (_) {}
+}
+
+async function checkInterruptedSession() {
+  const markerPath = getResumeMarkerPath();
+  if (!fs.existsSync(markerPath)) return;
+  let marker = null;
+  try {
+    marker = JSON.parse(fs.readFileSync(markerPath, "utf8"));
+  } catch (_) {
+    clearResumeMarker();
+    return;
+  }
+  if (!marker?.filePath || !fs.existsSync(marker.filePath)) {
+    clearResumeMarker();
+    return;
+  }
+  const restore = t("extension.session.restoreSession");
+  const keep = t("extension.session.keepSession");
+  const discard = t("extension.session.discardTempSession");
+  const choice = await vscode.window.showWarningMessage(
+    t("extension.session.interrupted", { name: marker.sessionName || "SecMP" }),
+    restore,
+    keep,
+    discard
+  );
+  if (choice === restore) {
+    try {
+      activeSession = CaptureSession.open(marker.filePath);
+      setCapturedFlows(activeSession.getFlows({ includeBodies: false }));
+      knownFlowIds.clear();
+      for (const flow of capturedFlows) knownFlowIds.add(flow.id);
+      vscode.window.showInformationMessage(t("extension.session.loaded", { count: capturedFlows.length }));
+    } catch (err) {
+      vscode.window.showErrorMessage(t("extension.session.parseFailed", { message: err.message }));
+      clearResumeMarker();
+    }
+    return;
+  }
+  if (choice === discard && marker.temporary) {
+    try {
+      fs.unlinkSync(marker.filePath);
+    } catch (_) {}
+  }
+  clearResumeMarker();
+}
+
+async function saveActiveSessionAs() {
+  if (!activeSession) return null;
+  const result = await vscode.window.showSaveDialog({
+    filters: { "SecMP Session": ["secmp"] },
+    defaultUri: vscode.Uri.file(`${activeSession.sessionName || "capture"}.secmp`),
+  });
+  if (!result) return null;
+  activeSession.saveAs(result.fsPath, path.basename(result.fsPath, ".secmp"));
+  writeResumeMarker({ running: !!proxyProcess });
+  vscode.window.showInformationMessage(t("extension.session.saved", { path: result.fsPath }));
+  return result.fsPath;
+}
+
+function recordSessionFlows(flows) {
+  if (!activeSession) return;
+  for (const flow of flows) {
+    activeSession.putFlow(flow);
+  }
+  if (activeSession.dirtyBytes >= 2 * 1024 * 1024) {
+    flushActiveSession();
+  }
+}
+
 function resetCapturedFlows() {
   capturedFlows = [];
   capturedFlowById.clear();
@@ -1511,6 +1648,7 @@ async function pollFlows() {
     // Detect if flows were cleared (e.g., via clearFlows command)
     if (flows.length === 0 && capturedFlows.length > 0) {
       resetCapturedFlows();
+      if (activeSession) activeSession.resetFlows();
       knownFlowIds.clear();
       ignoredFlowIdsAfterClear.clear();
       if (panel) {
@@ -1535,6 +1673,7 @@ async function pollFlows() {
     if (newFlows.length > 0 && panel) {
       const transformedFlows = newFlows.map(f => transformFlow(f));
       transformedFlows.forEach(addCapturedFlow);
+      recordSessionFlows(transformedFlows);
       panel.webview.postMessage({
         command: "addFlows",
         flows: transformedFlows,
@@ -1563,6 +1702,7 @@ async function pollFlows() {
         }
         transformed._bodyFetched = !!(transformed._reqBodyFetched && transformed._resBodyFetched);
         if (replaceCapturedFlow(f.id, transformed)) {
+          recordSessionFlows([transformed]);
           updatedFlows.push(transformed);
         }
       }
@@ -1585,6 +1725,7 @@ function startFlowPolling() {
   knownFlowIds.clear();
   ignoredFlowIdsAfterClear.clear();
   resetCapturedFlows();
+  ensureActiveSession();
   pollFlows();
   pollingTimer = setInterval(pollFlows, FLOW_POLL_INTERVAL_MS);
 }
@@ -1806,16 +1947,19 @@ async function startProxyEngine(port) {
 function stopProxyEngine() {
   return new Promise((resolve) => {
     if (!proxyProcess) {
+      flushActiveSession();
       resolve({ success: true, message: t("extension.proxy.notRunning") });
       return;
     }
 
     stopFlowPolling();
+    flushActiveSession();
 
     proxyProcess.on("close", () => {
       proxyProcess = null;
       webPort = null;
       authToken = null;
+      flushActiveSession();
       resolve({ success: true, message: t("extension.proxy.stopped") });
     });
 
@@ -1888,6 +2032,12 @@ async function createPanel() {
           device: deviceInfo,
           flowCount: capturedFlows.length,
         });
+        if (capturedFlows.length > 0) {
+          panel.webview.postMessage({
+            command: "sessionLoaded",
+            flows: activeSession ? activeSession.getFlows({ includeBodies: false }) : capturedFlows,
+          });
+        }
         await postEnvironmentStatus(context);
         break;
 
@@ -2152,6 +2302,7 @@ async function createPanel() {
           ignoredFlowIdsAfterClear.add(flow.id);
         }
         resetCapturedFlows();
+        if (activeSession) activeSession.resetFlows();
         knownFlowIds.clear();
         // Also clear flows in mitmproxy via REST API
         if (webPort && authToken) {
@@ -2225,7 +2376,45 @@ async function createPanel() {
 
   panel.onDidDispose(() => {
     panel = null;
+    if (!allowPanelDispose && proxyProcess) {
+      handlePanelClosedDuringCapture();
+    }
   });
+}
+
+async function handlePanelClosedDuringCapture() {
+  flushActiveSession();
+  const saveAndStop = t("extension.session.closeSaveStop");
+  const stopOnly = t("extension.session.closeStopOnly");
+  const cancel = t("extension.session.closeCancel");
+  const choice = await vscode.window.showWarningMessage(
+    t("extension.session.closeWhileCapturing"),
+    { modal: true },
+    saveAndStop,
+    stopOnly,
+    cancel
+  );
+  if (choice === saveAndStop) {
+    if (activeSession?.temporary) {
+      const saved = await saveActiveSessionAs();
+      if (!saved) {
+        await createPanel();
+        return;
+      }
+    } else {
+      flushActiveSession();
+    }
+    await stopProxyEngine();
+    closeActiveSession();
+    return;
+  }
+  if (choice === stopOnly) {
+    flushActiveSession();
+    await stopProxyEngine();
+    closeActiveSession();
+    return;
+  }
+  await createPanel();
 }
 
 // ===== REST API helpers (with method support) =====
@@ -2288,9 +2477,72 @@ function isLikelyBinaryBuffer(buf) {
   return controlBytes / sampleLength > 0.1;
 }
 
+function hydrateFlowBodyFromSession(flow, side) {
+  if (!activeSession || !flow?.id) return false;
+  const state = activeSession.bodyState(flow.id, side);
+  if (state.state !== "ready") return false;
+  if (side === "request") {
+    if (state.contentKind === "binary") {
+      flow.req_body_base64 = activeSession.getBodyBuffer(flow.id, "request").toString("base64");
+      flow.req_body = "";
+    } else {
+      flow.req_body = activeSession.getBodyText(flow.id, "request");
+      flow.req_body_base64 = "";
+    }
+    flow._reqBodyFetched = true;
+  } else {
+    if (state.contentKind === "binary") {
+      flow.res_body_base64 = activeSession.getBodyBuffer(flow.id, "response").toString("base64");
+      flow.res_body = "";
+    } else {
+      flow.res_body = activeSession.getBodyText(flow.id, "response");
+      flow.res_body_base64 = "";
+    }
+    flow._resBodyFetched = true;
+  }
+  flow._bodyFetched = !!(flow._reqBodyFetched && flow._resBodyFetched);
+  return true;
+}
+
+function applyFetchedBody(flow, side, buf, contentType) {
+  const binary = isBinaryContentType(contentType) || isLikelyBinaryBuffer(buf);
+  if (side === "request") {
+    if (binary) {
+      flow.req_body_base64 = buf.toString("base64");
+      flow.req_body = "";
+    } else {
+      flow.req_body = buf.toString("utf-8");
+      flow.req_body_base64 = "";
+    }
+    flow._reqBodyFetched = true;
+  } else {
+    if (binary) {
+      flow.res_body_base64 = buf.toString("base64");
+      flow.res_body = "";
+    } else {
+      flow.res_body = buf.toString("utf-8");
+      flow.res_body_base64 = "";
+    }
+    flow._resBodyFetched = true;
+  }
+  if (activeSession) {
+    activeSession.appendBody(flow.id, side, buf, {
+      contentType,
+      contentKind: binary ? "binary" : "text",
+    });
+  }
+  flow._bodyFetched = !!(flow._reqBodyFetched && flow._resBodyFetched);
+}
+
 async function fetchFlowBodies(flow, scopes = { request: true, response: true }) {
   const fetchRequest = scopes.request !== false;
   const fetchResponse = scopes.response !== false;
+  if (fetchRequest && !flow._reqBodyFetched) {
+    hydrateFlowBodyFromSession(flow, "request");
+  }
+  if (fetchResponse && !flow._resBodyFetched) {
+    hydrateFlowBodyFromSession(flow, "response");
+  }
   if ((!fetchRequest || flow._reqBodyFetched) && (!fetchResponse || flow._resBodyFetched)) {
     return { requestOk: true, responseOk: true };
   }
@@ -2306,13 +2558,7 @@ async function fetchFlowBodies(flow, scopes = { request: true, response: true })
     try {
       const buf = await mitmwebGet(`/flows/${flow.id}/request/content.data`);
       const ct = flow.req_headers?.["content-type"] || "";
-      if (isBinaryContentType(ct) || isLikelyBinaryBuffer(buf)) {
-        flow.req_body_base64 = buf.toString("base64");
-        flow.req_body = "";
-      } else {
-        flow.req_body = buf.toString("utf-8");
-      }
-      flow._reqBodyFetched = true;
+      applyFetchedBody(flow, "request", buf, ct);
     } catch (_) {
       flow.req_body = "";
       flow.req_body_base64 = "";
@@ -2323,13 +2569,7 @@ async function fetchFlowBodies(flow, scopes = { request: true, response: true })
     try {
       const buf = await mitmwebGet(`/flows/${flow.id}/response/content.data`);
       const ct = (flow.content_type || "").toLowerCase();
-      if (isBinaryContentType(ct) || isLikelyBinaryBuffer(buf)) {
-        flow.res_body_base64 = buf.toString("base64");
-        flow.res_body = "";
-      } else {
-        flow.res_body = buf.toString("utf-8");
-      }
-      flow._resBodyFetched = true;
+      applyFetchedBody(flow, "response", buf, ct);
     } catch (_) {
       flow.res_body = "";
       responseOk = false;
@@ -2480,46 +2720,49 @@ async function exportJson() {
 }
 
 async function saveSession() {
-  if (capturedFlows.length === 0) {
-    vscode.window.showWarningMessage(t("extension.session.noFlows"));
+  if (!activeSession) {
+    const sessionName = await vscode.window.showInputBox({
+      prompt: t("extension.session.namePrompt"),
+      value: "SecMP Capture",
+    });
+    if (!sessionName) return;
+    const result = await vscode.window.showSaveDialog({
+      filters: { "SecMP Session": ["secmp"] },
+      defaultUri: vscode.Uri.file(`${sessionName}.secmp`),
+    });
+    if (!result) return;
+    activeSession = CaptureSession.createNamed(result.fsPath, sessionName, extensionPackage.version);
+    flushActiveSession();
+    vscode.window.showInformationMessage(t("extension.session.saved", { path: result.fsPath }));
     return;
   }
-
-  const result = await vscode.window.showSaveDialog({
-    filters: { "JSON Files": ["json"] },
-    defaultUri: vscode.Uri.file("session.json"),
-  });
-
-  if (!result) return;
-
-  const session = {
-    savedAt: new Date().toISOString(),
-    flowCount: capturedFlows.length,
-    flows: capturedFlows,
-  };
-
-  fs.writeFileSync(result.fsPath, JSON.stringify(session, null, 2));
-  vscode.window.showInformationMessage(t("extension.session.saved", { path: result.fsPath }));
+  if (activeSession.temporary) {
+    await saveActiveSessionAs();
+    return;
+  }
+  flushActiveSession();
+  vscode.window.showInformationMessage(t("extension.session.saved", { path: activeSession.filePath }));
 }
 
 async function loadSession() {
   const [fileUri] = await vscode.window.showOpenDialog({
-    filters: { "JSON Files": ["json"] },
+    filters: { "SecMP Session": ["secmp"] },
     canSelectMany: false,
   });
 
   if (!fileUri) return;
 
   try {
-    const data = JSON.parse(fs.readFileSync(fileUri.fsPath, "utf-8"));
-    if (data.flows) {
-      setCapturedFlows(data.flows);
-    } else if (Array.isArray(data)) {
-      setCapturedFlows(data);
-    } else {
-      vscode.window.showErrorMessage(t("extension.session.invalid"));
+    if (proxyProcess) {
+      vscode.window.showWarningMessage(t("extension.session.stopBeforeLoad"));
       return;
     }
+    if (activeSession) {
+      closeActiveSession();
+    }
+    activeSession = CaptureSession.open(fileUri.fsPath);
+    const loadedFlows = activeSession.getFlows({ includeBodies: false });
+    setCapturedFlows(loadedFlows);
 
     // Track loaded flow IDs
     knownFlowIds.clear();
@@ -2536,7 +2779,7 @@ async function loadSession() {
 
     vscode.window.showInformationMessage(t("extension.session.loaded", { count: capturedFlows.length }));
   } catch (e) {
-    vscode.window.showErrorMessage(t("extension.session.parseFailed"));
+    vscode.window.showErrorMessage(t("extension.session.parseFailed", { message: e.message }));
   }
 }
 
@@ -2582,6 +2825,7 @@ function activate(context) {
   outputChannel = vscode.window.createOutputChannel("SecMP");
   log("SecMP extension activated");
   initializeRuntimeStorage(context);
+  checkInterruptedSession();
   checkForExtensionUpdate(context, { manual: false });
   const sidebarProvider = new SecmpSidebarProvider();
   const sidebarView = vscode.window.createTreeView("secmp.sidebar", {
@@ -2722,6 +2966,8 @@ function activate(context) {
 
 function deactivate() {
   stopFlowPolling();
+  flushActiveSession();
+  writeResumeMarker({ shutdownAt: new Date().toISOString(), proxyRunning: !!proxyProcess });
   if (proxyProcess) {
     try {
       if (process.platform === "win32") {

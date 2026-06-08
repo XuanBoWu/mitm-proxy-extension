@@ -4,6 +4,14 @@ All notable changes to SecMP are documented in this file.
 
 ## Unreleased
 
+## 0.2.0 - 2026-06-08
+
+- Added the first session-oriented capture data layer with append-only `.secmp` single-file sessions, record hash chaining, body records, index snapshots, and tamper/corruption verification.
+- Created temporary capture sessions automatically under VS Code global storage and changed session save/load to use `.secmp` files instead of editable JSON session files.
+- Persisted captured metadata and fetched bodies into the active session while keeping JSON/HAR as export formats.
+- Added interrupted-session resume markers and panel-close protection so active captures flush the session and prompt users to save, stop, or reopen the panel.
+- Added a standalone `.secmp` container test covering save/load, body recovery, search, and tamper detection.
+
 ## 0.1.14 - 2026-06-08
 
 - Fixed content filtering so slow or failed mitmweb body requests time out, count as failed, and do not leave the filter progress stuck.

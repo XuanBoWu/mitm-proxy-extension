@@ -3,7 +3,7 @@
   "displayName": "SecMP",
   "icon": "media/icon.png",
   "description": "%secmp.description%",
-  "version": "0.1.14",
+  "version": "0.2.0",
   "publisher": "xbowu",
   "license": "MIT",
   "repository": {
@@ -33,6 +33,7 @@
     "runtime:macos": "bash scripts/build-macos-runtime.sh",
     "runtime:windows": "powershell -ExecutionPolicy Bypass -File scripts/build-windows-runtime.ps1",
     "runtime:windows:test-install": "node scripts/test-extension-runtime-install.js",
+    "test:session": "node scripts/test-secmp-session.js",
     "l10n:check": "node scripts/check-l10n.js"
   },
   "activationEvents": [
