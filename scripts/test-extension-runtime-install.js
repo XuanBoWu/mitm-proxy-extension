@@ -62,7 +62,36 @@ async function main() {
   const logs = [];
 
   const vscodeMock = {
+    EventEmitter: class {
+      constructor() {
+        this.listeners = new Set();
+        this.event = (listener) => {
+          this.listeners.add(listener);
+          return { dispose: () => this.listeners.delete(listener) };
+        };
+      }
+      fire(value) {
+        for (const listener of this.listeners) {
+          listener(value);
+        }
+      }
+      dispose() {
+        this.listeners.clear();
+      }
+    },
     ProgressLocation: { Notification: 15 },
+    TreeItemCollapsibleState: { None: 0 },
+    ThemeIcon: class {
+      constructor(id) {
+        this.id = id;
+      }
+    },
+    TreeItem: class {
+      constructor(label, collapsibleState) {
+        this.label = label;
+        this.collapsibleState = collapsibleState;
+      }
+    },
     Uri: {
       file: (filePath) => ({ fsPath: filePath }),
       joinPath: (...parts) => ({ fsPath: path.join(...parts.map((part) => part.fsPath || String(part))) }),
@@ -105,6 +134,7 @@ async function main() {
         appendLine: (line) => logs.push(line),
         dispose() {},
       }),
+      createTreeView: () => ({ dispose() {} }),
       showOpenDialog: async () => {
         throw new Error("showOpenDialog should not be called when runtimeArchivePath is configured.");
       },
