@@ -188,14 +188,14 @@ window.addEventListener("message", (event) => {
       for (const f of msg.flows || []) {
         f._seq = nextSeq++;
       }
-      flows = [...(msg.flows || [])].reverse().concat(flows);
+      flows = flows.concat(msg.flows || []);
       rebuildFlowIndex();
       handleFlowsChanged();
       scheduleFlowListRender();
       break;
     case "addFlow": // kept for backwards compat, not used by current extension.js
       msg.flow._seq = nextSeq++;
-      flows.unshift(msg.flow);
+      flows.push(msg.flow);
       rebuildFlowIndex();
       handleFlowsChanged();
       scheduleFlowListRender();
@@ -267,10 +267,11 @@ window.addEventListener("message", (event) => {
       flows = msg.flows;
       flows.forEach((f, i) => { if (f._seq == null) f._seq = i + 1; });
       rebuildFlowIndex();
-      nextSeq = flows.length + 1;
+      nextSeq = flows.reduce((max, flow) => Math.max(max, Number(flow._seq) || 0), 0) + 1;
+      if (msg.uiState) applySessionUiState(msg.uiState);
       clearFlowSelection();
-      userResizedCols.clear();
       resetFilterContentState();
+      ensureFilterContentIfNeeded({ blocking: needsFilterContent(), force: true });
       renderFlowList();
       renderEmptyDetail();
       footerStatus.textContent = t("webview.flow.loaded", { count: msg.flows.length });
@@ -649,9 +650,9 @@ function updateLineNumbers(editor) {
   const text = getEditorText(editor);
   const lines = text.split("\n");
   const section = editor.closest(".message-editor");
-  const wrapping = section ? !section.classList.contains("no-wrap") : true;
   const style = window.getComputedStyle(editor);
   const lineHeight = parseFloat(style.lineHeight) || (parseFloat(style.fontSize) * 1.45) || 16;
+  const wrapping = section ? !section.classList.contains("no-wrap") : true;
   const textIndex = buildTextNodeIndex(editor);
   const gutterLines = [];
   const separatorIndex = lines.findIndex((line, index) => index > 0 && line === "");
@@ -1335,6 +1336,7 @@ function handleSort(colId) {
   }
   rebuildTableHeader();
   renderFlowList();
+  sendSessionUiState();
 }
 
 function sortFlows(arr) {
@@ -1679,6 +1681,7 @@ document.addEventListener("mouseup", () => {
     document.body.style.userSelect = "";
     userResizedCols.add(resizing.colId);
     saveColumnWidths();
+    sendSessionUiState();
     resizing = null;
   }
   if (panelResizing) {
@@ -1761,6 +1764,7 @@ function reorderColumns(srcId, targetId) {
   rebuildTableHeader();
   buildColgroup();
   renderFlowList();
+  sendSessionUiState();
 }
 
 function rebuildTableHeader() {
@@ -2351,7 +2355,6 @@ document.addEventListener("click", (e) => {
   applyDetailView(target, view);
 
   cacheSearchTexts();
-  if (_searchTerm) performSearch(_searchTerm);
 });
 
 document.addEventListener("click", (e) => {
@@ -2742,6 +2745,73 @@ function cloneFilterConfig(config) {
   };
 }
 
+function serializeFilterConfig(config) {
+  return {
+    scopes: Array.from(config.scopes || []),
+    status: Array.from(config.status || []),
+    method: Array.from(config.method || []),
+    type: Array.from(config.type || []),
+    protocol: Array.from(config.protocol || []),
+  };
+}
+
+function filterConfigFromState(state) {
+  const next = createFilterConfig();
+  if (!state || typeof state !== "object") return next;
+  for (const key of ["scopes", "status", "method", "type", "protocol"]) {
+    next[key] = new Set(Array.isArray(state[key]) ? state[key] : []);
+  }
+  if (next.scopes.size === 0) next.scopes.add("url");
+  return next;
+}
+
+function getSessionUiState() {
+  return {
+    filterText,
+    filter: serializeFilterConfig(filterState),
+    sort: { ...sortState },
+    colOrder: [...colOrder],
+    colWidths: { ...colWidths },
+  };
+}
+
+function applySessionUiState(state) {
+  if (!state || typeof state !== "object") return;
+  filterText = String(state.filterText || "");
+  filterTextDraft = filterText;
+  filterState = filterConfigFromState(state.filter);
+  filterDraftState = cloneFilterConfig(filterState);
+  if ($("filterInput")) $("filterInput").value = filterTextDraft;
+
+  if (state.sort && typeof state.sort === "object") {
+    sortState = {
+      colId: state.sort.colId || null,
+      direction: state.sort.direction || null,
+    };
+  }
+  if (Array.isArray(state.colOrder)) {
+    const ids = COLUMNS.map((col) => col.id);
+    if (ids.every((id) => state.colOrder.includes(id)) && state.colOrder.length === ids.length) {
+      colOrder = [...state.colOrder];
+      saveColumnOrder(colOrder);
+    }
+  }
+  if (state.colWidths && typeof state.colWidths === "object") {
+    colWidths = { ...colWidths, ...state.colWidths };
+    saveColumnWidths();
+  }
+  rebuildTableHeader();
+  buildColgroup();
+  updateFilterUi();
+}
+
+function sendSessionUiState() {
+  vscode.postMessage({
+    command: "sessionUiStateChanged",
+    state: getSessionUiState(),
+  });
+}
+
 function setsEqual(a, b) {
   if (a.size !== b.size) return false;
   for (const value of a) {
@@ -2771,6 +2841,7 @@ function applyFilters() {
   ensureFilterContentIfNeeded({ blocking: needsFilterContent(), force: true });
   updateFilterUi();
   renderFlowList();
+  sendSessionUiState();
 }
 
 function discardDraftFilterChanges() {
@@ -2801,6 +2872,7 @@ function clearAllFilters() {
   resetFilterContentState();
   updateFilterUi();
   renderFlowList();
+  sendSessionUiState();
 }
 
 // Filter

@@ -3,7 +3,7 @@
   "displayName": "SecMP",
   "icon": "media/icon.png",
   "description": "%secmp.description%",
-  "version": "0.2.0",
+  "version": "0.2.10",
   "publisher": "xbowu",
   "license": "MIT",
   "repository": {
@@ -84,6 +84,11 @@
             "%secmp.config.language.enUS%"
           ],
           "description": "%secmp.config.language%"
+        },
+        "secmp.openPanelAfterNewSession": {
+          "type": "boolean",
+          "default": true,
+          "description": "%secmp.config.openPanelAfterNewSession%"
         },
         "secmp.windowsRuntimePath": {
           "type": "string",

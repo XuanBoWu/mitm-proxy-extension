@@ -9,6 +9,7 @@
   "secmp.config.language.auto": "Follow VS Code",
   "secmp.config.language.zhCN": "Simplified Chinese",
   "secmp.config.language.enUS": "English",
+  "secmp.config.openPanelAfterNewSession": "Automatically open the capture panel after creating a temporary or persistent SecMP session.",
   "secmp.config.windowsRuntimePath": "Deprecated compatibility setting. Use secmp.runtimePath instead.",
   "secmp.config.windowsRuntimeArchivePath": "Deprecated compatibility setting. Use secmp.runtimeArchivePath instead.",
   "secmp.config.windowsRuntimeUrl": "Deprecated compatibility setting. Use secmp.runtimeUrl instead.",
@@ -27,5 +28,5 @@
   "secmp.command.exportJson": "SecMP: Export as JSON",
   "secmp.command.showPanel": "SecMP: Show Capture Panel",
   "secmp.viewsContainer.title": "SecMP",
-  "secmp.view.sidebar.name": "Quick Actions"
+  "secmp.view.sidebar.name": "Sessions"
 }

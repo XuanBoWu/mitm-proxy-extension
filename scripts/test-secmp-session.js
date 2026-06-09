@@ -30,6 +30,13 @@ function main() {
   session.appendBody("flow-1", "response", Buffer.from("{\"ok\":true}", "utf8"), {
     contentType: "application/json",
   });
+  session.setUiState({
+    filterText: "needle",
+    sort: { colId: "num", direction: "desc" },
+    filter: { scopes: ["url", "reqBody"], status: ["2xx"], method: [], type: [], protocol: [] },
+    colOrder: ["num"],
+    colWidths: { num: 44 },
+  });
   session.flush();
   session.file.close();
 
@@ -39,6 +46,8 @@ function main() {
   assert.strictEqual(flows[0].req_body, "{\"secret\":\"needle\"}");
   assert.strictEqual(flows[0].res_body, "{\"ok\":true}");
   assert.strictEqual(loaded.searchBody("flow-1", "request", "needle"), true);
+  assert.strictEqual(loaded.getUiState().filterText, "needle");
+  assert.strictEqual(loaded.getUiState().sort.direction, "desc");
   const promotedPath = path.join(root, "promoted.secmp");
   loaded.saveAs(promotedPath, "Promoted");
   loaded.putFlow({

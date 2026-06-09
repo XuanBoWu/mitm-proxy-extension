@@ -9,6 +9,7 @@
   "secmp.config.language.auto": "跟随 VS Code",
   "secmp.config.language.zhCN": "简体中文",
   "secmp.config.language.enUS": "英文",
+  "secmp.config.openPanelAfterNewSession": "新建临时或持久 SecMP 会话后自动打开抓包面板。",
   "secmp.config.windowsRuntimePath": "已废弃的兼容设置。请改用 secmp.runtimePath。",
   "secmp.config.windowsRuntimeArchivePath": "已废弃的兼容设置。请改用 secmp.runtimeArchivePath。",
   "secmp.config.windowsRuntimeUrl": "已废弃的兼容设置。请改用 secmp.runtimeUrl。",
@@ -27,5 +28,5 @@
   "secmp.command.exportJson": "SecMP: 导出 JSON",
   "secmp.command.showPanel": "SecMP: 显示抓包面板",
   "secmp.viewsContainer.title": "SecMP",
-  "secmp.view.sidebar.name": "快捷操作"
+  "secmp.view.sidebar.name": "会话"
 }

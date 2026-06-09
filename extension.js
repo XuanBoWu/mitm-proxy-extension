@@ -24,6 +24,7 @@ let ignoredFlowIdsAfterClear = new Set();
 let extensionContext = null;
 let activeSession = null;
 let allowPanelDispose = false;
+let sidebarProvider = null;
 
 const TOOLS_DIR = path.join(__dirname, "tools");
 const DEFAULT_RUNTIME_VERSION = "0.1.2";
@@ -34,6 +35,7 @@ const WINDOWS_RUNTIME_API_VERSION = 1;
 const WINDOWS_RUNTIME_RETAIN_PREVIOUS_COUNT = 1;
 const DEFAULT_UPDATE_CHECK_INTERVAL_HOURS = 24;
 const UPDATE_LAST_CHECK_KEY = "secmp.lastUpdateCheckAt";
+const RECENT_SESSIONS_KEY = "secmp.recentSessions";
 const extensionPackage = loadExtensionPackage();
 const SUPPORTED_RUNTIME_PLATFORMS = new Set(["win32", "darwin"]);
 const SUPPORTED_LOCALES = new Set(["zh-CN", "en-US"]);
@@ -75,6 +77,11 @@ function getConfiguredLocale() {
     return language;
   }
   return normalizeLocale(vscode.env?.language);
+}
+
+function shouldOpenPanelAfterNewSession() {
+  const config = vscode.workspace.getConfiguration("secmp");
+  return config.get("openPanelAfterNewSession", true) !== false;
 }
 
 function loadL10nBundle(locale) {
@@ -1379,6 +1386,7 @@ function ensureActiveSession() {
   activeSession = session;
   writeResumeMarker({ running: !!proxyProcess });
   log(`Created temporary SecMP session: ${session.filePath}`);
+  refreshSidebar();
   return session;
 }
 
@@ -1401,6 +1409,13 @@ function closeActiveSession() {
   }
   activeSession = null;
   clearResumeMarker();
+  refreshSidebar();
+}
+
+function refreshSidebar() {
+  try {
+    sidebarProvider?.refresh();
+  } catch (_) {}
 }
 
 function writeResumeMarker(extra = {}) {
@@ -1430,6 +1445,32 @@ function clearResumeMarker() {
   } catch (_) {}
 }
 
+function getRecentSessions() {
+  const items = extensionContext?.globalState?.get(RECENT_SESSIONS_KEY, []) || [];
+  return Array.isArray(items)
+    ? items.filter((item) => item?.filePath && fs.existsSync(item.filePath)).slice(0, 12)
+    : [];
+}
+
+function rememberSession(session) {
+  if (!session || session.temporary || !extensionContext?.globalState) return;
+  const current = getRecentSessions().filter((item) => item.filePath !== session.filePath);
+  current.unshift({
+    sessionName: session.sessionName || path.basename(session.filePath, ".secmp"),
+    filePath: session.filePath,
+    lastOpenedAt: new Date().toISOString(),
+  });
+  extensionContext.globalState.update(RECENT_SESSIONS_KEY, current.slice(0, 12));
+}
+
+async function ensureCanSwitchSession() {
+  if (proxyProcess) {
+    vscode.window.showWarningMessage(t("extension.session.stopBeforeLoad"));
+    return false;
+  }
+  return true;
+}
+
 async function checkInterruptedSession() {
   const markerPath = getResumeMarkerPath();
   if (!fs.existsSync(markerPath)) return;
@@ -1456,9 +1497,10 @@ async function checkInterruptedSession() {
   if (choice === restore) {
     try {
       activeSession = CaptureSession.open(marker.filePath);
-      setCapturedFlows(activeSession.getFlows({ includeBodies: false }));
+      setCapturedFlows(markSessionLoadedFlows(activeSession.getFlows({ includeBodies: false })));
       knownFlowIds.clear();
       for (const flow of capturedFlows) knownFlowIds.add(flow.id);
+      refreshSidebar();
       vscode.window.showInformationMessage(t("extension.session.loaded", { count: capturedFlows.length }));
     } catch (err) {
       vscode.window.showErrorMessage(t("extension.session.parseFailed", { message: err.message }));
@@ -1483,6 +1525,8 @@ async function saveActiveSessionAs() {
   if (!result) return null;
   activeSession.saveAs(result.fsPath, path.basename(result.fsPath, ".secmp"));
   writeResumeMarker({ running: !!proxyProcess });
+  rememberSession(activeSession);
+  refreshSidebar();
   vscode.window.showInformationMessage(t("extension.session.saved", { path: result.fsPath }));
   return result.fsPath;
 }
@@ -1494,6 +1538,25 @@ function recordSessionFlows(flows) {
   }
   if (activeSession.dirtyBytes >= 2 * 1024 * 1024) {
     flushActiveSession();
+  }
+}
+
+function markSessionLoadedFlows(flows) {
+  return (flows || []).map((flow) => ({
+    ...flow,
+    _fromSession: true,
+  }));
+}
+
+function saveSessionUiState(state) {
+  if (!activeSession) return;
+  try {
+    activeSession.setUiState(state || {});
+    if (activeSession.dirtyBytes >= 2 * 1024 * 1024) {
+      flushActiveSession();
+    }
+  } catch (err) {
+    log(`Failed to save session UI state: ${err.message}`);
   }
 }
 
@@ -2003,13 +2066,14 @@ function getWebviewContent(webview) {
 async function createPanel() {
   const context = extensionContext;
   if (panel) {
+    panel.title = getCapturePanelTitle();
     panel.reveal(vscode.ViewColumn.One);
     return;
   }
 
   panel = vscode.window.createWebviewPanel(
     "secmpPanel",
-    "SecMP",
+    getCapturePanelTitle(),
     vscode.ViewColumn.One,
     {
       enableScripts: true,
@@ -2035,7 +2099,8 @@ async function createPanel() {
         if (capturedFlows.length > 0) {
           panel.webview.postMessage({
             command: "sessionLoaded",
-            flows: activeSession ? activeSession.getFlows({ includeBodies: false }) : capturedFlows,
+            flows: capturedFlows,
+            uiState: activeSession?.getUiState?.() || null,
           });
         }
         await postEnvironmentStatus(context);
@@ -2285,6 +2350,10 @@ async function createPanel() {
         await prepareFilterContent(message.requestId, message.scopes || {});
         break;
 
+      case "sessionUiStateChanged":
+        saveSessionUiState(message.state || {});
+        break;
+
       case "clearFlows": {
         const clearAction = t("extension.clear.confirmAction");
         const choice = await vscode.window.showWarningMessage(
@@ -2376,7 +2445,7 @@ async function createPanel() {
 
   panel.onDidDispose(() => {
     panel = null;
-    if (!allowPanelDispose && proxyProcess) {
+    if (!allowPanelDispose && activeSession) {
       handlePanelClosedDuringCapture();
     }
   });
@@ -2545,6 +2614,12 @@ async function fetchFlowBodies(flow, scopes = { request: true, response: true })
   }
   if ((!fetchRequest || flow._reqBodyFetched) && (!fetchResponse || flow._resBodyFetched)) {
     return { requestOk: true, responseOk: true };
+  }
+  if (flow._fromSession) {
+    return {
+      requestOk: !fetchRequest || !!flow._reqBodyFetched || !flow.req_size,
+      responseOk: !fetchResponse || !!flow._resBodyFetched || !flow.res_size,
+    };
   }
   if (!webPort || !authToken) {
     return {
@@ -2733,6 +2808,8 @@ async function saveSession() {
     if (!result) return;
     activeSession = CaptureSession.createNamed(result.fsPath, sessionName, extensionPackage.version);
     flushActiveSession();
+    rememberSession(activeSession);
+    refreshSidebar();
     vscode.window.showInformationMessage(t("extension.session.saved", { path: result.fsPath }));
     return;
   }
@@ -2744,6 +2821,47 @@ async function saveSession() {
   vscode.window.showInformationMessage(t("extension.session.saved", { path: activeSession.filePath }));
 }
 
+async function newTemporarySession() {
+  if (!(await ensureCanSwitchSession())) return;
+  if (activeSession) closeActiveSession();
+  activeSession = CaptureSession.createTemporary(getSessionCacheDir(), extensionPackage.version);
+  writeResumeMarker({ running: false });
+  resetCapturedFlows();
+  knownFlowIds.clear();
+  refreshSidebar();
+  vscode.window.showInformationMessage(t("extension.session.tempCreated"));
+  if (shouldOpenPanelAfterNewSession()) {
+    await createPanel();
+    await vscode.commands.executeCommand("workbench.action.closeSidebar");
+  }
+}
+
+async function newPersistentSession() {
+  if (!(await ensureCanSwitchSession())) return;
+  const sessionName = await vscode.window.showInputBox({
+    prompt: t("extension.session.namePrompt"),
+    value: "SecMP Capture",
+  });
+  if (!sessionName) return;
+  const result = await vscode.window.showSaveDialog({
+    filters: { "SecMP Session": ["secmp"] },
+    defaultUri: vscode.Uri.file(`${sessionName}.secmp`),
+  });
+  if (!result) return;
+  if (activeSession) closeActiveSession();
+  activeSession = CaptureSession.createNamed(result.fsPath, sessionName, extensionPackage.version);
+  flushActiveSession();
+  rememberSession(activeSession);
+  resetCapturedFlows();
+  knownFlowIds.clear();
+  refreshSidebar();
+  vscode.window.showInformationMessage(t("extension.session.saved", { path: result.fsPath }));
+  if (shouldOpenPanelAfterNewSession()) {
+    await createPanel();
+    await vscode.commands.executeCommand("workbench.action.closeSidebar");
+  }
+}
+
 async function loadSession() {
   const [fileUri] = await vscode.window.showOpenDialog({
     filters: { "SecMP Session": ["secmp"] },
@@ -2753,46 +2871,53 @@ async function loadSession() {
   if (!fileUri) return;
 
   try {
-    if (proxyProcess) {
-      vscode.window.showWarningMessage(t("extension.session.stopBeforeLoad"));
-      return;
-    }
-    if (activeSession) {
-      closeActiveSession();
-    }
-    activeSession = CaptureSession.open(fileUri.fsPath);
-    const loadedFlows = activeSession.getFlows({ includeBodies: false });
-    setCapturedFlows(loadedFlows);
-
-    // Track loaded flow IDs
-    knownFlowIds.clear();
-    for (const f of capturedFlows) {
-      knownFlowIds.add(f.id);
-    }
-
-    if (panel) {
-      panel.webview.postMessage({
-        command: "sessionLoaded",
-        flows: capturedFlows,
-      });
-    }
-
-    vscode.window.showInformationMessage(t("extension.session.loaded", { count: capturedFlows.length }));
+    await openSessionFile(fileUri.fsPath);
   } catch (e) {
     vscode.window.showErrorMessage(t("extension.session.parseFailed", { message: e.message }));
   }
 }
 
-// ===== Extension Activation =====
+async function openSessionFile(filePath) {
+  if (!(await ensureCanSwitchSession())) return;
+  if (activeSession) closeActiveSession();
+  activeSession = CaptureSession.open(filePath);
+  rememberSession(activeSession);
+  const loadedFlows = markSessionLoadedFlows(activeSession.getFlows({ includeBodies: false }));
+  setCapturedFlows(loadedFlows);
 
-const SIDEBAR_ACTIONS = [
-  { labelKey: "extension.sidebar.openPanel", command: "secmp.showPanel", icon: "window" },
-  { labelKey: "extension.sidebar.startProxy", command: "secmp.startProxy", icon: "play" },
-  { labelKey: "extension.sidebar.stopProxy", command: "secmp.stopProxy", icon: "debug-stop" },
-  { labelKey: "extension.sidebar.setupProxy", command: "secmp.setupProxy", icon: "plug" },
-  { labelKey: "extension.sidebar.clearProxy", command: "secmp.clearProxy", icon: "circle-slash" },
-  { labelKey: "extension.sidebar.pushCert", command: "secmp.pushCert", icon: "shield" },
-];
+  knownFlowIds.clear();
+  for (const f of capturedFlows) {
+    knownFlowIds.add(f.id);
+  }
+
+  if (panel) {
+    panel.webview.postMessage({
+      command: "sessionLoaded",
+      flows: capturedFlows,
+      uiState: activeSession.getUiState(),
+    });
+  }
+  refreshSidebar();
+  vscode.window.showInformationMessage(t("extension.session.loaded", { count: capturedFlows.length }));
+  await createPanel();
+  await vscode.commands.executeCommand("workbench.action.closeSidebar");
+}
+
+async function openCapturePanelForSession() {
+  if (!activeSession) {
+    vscode.window.showWarningMessage(t("extension.session.createBeforePanel"));
+    return;
+  }
+  await createPanel();
+  await vscode.commands.executeCommand("workbench.action.closeSidebar");
+}
+
+function getCapturePanelTitle() {
+  const name = activeSession?.sessionName || "SecMP";
+  return `SecMP - ${name}`;
+}
+
+// ===== Extension Activation =====
 
 class SecmpSidebarProvider {
   constructor() {
@@ -2808,15 +2933,51 @@ class SecmpSidebarProvider {
     return item;
   }
 
-  getChildren() {
-    return SIDEBAR_ACTIONS.map(({ labelKey, command, icon }) => {
-      const label = t(labelKey);
-      const item = new vscode.TreeItem(label, vscode.TreeItemCollapsibleState.None);
-      item.command = { command, title: label };
-      item.iconPath = new vscode.ThemeIcon(icon);
-      item.tooltip = label;
-      return item;
-    });
+  getChildren(element) {
+    if (!element) {
+      const items = [];
+      const actions = new vscode.TreeItem(t("extension.sidebar.sessionActions"), vscode.TreeItemCollapsibleState.Expanded);
+      actions.iconPath = new vscode.ThemeIcon("new-folder");
+      actions._children = [
+        this.commandItem("extension.sidebar.newTempSession", "secmp.newTemporarySession", "clock"),
+        this.commandItem("extension.sidebar.newPersistentSession", "secmp.newPersistentSession", "database"),
+        this.commandItem("extension.sidebar.openSession", "secmp.openSession", "folder-opened"),
+      ];
+      items.push(actions);
+
+      const history = new vscode.TreeItem(t("extension.sidebar.history"), vscode.TreeItemCollapsibleState.Expanded);
+      history.iconPath = new vscode.ThemeIcon("history");
+      const recent = getRecentSessions();
+      history._children = recent.length > 0
+        ? recent.map((entry) => this.recentSessionItem(entry))
+        : [new vscode.TreeItem(t("extension.sidebar.historyEmpty"), vscode.TreeItemCollapsibleState.None)];
+      items.push(history);
+      return items;
+    }
+    return element._children || [];
+  }
+
+  commandItem(labelKey, command, icon) {
+    const label = t(labelKey);
+    const item = new vscode.TreeItem(label, vscode.TreeItemCollapsibleState.None);
+    item.command = { command, title: label };
+    item.iconPath = new vscode.ThemeIcon(icon);
+    item.tooltip = label;
+    return item;
+  }
+
+  recentSessionItem(entry) {
+    const label = entry.sessionName || path.basename(entry.filePath, ".secmp");
+    const item = new vscode.TreeItem(label, vscode.TreeItemCollapsibleState.None);
+    item.description = path.dirname(entry.filePath);
+    item.tooltip = entry.filePath;
+    item.iconPath = new vscode.ThemeIcon("file");
+    item.command = {
+      command: "secmp.openRecentSession",
+      title: label,
+      arguments: [entry.filePath],
+    };
+    return item;
   }
 }
 
@@ -2827,14 +2988,40 @@ function activate(context) {
   initializeRuntimeStorage(context);
   checkInterruptedSession();
   checkForExtensionUpdate(context, { manual: false });
-  const sidebarProvider = new SecmpSidebarProvider();
+  sidebarProvider = new SecmpSidebarProvider();
   const sidebarView = vscode.window.createTreeView("secmp.sidebar", {
     treeDataProvider: sidebarProvider,
     showCollapseAll: false,
   });
 
   const showPanelCmd = vscode.commands.registerCommand("secmp.showPanel", () => {
-    createPanel();
+    openCapturePanelForSession();
+  });
+
+  const openCapturePanelCmd = vscode.commands.registerCommand("secmp.openCapturePanel", () => {
+    openCapturePanelForSession();
+  });
+
+  const newTemporarySessionCmd = vscode.commands.registerCommand("secmp.newTemporarySession", () => {
+    newTemporarySession();
+  });
+
+  const newPersistentSessionCmd = vscode.commands.registerCommand("secmp.newPersistentSession", () => {
+    newPersistentSession();
+  });
+
+  const openSessionCmd = vscode.commands.registerCommand("secmp.openSession", () => {
+    loadSession();
+  });
+
+  const openRecentSessionCmd = vscode.commands.registerCommand("secmp.openRecentSession", async (filePath) => {
+    if (filePath) {
+      try {
+        await openSessionFile(filePath);
+      } catch (err) {
+        vscode.window.showErrorMessage(t("extension.session.parseFailed", { message: err.message }));
+      }
+    }
   });
 
   const startProxyCmd = vscode.commands.registerCommand("secmp.startProxy", async () => {
@@ -2955,6 +3142,7 @@ function activate(context) {
 
   context.subscriptions.push(
     showPanelCmd, startProxyCmd, stopProxyCmd, pushCertCmd,
+    openCapturePanelCmd, newTemporarySessionCmd, newPersistentSessionCmd, openSessionCmd, openRecentSessionCmd,
     setupProxyCmd, clearProxyCmd, cleanRuntimeCacheCmd, checkForUpdatesCmd, exportHarCmd, exportJsonCmd,
     languageConfigListener,
     sidebarView,

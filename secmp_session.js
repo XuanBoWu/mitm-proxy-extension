@@ -225,6 +225,7 @@ class CaptureSession {
     this.flowById = new Map();
     this.flowOrder = [];
     this.bodyByKey = new Map();
+    this.uiState = null;
     this.dirtyBytes = 0;
     this.resumeMarkerPath = options.resumeMarkerPath || null;
   }
@@ -293,6 +294,8 @@ class CaptureSession {
     } else if (type === "sessionSavedAs") {
       this.sessionName = meta.sessionName || this.sessionName;
       this.temporary = !!meta.temporary;
+    } else if (type === "uiState") {
+      this.uiState = meta.state || null;
     }
   }
 
@@ -380,6 +383,16 @@ class CaptureSession {
     const body = this.bodyByKey.get(keyFor(flowId, side));
     if (!body || body.contentKind === "binary" || !term) return false;
     return this.getBodyText(flowId, side).toLowerCase().includes(String(term).toLowerCase());
+  }
+
+  setUiState(state) {
+    this.uiState = state || null;
+    this.file.appendRecord("uiState", { state: this.uiState });
+    this.dirtyBytes += JSON.stringify(this.uiState || {}).length;
+  }
+
+  getUiState() {
+    return this.uiState || null;
   }
 
   flush() {
