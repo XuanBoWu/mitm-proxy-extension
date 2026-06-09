@@ -3156,6 +3156,11 @@ function deactivate() {
   stopFlowPolling();
   flushActiveSession();
   writeResumeMarker({ shutdownAt: new Date().toISOString(), proxyRunning: !!proxyProcess });
+  try {
+    activeSession?.file?.close();
+  } catch (err) {
+    log(`Failed to close SecMP session file during deactivate: ${err.message}`);
+  }
   if (proxyProcess) {
     try {
       if (process.platform === "win32") {

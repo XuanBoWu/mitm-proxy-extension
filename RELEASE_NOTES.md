@@ -1,4 +1,4 @@
-# SecMP 0.2.10
+# SecMP 0.2.11
 
 Session-focused release for capture persistence, project-style workflow, and safer close/recovery behavior.
 
@@ -13,6 +13,7 @@ Session-focused release for capture persistence, project-style workflow, and saf
 - Kept reopened session capture order stable when continuing to capture into an existing `.secmp` session.
 - Fixed reopened historical flows so selecting saved packets does not wait on stale mitmweb body requests.
 - Reverted the detail body virtual-window performance experiment; request/response details use the direct full-detail rendering and Webview search behavior again.
+- Closed active `.secmp` session file handles during extension deactivation after writing the resume marker, improving shutdown cleanup and release smoke-test stability.
 
 ## Requirements
 
@@ -24,7 +25,7 @@ Session-focused release for capture persistence, project-style workflow, and saf
 
 ## Installation
 
-1. Download `secmp-0.2.10.vsix`.
+1. Download `secmp-0.2.11.vsix`.
 2. In VS Code or VSCodium, run `Extensions: Install from VSIX...`.
 3. Run `SecMP: New Temporary Session`, `SecMP: New Persistent Session`, or open an existing `.secmp` session from the SecMP sidebar.
 4. Start the proxy from the capture panel.
@@ -38,7 +39,7 @@ This release uses runtime `0.1.2`. The VSIX version changed for extension, Webvi
 
 ## Assets
 
-- `secmp-0.2.10.vsix`
+- `secmp-0.2.11.vsix`
 
 Runtime assets remain available from the runtime release that provides `0.1.2`:
 

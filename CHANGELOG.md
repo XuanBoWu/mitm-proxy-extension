@@ -4,6 +4,11 @@ All notable changes to SecMP are documented in this file.
 
 ## Unreleased
 
+## 0.2.11 - 2026-06-09
+
+- Closed the active `.secmp` session file handle during extension deactivation after flushing the resume marker, improving shutdown cleanup and Windows release smoke-test stability.
+- Kept `secmp.runtimeVersion` at `0.1.2` because runtime binaries and the extension-runtime protocol are unchanged.
+
 ## 0.2.10 - 2026-06-09
 
 - Reverted the detail body virtual-window and extension-side detail-search performance experiments, restoring the direct full-detail rendering and in-Webview search behavior.
