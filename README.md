@@ -16,8 +16,9 @@ SecMP is intended for authorized testing of devices and applications you own or 
 - Configure and clear Android device proxy settings through ADB.
 - Inspect request and response headers and bodies in a Burp-style viewer.
 - Filter by URL, headers, bodies, method, status, type, and protocol.
+- Create temporary or persistent `.secmp` capture sessions and reopen recent session files from the SecMP sidebar.
 - Export captures as HAR or JSON.
-- Use the SecMP Activity Bar icon and sidebar quick actions to open the capture panel, control the proxy, configure the device proxy, and push certificates.
+- Use the SecMP Activity Bar icon and sidebar to create/open sessions before entering the capture panel.
 - Run on Windows and macOS with a packaged runtime, without requiring users to install Python or mitmproxy.
 
 ## Requirements
@@ -39,7 +40,7 @@ Linux can still run from source, but the packaged runtime flow currently targets
 1. Download `secmp-<version>.vsix` from the GitHub Release.
 2. In VS Code or VSCodium, run `Extensions: Install from VSIX...`.
 3. Select the downloaded VSIX.
-4. Click the SecMP icon in the Activity Bar and choose "Start Proxy", or run `SecMP: Start Proxy`.
+4. Click the SecMP icon in the Activity Bar and create a temporary session, create a persistent session, or open an existing `.secmp` file.
 5. SecMP downloads the matching runtime from the GitHub Release and caches it in VS Code global storage.
 6. If the OS asks for network access, allow local network/private network access.
 
@@ -52,18 +53,23 @@ For offline installation, download the matching `secmp-runtime-<platform>-<arch>
 ## Quick Start
 
 1. Connect the Android device with USB debugging enabled.
-2. Click the SecMP icon in the Activity Bar and choose "Open Capture Panel", or run `SecMP: Show Capture Panel`.
-3. Click refresh in the device panel and confirm that the device is visible.
-4. Start the proxy, usually on port `8080`.
-5. Push the CA certificate after the proxy has generated it.
-6. Set the device proxy to the host IP and selected proxy port.
-7. Browse or use the target application on the Android device.
-8. Inspect captured flows in SecMP.
+2. Click the SecMP icon in the Activity Bar.
+3. Create a temporary session, create a persistent `.secmp` session, or open an existing session file.
+4. SecMP opens the capture panel automatically by default.
+5. Click refresh in the device panel and confirm that the device is visible.
+6. Start the proxy, usually on port `8080`.
+7. Push the CA certificate after the proxy has generated it.
+8. Set the device proxy to the host IP and selected proxy port.
+9. Browse or use the target application on the Android device.
+10. Inspect captured flows in SecMP.
 
 ## Commands
 
-The SecMP icon in the Activity Bar also provides quick access to common actions.
+The SecMP icon in the Activity Bar provides the session start page and common actions.
 
+- `SecMP: New Temporary Session`
+- `SecMP: New Persistent Session`
+- `SecMP: Open Existing Session`
 - `SecMP: Show Capture Panel`
 - `SecMP: Start Proxy`
 - `SecMP: Stop Proxy`
@@ -83,6 +89,7 @@ Settings are optional for normal manual installation.
 {
   "secmp.runtimeVersion": "0.1.2",
   "secmp.language": "auto",
+  "secmp.openPanelAfterNewSession": true,
   "secmp.updateCheckEnabled": true,
   "secmp.updateCheckIntervalHours": 24
 }

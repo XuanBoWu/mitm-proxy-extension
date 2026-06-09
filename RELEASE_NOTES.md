@@ -1,17 +1,18 @@
-# SecMP 0.1.7
+# SecMP 0.2.10
 
-Patch release for the capture header layout, the Chinese-first i18n foundation, and the release smoke-test flow.
+Session-focused release for capture persistence, project-style workflow, and safer close/recovery behavior.
 
 ## Highlights
 
-- Fixed the capture header count layout so four-digit request counts stay on one line and do not deform the clear/export buttons.
-- Added `secmp.language` with `auto`, `zh-CN`, and `en-US` options for Webview and extension runtime messages.
-- Added Chinese and English runtime language bundles, plus VS Code `package.nls*` metadata for command titles and settings descriptions.
-- Standardized the product language rules: Chinese-first UI, with professional terms such as `Request`, `Response`, `HTTP`, `TLS`, `HAR`, `JSON`, `ADB`, and `mitmproxy` preserved where appropriate.
-- Fixed Webview i18n injection so table column names, filter controls, footer status, and other dynamic text no longer fall back to visible keys, blank labels, or the wrong language.
-- Added l10n validation for Webview, extension runtime, and `package.nls*` key references.
-- Fixed the release workflow's extension runtime install smoke-test mock so it supports the `secmp.language` configuration listener.
-- Hardened locale detection for fallback/test environments and completed the VS Code `env` mock used by the release smoke test.
+- Added `.secmp` session files as the primary capture persistence format, with an append-only binary container, record hashes, a hash chain, and corruption/tamper detection.
+- Added temporary sessions stored in VS Code global storage and persistent sessions saved to user-selected `.secmp` files.
+- Reworked the SecMP sidebar into a session start page for creating temporary sessions, creating persistent sessions, opening existing `.secmp` files, and reopening recent sessions.
+- Capture panels now require an active session and show the active session name in the panel title.
+- Added close protection for active sessions: closing the panel prompts to save/stop or reopen, and interrupted sessions can be restored on the next activation.
+- Persisted session UI state such as filters, sorting, column order, and column widths.
+- Kept reopened session capture order stable when continuing to capture into an existing `.secmp` session.
+- Fixed reopened historical flows so selecting saved packets does not wait on stale mitmweb body requests.
+- Reverted the detail body virtual-window performance experiment; request/response details use the direct full-detail rendering and Webview search behavior again.
 
 ## Requirements
 
@@ -23,39 +24,23 @@ Patch release for the capture header layout, the Chinese-first i18n foundation, 
 
 ## Installation
 
-1. Download `secmp-0.1.7.vsix`.
+1. Download `secmp-0.2.10.vsix`.
 2. In VS Code or VSCodium, run `Extensions: Install from VSIX...`.
-3. Run `SecMP: Show Capture Panel`.
-4. Run `SecMP: Start Proxy`.
-5. SecMP downloads and caches the configured runtime automatically when needed.
+3. Run `SecMP: New Temporary Session`, `SecMP: New Persistent Session`, or open an existing `.secmp` session from the SecMP sidebar.
+4. Start the proxy from the capture panel.
+5. Push the CA certificate and configure the Android device proxy as needed.
 
-## Language
+## Update From 0.1.7
 
-SecMP defaults to `secmp.language: auto`. In `auto` mode, supported VS Code locales are used automatically; unsupported locales fall back to Simplified Chinese.
+This release includes every change since the previous successful release tag `v0.1.7`, including activity/sidebar session workflow changes, `.secmp` session storage, interrupted-session recovery, stable reopened-session ordering, session UI-state persistence, and content-filter robustness improvements.
 
-To force English for Webview and runtime messages:
-
-```json
-{
-  "secmp.language": "en-US"
-}
-```
-
-Command Palette titles and Settings descriptions follow VS Code's static `package.nls*` localization mechanism and the editor display language.
-
-## Update From 0.1.3
-
-This release includes every change since the previous successful release tag `v0.1.3`: the capture header count layout fix, the language system, English-language preparation, Webview i18n fixes, stronger l10n checks, and release smoke-test compatibility fixes.
-
-Run `SecMP: Check for Updates`, or install `secmp-0.1.7.vsix` manually from the GitHub Release.
-
-This release uses runtime `0.1.2`. The VSIX version changed for UI, extension, and documentation updates, but the packaged runtime did not change.
+This release uses runtime `0.1.2`. The VSIX version changed for extension, Webview, session storage, and documentation updates, but the packaged runtime did not change.
 
 ## Assets
 
-- `secmp-0.1.7.vsix`
+- `secmp-0.2.10.vsix`
 
-Runtime assets remain available from the `v0.1.2` release:
+Runtime assets remain available from the runtime release that provides `0.1.2`:
 
 - `secmp-runtime-win32-x64-0.1.2.zip`
 - `secmp-runtime-win32-x64-0.1.2.zip.sha256`
