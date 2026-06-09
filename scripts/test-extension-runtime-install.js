@@ -165,7 +165,11 @@ async function main() {
     console,
     module: { exports: {} },
     process,
-    require: (id) => (id === "vscode" ? vscodeMock : require(id)),
+    require: (id) => {
+      if (id === "vscode") return vscodeMock;
+      if (id.startsWith(".")) return require(path.resolve(repoRoot, id));
+      return require(id);
+    },
     setInterval,
     setTimeout,
   };
