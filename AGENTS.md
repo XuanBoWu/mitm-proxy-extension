@@ -170,10 +170,11 @@ npx --yes @vscode/vsce package
 5. extension.js 将 mitmweb flow 格式转换为 webview 格式 → 批量发送 `postMessage({command: "addFlows", flows})`
 6. Webview 一次渲染所有新 flow，列表支持上下键导航（不循环）
 7. 检测已知 flow 的 status_code/res_size 变化 → 批量发送 `updateFlows`（响应状态实时更新）
-8. 点击 flow 时，extension.js 按需请求 body：`GET /flows/{id}/request/content.data?token={token}`
-9. Body 内容分别缓存到 `flow.req_body` / `flow.res_body`，并以 `_reqBodyFetched` / `_resBodyFetched` 标记请求体和响应体加载状态，发送 `showDetail` 到 webview
-10. 内容过滤勾选请求体/响应体时，webview 发送 `prepareFilterContent`，extension.js 按过滤范围拉取所有所需 body 后返回进度和完整过滤数据
-11. 导出 JSON/HAR 前自动拉取所有未加载的 body，JSON 含 `_num` 序号
+8. 点击 flow 时，extension.js 按需请求 body：`GET /flows/{id}/request/content.data?token={token}`；响应未完成（无 `timestamp_end`）时不拉取响应体，避免把空/部分内容缓存为最终 body
+9. Body 内容分别缓存到 `flow.req_body` / `flow.res_body`，以 `_reqBodyFetched` / `_resBodyFetched` 标记加载完成，以 `_reqBodyState` / `_resBodyState`（loading/pending/ready/error/unavailable）+ `_reqBodyError` / `_resBodyError` 描述生命周期，发送 `showDetail` 到 webview；列表消息（addFlows/updateFlows/sessionLoaded）一律不携带 body 负载
+10. 响应完成后 extension.js 后台自动拉取 body（并发 2，≤8MB）并写入 `.secmp` 会话；停止代理前以可取消的进度通知拉取剩余 body，保证代理停止后 body 仍可查看/检索/导出
+11. 内容过滤勾选请求体/响应体时，webview 发送 `prepareFilterContent {requestId, term, scopes}`，extension.js 拉取所需 body 并在 extension 端完成关键词匹配（二进制按原始字节检索），通过 `filterContentProgress` 增量返回匹配/未检索 id；未检索（加载失败/不可用/响应未完成）的 flow 不会被当作不匹配，在列表中以斜体标记
+12. 导出 JSON/HAR 前自动拉取所有未加载的 body（带进度通知，失败计数可见），JSON 含 `_num` 序号，HAR 二进制响应体以 base64 编码并含请求 `postData`
 
 ## mitmproxy 12.x 注意事项
 
@@ -233,16 +234,17 @@ WebSocket 和 REST API 返回的 flow JSON 格式（`mitmproxy/tools/web/app.py:
 | UI→JS | `pushCert` | 推送并注入证书 |
 | UI→JS | `setProxy` / `clearProxy` | 设备代理设置 `{port, ip}` |
 | UI→JS | `selectFlow` | 查看 flow 详情（触发按需 body 加载） |
-| UI→JS | `prepareFilterContent` | 为可信内容过滤拉取所需 body `{requestId, scopes: {reqBody, resBody}}` |
+| UI→JS | `prepareFilterContent` | 内容过滤：extension 拉取所需 body 并按关键词匹配 `{requestId, term, scopes: {reqBody, resBody}}` |
+| UI→JS | `cancelFilterContent` | 取消正在进行的内容过滤检索 `{requestId}` |
 | UI→JS | `exportHar` / `exportJson` | 导出 |
 | UI→JS | `getInterfaces` | 获取可用网卡列表 |
-| JS→UI | `addFlows` | 批量新抓包 `{flows: [...]}` |
-| JS→UI | `updateFlows` | 批量更新 flow 数据 `{flows: [...]}` |
+| JS→UI | `addFlows` | 批量新抓包 `{flows: [...]}`（不含 body 负载，含 body 状态标记） |
+| JS→UI | `updateFlows` | 批量更新 flow 数据 `{flows: [...]}`（不含 body 负载） |
 | JS→UI | `proxyStatus` | 代理状态 `{running, port, message}` |
 | JS→UI | `deviceStatus` | 设备状态 `{connected, info}` |
-| JS→UI | `showDetail` | 显示 flow 详情（含已加载的 body，右侧面板自动展开） |
-| JS→UI | `filterContentProgress` | 内容过滤 body 拉取进度 `{requestId, completed, total}` |
-| JS→UI | `filterContentReady` | 内容过滤 body 拉取完成 `{requestId, flows, failed}` |
+| JS→UI | `showDetail` | 显示 flow 详情（含已加载的 body 与 `_reqBodyState`/`_resBodyState`；Webview 按当前选中项丢弃过期回复） |
+| JS→UI | `filterContentProgress` | 内容过滤检索进度与增量结果 `{requestId, completed, total, matchedIds, unsearchedIds}` |
+| JS→UI | `filterContentReady` | 内容过滤检索完成 `{requestId, matchedIds, unsearchedIds, failed, total}` |
 | JS→UI | `certStatus` | 证书操作结果 `{success, message}` |
 | JS→UI | `interfacesList` | 网卡列表 `{interfaces: [{name, ip}]}` |
 
@@ -290,7 +292,9 @@ WebSocket 和 REST API 返回的 flow JSON 格式（`mitmproxy/tools/web/app.py:
 
 ## 已知待改进
 
-- REST API 轮询在大流量时可能延迟较高（可改为 WebSocket 实时推送）
-- HTTP 请求体过大时前端可能卡顿（可改为虚拟滚动）
+- flow 推送已改为 mitmweb `/updates` WebSocket 实时事件，REST 轮询降级为对账兜底（WebSocket 断开时自适应轮询）
+- 文本 body 默认完整渲染，>2MB 截断显示并可点击加载全文；>64KB 跳过 JSON 格式化/高亮，行号 gutter 上限 2 万行
+- 详情搜索为主线程时间片分批执行；极端灾难性回溯正则在单次 exec 内仍不可中断（彻底解决需 Worker 化）
+- 后台自动拉取跳过 >8MB 的 body（按需选中/过滤/导出时仍会拉取）；导出期间的拉取不可取消
 - 请求体格式化依赖请求头 Content-Type（非响应 Content-Type），支持 contentview API 会更准确
 - Host 过滤后续适合做到请求列表表头筛选中，类似表格列筛选

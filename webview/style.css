@@ -1276,3 +1276,34 @@ dd { color: var(--text-primary); }
 ::-webkit-scrollbar-thumb { background: rgba(121, 121, 121, 0.4); }
 ::-webkit-scrollbar-thumb:hover { background: rgba(100, 100, 100, 0.7); }
 ::-webkit-scrollbar-corner { background: transparent; }
+
+/* ===== Body status / truncation notice / unverified filter rows ===== */
+.message-textarea.body-status {
+  color: var(--text-muted);
+  font-style: italic;
+}
+.body-notice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.body-notice-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.body-notice-btn {
+  flex-shrink: 0;
+}
+#flowTableBody tr.unverified td {
+  opacity: 0.6;
+  font-style: italic;
+}
