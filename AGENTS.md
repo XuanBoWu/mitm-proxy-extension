@@ -147,11 +147,14 @@ npx --yes @vscode/vsce package
 
 ## CI 与发布流程
 
-- `tmp-windows-runtime-ci` 用于候选构建和验证。
-- `master` 是正式发布源分支。
-- 候选分支 CI 通过后，快进合并到 `master`。
+- 当前项目采用三分支原则：
+  - topic 分支：日常功能、修复、实验开发分支，例如 `feat/*`、`fix/*`、`perf/*`、`chore/*`。
+  - `staging`：候选集成与 CI 验证分支，用于较大功能、性能重构、runtime/打包流程、发布前候选验证。
+  - `master`：正式发布源分支，只接收已验证代码。
+- 常规小修复可通过 PR 直接合入 `master`；性能重构、runtime、打包、导出、过滤搜索、body 可信度等高风险改动应先通过 PR 合入 `staging`，验证通过后再由 `staging` 合入 `master`。
+- `staging` push 触发候选构建和验证，不发布。
 - `master` push 仍然只构建、测试、打包，不发布。
-- 正式发布从 `master` 打 `v*` tag，例如 `v0.1.0`。
+- 正式发布只能从 `master` 打 `v*` tag，例如 `v0.1.0`。
 - tag workflow 会构建 runtime、运行 runtime/扩展安装烟测、打包 VSIX，并创建 GitHub Release。
 - 每次 release 发布提交说明和修改说明必须覆盖“上一个正式 release tag 到本次 release tag”的全部改动，不能只描述最后一个 commit 或最后一个补丁；准备前先对比上一 release tag 到当前 HEAD 的 `git log` / `git diff`。
 - release assets 应包含：

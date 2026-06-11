@@ -31,7 +31,7 @@ on:
   push:
     branches:
       - master
-      - tmp-windows-runtime-ci
+      - staging
     tags:
       - "v*"
     paths:
