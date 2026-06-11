@@ -6,10 +6,15 @@ Installed extensions can check GitHub Releases for newer VSIX packages through `
 
 ## Branching Model
 
-- `master` is the release source branch.
-- Development and CI validation can happen on topic branches such as `tmp-windows-runtime-ci`.
-- Release code should be merged into `master` through a pull request or an equivalent reviewed merge.
-- Release tags must point at `master` commits.
+SecMP uses a three-branch model:
+
+- Topic branches (`feat/*`, `fix/*`, `perf/*`, `chore/*`) are used for daily feature work, bug fixes, and experiments.
+- `staging` is the release-candidate integration branch. Use it for larger features, performance work, runtime/package changes, export/filter/search/body reliability changes, and pre-release validation.
+- `master` is the release source branch and should only receive validated code.
+
+Small, low-risk fixes may be merged directly from a topic branch into `master` through a pull request or an equivalent reviewed merge. Higher-risk changes should flow through `topic branch -> staging -> master`.
+
+Pushes to `staging` run candidate build and validation only. Pushes to `master` build, test, and package only. GitHub Releases are created only from `v*` tags that point at `master` commits, or from an explicit manual release workflow with publishing enabled.
 
 ## Release Versioning
 
