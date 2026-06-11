@@ -19,6 +19,8 @@ let webPort = null;
 let authToken = null;
 let pollingTimer = null;
 let pollingInProgress = false;
+let idlePollCount = 0;
+let flowWebSocketReconnectTimer = null;
 let knownFlowIds = new Set();
 let ignoredFlowIdsAfterClear = new Set();
 let extensionContext = null;
@@ -41,8 +43,14 @@ const SUPPORTED_RUNTIME_PLATFORMS = new Set(["win32", "darwin"]);
 const SUPPORTED_LOCALES = new Set(["zh-CN", "en-US"]);
 const DEFAULT_LOCALE = "zh-CN";
 const FLOW_POLL_INTERVAL_MS = 1000;
+const FLOW_POLL_ACTIVE_MS = 500;
+const FLOW_POLL_IDLE_MS = 2000;
+const FLOW_POLL_IDLE_THRESHOLD = 3;
 const MITMWEB_REQUEST_TIMEOUT_MS = 5000;
 const FILTER_BODY_FETCH_CONCURRENCY = 4;
+const BODY_AUTOFETCH_CONCURRENCY = 2;
+const BODY_AUTOFETCH_MAX_BYTES = 8 * 1024 * 1024;
+const BODY_DRAIN_CONCURRENCY = 6;
 const DEFAULT_RUNTIME_SOURCES = {
   "0.1.0:win32:x64": {
     url: "https://github.com/XuanBoWu/mitm-proxy-extension/releases/download/v0.1.0/secmp-runtime-win32-x64-0.1.0.zip",
@@ -1596,20 +1604,46 @@ function replaceCapturedFlow(id, nextFlow) {
   return true;
 }
 
+// Copy fetched bodies and per-side body state from one flow object to another.
+// Used when a flow object is replaced (WS/poll update) or when an async fetch
+// finished against an object that has since been swapped out.
+function copyBodyCache(from, to) {
+  if (from._reqBodyFetched) {
+    to._reqBodyFetched = true;
+    to.req_body = from.req_body;
+    to.req_body_base64 = from.req_body_base64;
+  }
+  if (from._reqBodyState) {
+    to._reqBodyState = from._reqBodyState;
+    to._reqBodyError = from._reqBodyError || "";
+  }
+  if (from._resBodyFetched) {
+    to._resBodyFetched = true;
+    to.res_body = from.res_body;
+    to.res_body_base64 = from.res_body_base64;
+  }
+  if (from._resBodyState) {
+    to._resBodyState = from._resBodyState;
+    to._resBodyError = from._resBodyError || "";
+  }
+  to._bodyFetched = !!(to._reqBodyFetched && to._resBodyFetched);
+}
+
 function syncFetchedBodiesToCurrentFlow(flow) {
   const current = capturedFlowById.get(flow.id);
   if (!current || current === flow) return;
-  if (flow._reqBodyFetched) {
-    current._reqBodyFetched = true;
-    current.req_body = flow.req_body;
-    current.req_body_base64 = flow.req_body_base64;
-  }
-  if (flow._resBodyFetched) {
-    current._resBodyFetched = true;
-    current.res_body = flow.res_body;
-    current.res_body_base64 = flow.res_body_base64;
-  }
-  current._bodyFetched = !!(current._reqBodyFetched && current._resBodyFetched);
+  copyBodyCache(flow, current);
+}
+
+// List-bound messages (addFlows/updateFlows/sessionLoaded) must never carry
+// body payloads — bodies travel only via showDetail. Body state flags stay.
+function toListFlow(flow) {
+  const copy = { ...flow };
+  delete copy.req_body;
+  delete copy.req_body_base64;
+  delete copy.res_body;
+  delete copy.res_body_base64;
+  return copy;
 }
 
 // ===== Flow transformation =====
@@ -1684,6 +1718,7 @@ function transformFlow(f) {
     res_body_base64: "",
     req_timestamp: reqTs,
     res_timestamp: resTs,
+    res_timestamp_end: res.timestamp_end || 0,
     duration_ms: resTs ? Math.round((resTs - reqTs) * 1000) : 0,
     tls_version: srv.tls_version || "",
     tls_cipher: srv.cipher || "",
@@ -1698,7 +1733,211 @@ function transformFlow(f) {
   };
 }
 
-// ===== Flow polling =====
+// ===== WebSocket flow feed =====
+
+let flowWebSocket = null;
+let flowWebSocketActive = false;
+let flowWebSocketReconnectAttempts = 0;
+
+function connectFlowWebSocket() {
+  if (!webPort || !authToken) return;
+  disconnectFlowWebSocket();
+
+  const key = crypto.randomBytes(16).toString("base64");
+  const req = http.request({
+    hostname: "127.0.0.1",
+    port: webPort,
+    path: `/updates?token=${encodeURIComponent(authToken)}`,
+    headers: {
+      "Connection": "Upgrade",
+      "Upgrade": "websocket",
+      "Sec-WebSocket-Version": "13",
+      "Sec-WebSocket-Key": key,
+    },
+  });
+
+  req.on("upgrade", (res, socket) => {
+    if (res.statusCode !== 101) {
+      socket.destroy();
+      scheduleWebSocketReconnect();
+      return;
+    }
+
+    flowWebSocketActive = true;
+    flowWebSocketReconnectAttempts = 0;
+    flowWebSocket = socket;
+    let frameBuffer = Buffer.alloc(0);
+
+    socket.on("data", (raw) => {
+      frameBuffer = Buffer.concat([frameBuffer, raw]);
+      while (frameBuffer.length >= 2) {
+        const secondByte = frameBuffer[1];
+        const masked = (secondByte & 0x80) !== 0;
+        const opcode = secondByte & 0x0f;
+        let payloadLen = frameBuffer[1] & 0x7f;
+        let offset = 2;
+        if (payloadLen === 126) {
+          if (frameBuffer.length < 4) break;
+          payloadLen = frameBuffer.readUInt16BE(2);
+          offset = 4;
+        } else if (payloadLen === 127) {
+          if (frameBuffer.length < 10) break;
+          // 64-bit length; cap at safe integer
+          const hi = frameBuffer.readUInt32BE(2);
+          const lo = frameBuffer.readUInt32BE(6);
+          payloadLen = hi * 0x100000000 + lo;
+          offset = 10;
+        }
+        const maskLen = masked ? 4 : 0;
+        if (frameBuffer.length < offset + maskLen + payloadLen) break;
+
+        const maskKey = masked ? frameBuffer.subarray(offset, offset + 4) : null;
+        offset += maskLen;
+        const payload = frameBuffer.subarray(offset, offset + payloadLen);
+        offset += payloadLen;
+
+        if (masked && maskKey) {
+          for (let i = 0; i < payload.length; i++) {
+            payload[i] ^= maskKey[i & 3];
+          }
+        }
+
+        frameBuffer = frameBuffer.subarray(offset);
+
+        if (opcode === 0x8) {
+          // Close frame — gracefully terminate
+          socket.destroy();
+          return;
+        }
+        if (opcode === 0x9) {
+          // Ping — respond with pong
+          const pong = Buffer.alloc(2 + payload.length);
+          pong[0] = 0x8a; // FIN + pong
+          pong[1] = payload.length;
+          if (payload.length > 0) payload.copy(pong, 2);
+          try { socket.write(pong); } catch (_) {}
+          continue;
+        }
+        if (opcode === 0x1 || opcode === 0x0) {
+          // Text frame (or continuation) — parse as JSON event
+          try {
+            const msg = JSON.parse(payload.toString("utf8"));
+            handleWebSocketFlowEvent(msg);
+          } catch (_) { /* skip unparseable frames */ }
+        }
+      }
+    });
+
+    socket.on("close", () => {
+      flowWebSocket = null;
+      flowWebSocketActive = false;
+      scheduleWebSocketReconnect();
+    });
+
+    socket.on("error", () => {
+      flowWebSocket = null;
+      flowWebSocketActive = false;
+      try { socket.destroy(); } catch (_) {}
+      scheduleWebSocketReconnect();
+    });
+  });
+
+  req.on("error", () => {
+    flowWebSocket = null;
+    flowWebSocketActive = false;
+    scheduleWebSocketReconnect();
+  });
+
+  req.end();
+}
+
+function scheduleWebSocketReconnect() {
+  if (!webPort || !authToken) return;
+  if (flowWebSocketReconnectAttempts > 10) return;
+  flowWebSocketReconnectAttempts += 1;
+  const delay = Math.min(1000 * Math.pow(2, flowWebSocketReconnectAttempts - 1), 30000);
+  if (flowWebSocketReconnectTimer) clearTimeout(flowWebSocketReconnectTimer);
+  flowWebSocketReconnectTimer = setTimeout(() => {
+    flowWebSocketReconnectTimer = null;
+    connectFlowWebSocket();
+  }, delay);
+}
+
+function disconnectFlowWebSocket() {
+  flowWebSocketActive = false;
+  flowWebSocketReconnectAttempts = 0;
+  if (flowWebSocketReconnectTimer) {
+    clearTimeout(flowWebSocketReconnectTimer);
+    flowWebSocketReconnectTimer = null;
+  }
+  if (flowWebSocket) {
+    try { flowWebSocket.destroy(); } catch (_) {}
+    flowWebSocket = null;
+  }
+}
+
+function handleWebSocketFlowEvent(msg) {
+  // mitmweb WebSocket events: { resource: "flows", cmd: "add"|"update"|"reset", data: ... }
+  // Also handle flat format: { cmd: "add"|"update"|"reset", data: ... }
+  const cmd = msg.cmd || "";
+  const resource = msg.resource || "flows";
+  if (resource !== "flows") return;
+
+  if (cmd === "reset") {
+    resetCapturedFlows();
+    resetBodyFetchQueue();
+    if (activeSession) activeSession.resetFlows();
+    knownFlowIds.clear();
+    ignoredFlowIdsAfterClear.clear();
+    if (panel) {
+      panel.webview.postMessage({ command: "flowsCleared" });
+    }
+    idlePollCount = 0;
+    return;
+  }
+
+  const data = msg.data;
+  if (!data || !data.id) return;
+
+  if (cmd === "add") {
+    if (ignoredFlowIdsAfterClear.has(data.id)) return;
+    if (knownFlowIds.has(data.id)) return;
+    knownFlowIds.add(data.id);
+    const transformed = transformFlow(data);
+    addCapturedFlow(transformed);
+    recordSessionFlows([transformed]);
+    enqueueBodyAutoFetch(transformed);
+    if (panel) {
+      panel.webview.postMessage({
+        command: "addFlows",
+        flows: [toListFlow(transformed)],
+      });
+    }
+    idlePollCount = 0;
+  } else if (cmd === "update") {
+    const existing = capturedFlowById.get(data.id);
+    if (!existing) return;
+    if (existing.status_code !== 0 && existing.duration_ms && existing.res_timestamp_end) {
+      enqueueBodyAutoFetch(existing);
+      return;
+    }
+    const transformed = transformFlow(data);
+    copyBodyCache(existing, transformed);
+    if (replaceCapturedFlow(data.id, transformed)) {
+      recordSessionFlows([transformed]);
+      enqueueBodyAutoFetch(transformed);
+      if (panel) {
+        panel.webview.postMessage({
+          command: "updateFlows",
+          flows: [toListFlow(transformed)],
+        });
+      }
+    }
+    idlePollCount = 0;
+  }
+}
+
+// ===== Flow polling (reconciliation fallback) =====
 
 async function pollFlows() {
   if (!webPort || !authToken) return;
@@ -1711,6 +1950,7 @@ async function pollFlows() {
     // Detect if flows were cleared (e.g., via clearFlows command)
     if (flows.length === 0 && capturedFlows.length > 0) {
       resetCapturedFlows();
+      resetBodyFetchQueue();
       if (activeSession) activeSession.resetFlows();
       knownFlowIds.clear();
       ignoredFlowIdsAfterClear.clear();
@@ -1737,9 +1977,10 @@ async function pollFlows() {
       const transformedFlows = newFlows.map(f => transformFlow(f));
       transformedFlows.forEach(addCapturedFlow);
       recordSessionFlows(transformedFlows);
+      transformedFlows.forEach(enqueueBodyAutoFetch);
       panel.webview.postMessage({
         command: "addFlows",
-        flows: transformedFlows,
+        flows: transformedFlows.map(toListFlow),
       });
     }
 
@@ -1749,23 +1990,19 @@ async function pollFlows() {
       if (!knownFlowIds.has(f.id)) continue;
       const existing = capturedFlowById.get(f.id);
       if (!existing) continue;
+      // Skip update scan for flows that already reached their final state
+      // (response fully received) — but keep scanning until timestamp_end
+      // arrives, otherwise body fetches would stay blocked on "pending".
+      if (existing.status_code !== 0 && existing.duration_ms && existing.res_timestamp_end) continue;
       if (existing.status_code !== (f.response?.status_code || 0) ||
           existing.res_size !== (f.response?.contentLength || 0) ||
+          (!existing.res_timestamp_end && f.response?.timestamp_end) ||
           (!existing.duration_ms && f.response?.timestamp_start)) {
         const transformed = transformFlow(f);
-        if (existing._reqBodyFetched || existing._bodyFetched) {
-          transformed._reqBodyFetched = true;
-          transformed.req_body = existing.req_body;
-          transformed.req_body_base64 = existing.req_body_base64;
-        }
-        if (existing._resBodyFetched || existing._bodyFetched) {
-          transformed._resBodyFetched = true;
-          transformed.res_body = existing.res_body;
-          transformed.res_body_base64 = existing.res_body_base64;
-        }
-        transformed._bodyFetched = !!(transformed._reqBodyFetched && transformed._resBodyFetched);
+        copyBodyCache(existing, transformed);
         if (replaceCapturedFlow(f.id, transformed)) {
           recordSessionFlows([transformed]);
+          enqueueBodyAutoFetch(transformed);
           updatedFlows.push(transformed);
         }
       }
@@ -1773,14 +2010,45 @@ async function pollFlows() {
     if (updatedFlows.length > 0 && panel) {
       panel.webview.postMessage({
         command: "updateFlows",
-        flows: updatedFlows,
+        flows: updatedFlows.map(toListFlow),
       });
+    }
+    // Track activity for adaptive polling
+    if (newFlows.length > 0 || updatedFlows.length > 0) {
+      idlePollCount = 0;
+    } else {
+      idlePollCount += 1;
     }
   } catch (_) {
     // Silently skip polling errors (server might not be ready yet)
+    idlePollCount += 1;
   } finally {
     pollingInProgress = false;
+    scheduleNextPoll();
   }
+}
+
+function scheduleNextPoll() {
+  if (!pollingTimer && !webPort) return;
+  if (pollingTimer) {
+    clearTimeout(pollingTimer);
+    pollingTimer = null;
+  }
+  if (!webPort || !authToken) return;
+  // When WebSocket is active, poll at 10s as reconciliation fallback only
+  if (flowWebSocketActive) {
+    pollingTimer = setTimeout(() => {
+      pollingTimer = null;
+      pollFlows();
+    }, 10000);
+    return;
+  }
+  const hasActivity = idlePollCount < FLOW_POLL_IDLE_THRESHOLD;
+  const interval = hasActivity ? FLOW_POLL_ACTIVE_MS : FLOW_POLL_IDLE_MS;
+  pollingTimer = setTimeout(() => {
+    pollingTimer = null;
+    pollFlows();
+  }, interval);
 }
 
 function startFlowPolling() {
@@ -1788,14 +2056,16 @@ function startFlowPolling() {
   knownFlowIds.clear();
   ignoredFlowIdsAfterClear.clear();
   resetCapturedFlows();
+  idlePollCount = 0;
   ensureActiveSession();
   pollFlows();
-  pollingTimer = setInterval(pollFlows, FLOW_POLL_INTERVAL_MS);
+  connectFlowWebSocket();
 }
 
 function stopFlowPolling() {
+  disconnectFlowWebSocket();
   if (pollingTimer) {
-    clearInterval(pollingTimer);
+    clearTimeout(pollingTimer);
     pollingTimer = null;
   }
 }
@@ -2007,7 +2277,20 @@ async function startProxyEngine(port) {
   });
 }
 
-function stopProxyEngine() {
+async function stopProxyEngine() {
+  if (!proxyProcess) {
+    flushActiveSession();
+    return { success: true, message: t("extension.proxy.notRunning") };
+  }
+
+  // Cache the bodies that only exist inside mitmproxy before killing it,
+  // otherwise flows with a visible size would render as empty afterwards.
+  try {
+    await drainPendingBodiesBeforeStop();
+  } catch (err) {
+    log(`Body drain before stop failed: ${err.message}`);
+  }
+
   return new Promise((resolve) => {
     if (!proxyProcess) {
       flushActiveSession();
@@ -2016,6 +2299,7 @@ function stopProxyEngine() {
     }
 
     stopFlowPolling();
+    resetBodyFetchQueue();
     flushActiveSession();
 
     proxyProcess.on("close", () => {
@@ -2099,7 +2383,7 @@ async function createPanel() {
         if (capturedFlows.length > 0) {
           panel.webview.postMessage({
             command: "sessionLoaded",
-            flows: capturedFlows,
+            flows: capturedFlows.map(toListFlow),
             uiState: activeSession?.getUiState?.() || null,
           });
         }
@@ -2347,7 +2631,11 @@ async function createPanel() {
       }
 
       case "prepareFilterContent":
-        await prepareFilterContent(message.requestId, message.scopes || {});
+        await prepareFilterContent(message.requestId, message.scopes || {}, message.term || "");
+        break;
+
+      case "cancelFilterContent":
+        cancelFilterContent(message.requestId);
         break;
 
       case "sessionUiStateChanged":
@@ -2371,6 +2659,7 @@ async function createPanel() {
           ignoredFlowIdsAfterClear.add(flow.id);
         }
         resetCapturedFlows();
+        resetBodyFetchQueue();
         if (activeSession) activeSession.resetFlows();
         knownFlowIds.clear();
         // Also clear flows in mitmproxy via REST API
@@ -2546,6 +2835,26 @@ function isLikelyBinaryBuffer(buf) {
   return controlBytes / sampleLength > 0.1;
 }
 
+// Per-side body lifecycle: (absent) -> "loading" -> "ready" | "error" | "unavailable".
+// "pending" means the response has not finished yet, so its body must not be
+// fetched — a premature fetch would cache an empty/partial body forever.
+function setBodyState(flow, side, state, error = "") {
+  if (side === "request") {
+    flow._reqBodyState = state;
+    flow._reqBodyError = error;
+  } else {
+    flow._resBodyState = state;
+    flow._resBodyError = error;
+  }
+}
+
+function isResponseComplete(flow) {
+  if (flow.error) return true;
+  if (flow.res_timestamp_end) return true;
+  // Flows recorded by older versions lack res_timestamp_end.
+  return !!(flow._fromSession && flow.status_code);
+}
+
 function hydrateFlowBodyFromSession(flow, side) {
   if (!activeSession || !flow?.id) return false;
   const state = activeSession.bodyState(flow.id, side);
@@ -2559,6 +2868,7 @@ function hydrateFlowBodyFromSession(flow, side) {
       flow.req_body_base64 = "";
     }
     flow._reqBodyFetched = true;
+    setBodyState(flow, "request", "ready");
   } else {
     if (state.contentKind === "binary") {
       flow.res_body_base64 = activeSession.getBodyBuffer(flow.id, "response").toString("base64");
@@ -2568,6 +2878,7 @@ function hydrateFlowBodyFromSession(flow, side) {
       flow.res_body_base64 = "";
     }
     flow._resBodyFetched = true;
+    setBodyState(flow, "response", "ready");
   }
   flow._bodyFetched = !!(flow._reqBodyFetched && flow._resBodyFetched);
   return true;
@@ -2594,6 +2905,7 @@ function applyFetchedBody(flow, side, buf, contentType) {
     }
     flow._resBodyFetched = true;
   }
+  setBodyState(flow, side, "ready");
   if (activeSession) {
     activeSession.appendBody(flow.id, side, buf, {
       contentType,
@@ -2604,49 +2916,90 @@ function applyFetchedBody(flow, side, buf, contentType) {
 }
 
 async function fetchFlowBodies(flow, scopes = { request: true, response: true }) {
-  const fetchRequest = scopes.request !== false;
-  const fetchResponse = scopes.response !== false;
-  if (fetchRequest && !flow._reqBodyFetched) {
+  const wantReq = scopes.request !== false;
+  const wantRes = scopes.response !== false;
+
+  if (wantReq && !flow._reqBodyFetched) {
     hydrateFlowBodyFromSession(flow, "request");
   }
-  if (fetchResponse && !flow._resBodyFetched) {
+  if (wantRes && !flow._resBodyFetched) {
     hydrateFlowBodyFromSession(flow, "response");
   }
-  if ((!fetchRequest || flow._reqBodyFetched) && (!fetchResponse || flow._resBodyFetched)) {
-    return { requestOk: true, responseOk: true };
+
+  // Sides without any payload are immediately "ready empty" — no request needed.
+  if (wantReq && !flow._reqBodyFetched && !(flow.req_size > 0)) {
+    flow.req_body = "";
+    flow.req_body_base64 = "";
+    flow._reqBodyFetched = true;
+    setBodyState(flow, "request", "ready");
   }
-  if (flow._fromSession) {
-    return {
-      requestOk: !fetchRequest || !!flow._reqBodyFetched || !flow.req_size,
-      responseOk: !fetchResponse || !!flow._resBodyFetched || !flow.res_size,
-    };
+  if (wantRes && !flow._resBodyFetched && isResponseComplete(flow) && !(flow.res_size > 0)) {
+    flow.res_body = "";
+    flow.res_body_base64 = "";
+    flow._resBodyFetched = true;
+    setBodyState(flow, "response", "ready");
   }
-  if (!webPort || !authToken) {
-    return {
-      requestOk: !fetchRequest || !!flow.req_body || !flow.req_size,
-      responseOk: !fetchResponse || !!flow.res_body || !!flow.res_body_base64 || !flow.res_size,
-    };
+
+  let requestOk = !wantReq || !!flow._reqBodyFetched;
+  let responseOk = !wantRes || !!flow._resBodyFetched;
+  const fetchReqNeeded = wantReq && !flow._reqBodyFetched;
+  let fetchResNeeded = wantRes && !flow._resBodyFetched;
+
+  // Never fetch a response body before the response is complete — mitmweb
+  // would return empty/partial content which we would then cache as final.
+  if (fetchResNeeded && !isResponseComplete(flow)) {
+    setBodyState(flow, "response", "pending");
+    fetchResNeeded = false;
+    responseOk = false;
   }
-  let requestOk = true;
-  let responseOk = true;
-  if (fetchRequest && !flow._reqBodyFetched) {
+
+  if (!fetchReqNeeded && !fetchResNeeded) {
+    flow._bodyFetched = !!(flow._reqBodyFetched && flow._resBodyFetched);
+    syncFetchedBodiesToCurrentFlow(flow);
+    return { requestOk, responseOk };
+  }
+
+  if (flow._fromSession || !webPort || !authToken) {
+    // No live mitmproxy to fetch from; bodies that were never cached are gone.
+    if (fetchReqNeeded) {
+      setBodyState(flow, "request", "unavailable");
+      requestOk = false;
+    }
+    if (fetchResNeeded) {
+      setBodyState(flow, "response", "unavailable");
+      responseOk = false;
+    }
+    syncFetchedBodiesToCurrentFlow(flow);
+    return { requestOk, responseOk };
+  }
+
+  if (fetchReqNeeded) {
+    setBodyState(flow, "request", "loading");
     try {
       const buf = await mitmwebGet(`/flows/${flow.id}/request/content.data`);
+      if (buf.length === 0 && flow.req_size > 0) {
+        throw new Error(`mitmweb returned empty content (expected ${flow.req_size} bytes)`);
+      }
       const ct = flow.req_headers?.["content-type"] || "";
       applyFetchedBody(flow, "request", buf, ct);
-    } catch (_) {
-      flow.req_body = "";
-      flow.req_body_base64 = "";
+      requestOk = true;
+    } catch (err) {
+      setBodyState(flow, "request", "error", err.message);
       requestOk = false;
     }
   }
-  if (fetchResponse && !flow._resBodyFetched) {
+  if (fetchResNeeded) {
+    setBodyState(flow, "response", "loading");
     try {
       const buf = await mitmwebGet(`/flows/${flow.id}/response/content.data`);
+      if (buf.length === 0 && flow.res_size > 0) {
+        throw new Error(`mitmweb returned empty content (expected ${flow.res_size} bytes)`);
+      }
       const ct = (flow.content_type || "").toLowerCase();
       applyFetchedBody(flow, "response", buf, ct);
-    } catch (_) {
-      flow.res_body = "";
+      responseOk = true;
+    } catch (err) {
+      setBodyState(flow, "response", "error", err.message);
       responseOk = false;
     }
   }
@@ -2655,63 +3008,267 @@ async function fetchFlowBodies(flow, scopes = { request: true, response: true })
   return { requestOk, responseOk };
 }
 
-async function prepareFilterContent(requestId, scopes) {
+// ===== Background body auto-fetch =====
+// Bodies are pulled in the background as soon as a response completes and are
+// persisted into the session file. This is what guarantees that bodies remain
+// viewable/searchable/exportable after the proxy stops or mitmproxy evicts
+// the flow — the on-demand fetch in selectFlow alone cannot guarantee that.
+
+let bodyFetchQueue = [];
+let bodyFetchQueued = new Set();
+let bodyFetchActive = 0;
+
+function flowNeedsBodyFetch(flow) {
+  if (!flow || !flow.id || flow._fromSession) return false;
+  if (!isResponseComplete(flow)) return false;
+  const reqMissing = (flow.req_size || 0) > 0 && !flow._reqBodyFetched && flow._reqBodyState !== "error";
+  const resMissing = (flow.res_size || 0) > 0 && !flow._resBodyFetched && flow._resBodyState !== "error";
+  return reqMissing || resMissing;
+}
+
+function enqueueBodyAutoFetch(flow) {
+  if (!flowNeedsBodyFetch(flow)) return;
+  if (bodyFetchQueued.has(flow.id)) return;
+  bodyFetchQueued.add(flow.id);
+  bodyFetchQueue.push(flow.id);
+  pumpBodyFetchQueue();
+}
+
+function pumpBodyFetchQueue() {
+  while (bodyFetchActive < BODY_AUTOFETCH_CONCURRENCY && bodyFetchQueue.length > 0) {
+    const id = bodyFetchQueue.shift();
+    bodyFetchActive += 1;
+    (async () => {
+      try {
+        const flow = capturedFlowById.get(id);
+        if (flow && webPort && authToken) {
+          await fetchFlowBodies(flow, {
+            request: (flow.req_size || 0) <= BODY_AUTOFETCH_MAX_BYTES,
+            response: (flow.res_size || 0) <= BODY_AUTOFETCH_MAX_BYTES,
+          });
+        }
+      } catch (_) {
+        // states are tracked on the flow; on-demand selection retries
+      } finally {
+        bodyFetchQueued.delete(id);
+        bodyFetchActive -= 1;
+        pumpBodyFetchQueue();
+      }
+    })();
+  }
+}
+
+function resetBodyFetchQueue() {
+  bodyFetchQueue = [];
+  bodyFetchQueued.clear();
+}
+
+// Before stopping the proxy, pull every body that is still only inside
+// mitmproxy. Cancellable; anything skipped is marked "unavailable" on access.
+async function drainPendingBodiesBeforeStop() {
+  if (!webPort || !authToken) return;
+  const pending = capturedFlows.filter(flowNeedsBodyFetch);
+  if (pending.length === 0) return;
+  resetBodyFetchQueue();
+  await vscode.window.withProgress({
+    location: vscode.ProgressLocation.Notification,
+    title: t("extension.stop.fetchingBodies"),
+    cancellable: true,
+  }, async (progress, token) => {
+    const total = pending.length;
+    let index = 0;
+    let done = 0;
+    async function worker() {
+      while (index < total && !token.isCancellationRequested && webPort && authToken) {
+        const flow = pending[index];
+        index += 1;
+        try {
+          await fetchFlowBodies(flow);
+        } catch (_) {}
+        done += 1;
+        if (done % 10 === 0 || done === total) {
+          progress.report({ message: `${done}/${total}` });
+        }
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(BODY_DRAIN_CONCURRENCY, total) }, worker));
+  });
+}
+
+// ===== Content (body) filtering =====
+// The webview never receives bulk bodies. It sends the keyword + scopes; the
+// extension fetches the required bodies (resumable from session cache),
+// matches them here, and streams back matched / unsearchable flow ids with
+// progress. A newer request or cancelFilterContent aborts the current scan.
+
+let activeFilterRequestId = 0;
+
+function bodyContainsTerm(text, base64, lowerTerm) {
+  if (text) {
+    return text.toLowerCase().includes(lowerTerm);
+  }
+  if (base64) {
+    // Binary bodies are searched as raw bytes (latin1), like Burp does —
+    // ASCII keywords embedded in binary payloads still match.
+    try {
+      return Buffer.from(base64, "base64").toString("latin1").toLowerCase().includes(lowerTerm);
+    } catch (_) {
+      return false;
+    }
+  }
+  return false;
+}
+
+async function prepareFilterContent(requestId, scopes, term) {
+  activeFilterRequestId = requestId;
   if (!panel) return;
-  if (capturedFlows.length === 0) {
+
+  const wantReq = !!scopes.reqBody;
+  const wantRes = !!scopes.resBody;
+  const lowerTerm = String(term || "").toLowerCase();
+  const flowsToScan = capturedFlows.slice();
+  const total = flowsToScan.length;
+
+  if (!lowerTerm || (!wantReq && !wantRes) || total === 0) {
     panel.webview.postMessage({
       command: "filterContentReady",
       requestId,
-      flows: [],
+      matchedIds: [],
+      unsearchedIds: [],
       failed: 0,
+      total,
     });
     return;
   }
 
-  let completed = 0;
+  const matchedIds = [];
+  const unsearchedIds = [];
   let failed = 0;
-  const flowsToPrepare = capturedFlows.slice();
-  const total = flowsToPrepare.length;
-  panel.webview.postMessage({
-    command: "filterContentProgress",
-    requestId,
-    completed,
-    total,
-  });
+  let completed = 0;
+  let pendingMatched = [];
+  let pendingUnsearched = [];
+
+  const postProgress = (force = false) => {
+    if (!panel || requestId !== activeFilterRequestId) return;
+    if (!force && completed % 25 !== 0) return;
+    panel.webview.postMessage({
+      command: "filterContentProgress",
+      requestId,
+      completed,
+      total,
+      matchedIds: pendingMatched,
+      unsearchedIds: pendingUnsearched,
+    });
+    pendingMatched = [];
+    pendingUnsearched = [];
+  };
+  postProgress(true);
 
   let nextIndex = 0;
-  async function prepareNextFlow() {
-    while (nextIndex < total) {
-      const flow = flowsToPrepare[nextIndex];
+  async function scanNextFlow() {
+    while (nextIndex < total && requestId === activeFilterRequestId) {
+      const flow = flowsToScan[nextIndex];
       nextIndex += 1;
-      const result = await fetchFlowBodies(flow, {
-        request: !!scopes.reqBody,
-        response: !!scopes.resBody,
-      });
-      if (!result.requestOk || !result.responseOk) {
-        failed += 1;
+      const result = await fetchFlowBodies(flow, { request: wantReq, response: wantRes });
+      if (requestId !== activeFilterRequestId) return;
+      let matched = false;
+      let unsearched = false;
+      let fetchFailed = false;
+      if (wantReq) {
+        if (flow._reqBodyFetched) {
+          matched = matched || bodyContainsTerm(flow.req_body, flow.req_body_base64, lowerTerm);
+        } else if ((flow.req_size || 0) > 0) {
+          unsearched = true;
+          if (!result.requestOk) fetchFailed = true;
+        }
       }
+      if (wantRes && !matched) {
+        if (flow._resBodyFetched) {
+          matched = matched || bodyContainsTerm(flow.res_body, flow.res_body_base64, lowerTerm);
+        } else if ((flow.res_size || 0) > 0 || !isResponseComplete(flow)) {
+          unsearched = true;
+          if (!result.responseOk && isResponseComplete(flow)) fetchFailed = true;
+        }
+      }
+      if (matched) {
+        matchedIds.push(flow.id);
+        pendingMatched.push(flow.id);
+      } else if (unsearched) {
+        unsearchedIds.push(flow.id);
+        pendingUnsearched.push(flow.id);
+      }
+      if (fetchFailed) failed += 1;
       completed += 1;
-      if (panel && (completed === total || completed % 5 === 0)) {
-        panel.webview.postMessage({
-          command: "filterContentProgress",
-          requestId,
-          completed,
-          total,
-        });
-      }
+      postProgress(completed === total);
     }
   }
 
   const workerCount = Math.min(FILTER_BODY_FETCH_CONCURRENCY, total);
-  await Promise.all(Array.from({ length: workerCount }, () => prepareNextFlow()));
+  await Promise.all(Array.from({ length: workerCount }, () => scanNextFlow()));
 
-  if (panel) {
+  if (panel && requestId === activeFilterRequestId) {
     panel.webview.postMessage({
       command: "filterContentReady",
       requestId,
-      flows: capturedFlows,
+      matchedIds,
+      unsearchedIds,
       failed,
+      total,
     });
+  }
+}
+
+function cancelFilterContent(requestId) {
+  if (!requestId || requestId === activeFilterRequestId) {
+    activeFilterRequestId = 0;
+  }
+}
+
+async function fetchAllFlowBodies(flows, concurrency = FILTER_BODY_FETCH_CONCURRENCY, onProgress = null) {
+  const list = flows.filter((f) => !f._bodyFetched);
+  if (list.length === 0) return { failed: 0, total: 0 };
+  const total = list.length;
+  let index = 0;
+  let completed = 0;
+  let failed = 0;
+  async function next() {
+    while (index < total) {
+      const flow = list[index];
+      index += 1;
+      const result = await fetchFlowBodies(flow);
+      if (!result.requestOk || !result.responseOk) failed += 1;
+      completed += 1;
+      if (onProgress && (completed % 10 === 0 || completed === total)) {
+        onProgress(completed, total);
+      }
+    }
+  }
+  const count = Math.min(concurrency, total);
+  await Promise.all(Array.from({ length: count }, () => next()));
+  return { failed, total };
+}
+
+async function fetchAllFlowBodiesWithProgress(flows) {
+  return vscode.window.withProgress({
+    location: vscode.ProgressLocation.Notification,
+    title: t("extension.export.fetchingBodies"),
+    cancellable: false,
+  }, async (progress) => {
+    return fetchAllFlowBodies(flows, FILTER_BODY_FETCH_CONCURRENCY, (completed, total) => {
+      progress.report({ message: `${completed}/${total}` });
+    });
+  });
+}
+
+function showExportResult(count, filePath, failed) {
+  if (failed > 0) {
+    vscode.window.showWarningMessage(t("extension.export.completedWithFailures", {
+      count,
+      path: filePath,
+      failed,
+    }));
+  } else {
+    vscode.window.showInformationMessage(t("extension.export.completed", { count, path: filePath }));
   }
 }
 
@@ -2728,47 +3285,61 @@ async function exportHar() {
 
   if (!result) return;
 
-  // Fetch bodies for all flows not yet loaded
-  for (const f of capturedFlows) {
-    await fetchFlowBodies(f);
-  }
+  // Fetch bodies for all flows not yet loaded (parallel with bounded concurrency)
+  const fetchResult = await fetchAllFlowBodiesWithProgress(capturedFlows);
 
   const har = {
     log: {
       version: "1.2",
       creator: { name: "SecMP", version: extensionPackage.version },
-      entries: capturedFlows.map(f => ({
-        startedDateTime: new Date(f.req_timestamp * 1000).toISOString(),
-        time: f.duration_ms || 0,
-        request: {
-          method: f.method,
-          url: f.url,
-          httpVersion: "HTTP/1.1",
-          headers: Object.entries(f.req_headers || {}).map(([name, value]) => ({ name, value })),
-          headersSize: -1,
-          bodySize: f.req_size || -1,
-        },
-        response: {
-          status: f.status_code,
-          statusText: "",
-          httpVersion: "HTTP/1.1",
-          headers: Object.entries(f.res_headers || {}).map(([name, value]) => ({ name, value })),
-          headersSize: -1,
-          bodySize: f.res_size || -1,
-          content: {
-            size: f.res_size || 0,
-            mimeType: f.content_type || "",
-            text: f.res_body || "",
+      entries: capturedFlows.map(f => {
+        const entry = {
+          startedDateTime: new Date(f.req_timestamp * 1000).toISOString(),
+          time: f.duration_ms || 0,
+          request: {
+            method: f.method,
+            url: f.url,
+            httpVersion: "HTTP/1.1",
+            headers: Object.entries(f.req_headers || {}).map(([name, value]) => ({ name, value })),
+            headersSize: -1,
+            bodySize: f.req_size || -1,
           },
-        },
-        cache: {},
-        timings: { send: 0, wait: f.duration_ms || 0, receive: 0 },
-      })),
+          response: {
+            status: f.status_code,
+            statusText: "",
+            httpVersion: "HTTP/1.1",
+            headers: Object.entries(f.res_headers || {}).map(([name, value]) => ({ name, value })),
+            headersSize: -1,
+            bodySize: f.res_size || -1,
+            content: f.res_body_base64
+              ? {
+                size: f.res_size || 0,
+                mimeType: f.content_type || "",
+                text: f.res_body_base64,
+                encoding: "base64",
+              }
+              : {
+                size: f.res_size || 0,
+                mimeType: f.content_type || "",
+                text: f.res_body || "",
+              },
+          },
+          cache: {},
+          timings: { send: 0, wait: f.duration_ms || 0, receive: 0 },
+        };
+        if (f.req_body || f.req_body_base64) {
+          const reqMime = String(f.req_headers?.["content-type"] || "");
+          entry.request.postData = f.req_body
+            ? { mimeType: reqMime, text: f.req_body }
+            : { mimeType: reqMime, text: f.req_body_base64, encoding: "base64" };
+        }
+        return entry;
+      }),
     },
   };
 
   fs.writeFileSync(result.fsPath, JSON.stringify(har, null, 2));
-  vscode.window.showInformationMessage(t("extension.export.completed", { count: capturedFlows.length, path: result.fsPath }));
+  showExportResult(capturedFlows.length, result.fsPath, fetchResult.failed);
 }
 
 async function exportJson() {
@@ -2784,14 +3355,12 @@ async function exportJson() {
 
   if (!result) return;
 
-  // Fetch bodies for all flows not yet loaded
-  for (const f of capturedFlows) {
-    await fetchFlowBodies(f);
-  }
+  // Fetch bodies for all flows not yet loaded (parallel with bounded concurrency)
+  const fetchResult = await fetchAllFlowBodiesWithProgress(capturedFlows);
 
   const flowsWithSeq = capturedFlows.map((f, i) => ({ _num: i + 1, ...f }));
   fs.writeFileSync(result.fsPath, JSON.stringify(flowsWithSeq, null, 2));
-  vscode.window.showInformationMessage(t("extension.export.completed", { count: capturedFlows.length, path: result.fsPath }));
+  showExportResult(capturedFlows.length, result.fsPath, fetchResult.failed);
 }
 
 async function saveSession() {

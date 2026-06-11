@@ -4,6 +4,37 @@ All notable changes to SecMP are documented in this file.
 
 ## Unreleased
 
+## 0.3.0 - 2026-06-10
+
+### 修复 body 可信度（列表有 size 但详情显示 (empty)）
+
+- 新增按方向的 body 状态模型（`_reqBodyState` / `_resBodyState`：loading / pending / ready / error / unavailable），详情页按状态分别显示“加载中 / 等待响应完成 / 获取失败（含原因，可重选重试） / 不可用 / 真正为空”，不再把所有异常一律显示为 `(empty)`。
+- 修复响应未完成时点击数据包会提前拉取响应体并把空/部分内容永久缓存为最终 body 的竞态；mitmweb 返回 0 字节但 `contentLength > 0` 时视为拉取失败而非空 body。
+- 新增响应完成后的后台 body 自动拉取队列（并发 2，≤8MB 自动拉取，写入 `.secmp` 会话持久化），并在停止代理前以可取消的进度通知拉取剩余正文——这是“代理停止后 body 永久丢失、详情显示 (empty)”的根因修复。
+
+### 性能与稳定性（防卡死）
+
+- 详情搜索重构：输入防抖 + 世代取消、正则匹配按时间片异步分批执行、搜索高亮共享一次构建的文本节点索引并倒序插入（消除原先每个匹配重建索引的 O(n²) 行为，修复“大报文输入一个字符即卡死”）；移除原先对 >500KB 文本的静默跳过，搜索计数覆盖完整文本，搜索期间显示“搜索中…”状态。
+- 列表消息瘦身：`addFlows` / `updateFlows` / `sessionLoaded` 不再携带 body 负载，body 仅通过 `showDetail` 按需传输；`showDetail` 按当前选中项丢弃过期回复，点击数据包立即渲染占位详情。
+- 请求列表：渲染缓冲区 12→24 行；纯滚动时若可视窗口仍在已渲染范围内则跳过整表 innerHTML 重建（减少滚动空行闪烁）；flow 状态更新原位更新过滤缓存而不再整体失效。
+- 详情行号 gutter 设 2 万行上限，避免超大正文构建数十万 span 卡死主线程。
+
+### 搜索与过滤可信度
+
+- 内容过滤协议重构：Webview 发送关键词与范围（`prepareFilterContent {requestId, term, scopes}`），extension 拉取所需 body 并在 extension 端完成匹配（二进制 body 以原始字节 latin1 不区分大小写检索），通过 `filterContentProgress` 增量返回匹配/未检索 flow id，`filterContentReady` 返回完整结果；新增 `cancelFilterContent`，新请求自动抢占旧任务。不再向 Webview 发送全量带 body 的 flow（消除数十 MB postMessage）。
+- “body 未加载 / 加载失败 / 响应未完成”不再被当作不匹配：这些 flow 保留在过滤结果中并以斜体标记为“未检索”，过滤面板与底部状态栏显示检索进度与完整性（含失败计数）。
+- 内容过滤不再阻塞列表：URL/header 命中即时显示，body 命中随检索进度增量进入。
+
+### 大正文展示策略
+
+- 文本 body 默认完整渲染；超过 2MB 时先显示前 2MB 并给出明确提示条（说明详情内搜索/复制范围），可点击“加载完整内容”查看全文；过滤与导出始终使用完整正文，不受展示截断影响。
+
+### 导出
+
+- 导出前的 body 拉取改为带进度通知；HAR 导出补充请求 `postData`，二进制响应体以 base64（`encoding: "base64"`）写入；body 拉取失败时导出完成消息明确报告失败条数。
+
+- 保持 `secmp.runtimeVersion` 为 `0.1.2`：runtime 产物与 extension↔runtime 协议未变化（本次仅修改 extension 与 Webview）。
+
 ## 0.2.11 - 2026-06-09
 
 - Closed the active `.secmp` session file handle during extension deactivation after flushing the resume marker, improving shutdown cleanup and Windows release smoke-test stability.

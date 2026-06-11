@@ -93,7 +93,6 @@ let filterPanelOpen = false;
 let filterContentState = {
   ready: false,
   preparing: false,
-  blocking: false,
   refreshQueued: false,
   requestId: 0,
   completed: 0,
@@ -104,11 +103,27 @@ let nextSeq = 1;
 let sortState = { colId: null, direction: null }; // null | 'asc' | 'desc'
 let userResizedCols = new Set(); // columns user manually resized — skip auto-fit
 let pendingFlowListRender = false;
+let pendingRenderScrollOnly = true;
 let lastVisibleFlows = [];
 let virtualStartIndex = 0;
+let cachedFilteredFlows = null;
+let cachedFilteredIds = null;
+let cachedFilterSnapshot = null;
+let lastRenderWindow = null; // { start, end, count } — skip rebuild while scrolling inside it
 const FLOW_ROW_HEIGHT = 26;
-const FLOW_RENDER_BUFFER_ROWS = 12;
+const FLOW_RENDER_BUFFER_ROWS = 24;
 const FLOW_AUTOFIT_SAMPLE_ROWS = 80;
+
+// Detail panel state — bodies live only here (list flows are body-less)
+let currentDetailFlow = null;
+let detailBodiesPending = false;
+let fullBodyShown = { req: false, res: false };
+
+// Body-scope filter results computed by the extension
+let filterBodyMatchedIds = new Set();
+let filterBodyUnsearchedIds = new Set();
+let filterRefreshTimer = null;
+let lastFilterFooterStatus = "";
 
 // Search state
 let _searchTerm = "";
@@ -170,12 +185,15 @@ function getFlowIndex(flowOrId) {
   return Number.isInteger(index) ? index : -1;
 }
 
-function scheduleFlowListRender() {
+function scheduleFlowListRender(scrollOnly = false) {
+  if (!scrollOnly) pendingRenderScrollOnly = false;
   if (pendingFlowListRender) return;
   pendingFlowListRender = true;
   requestAnimationFrame(() => {
     pendingFlowListRender = false;
-    renderFlowList();
+    const wasScrollOnly = pendingRenderScrollOnly;
+    pendingRenderScrollOnly = true;
+    renderFlowList({ scrollOnly: wasScrollOnly });
   });
 }
 
@@ -190,6 +208,23 @@ window.addEventListener("message", (event) => {
       }
       flows = flows.concat(msg.flows || []);
       rebuildFlowIndex();
+      // Incrementally update filter cache with matching new flows
+      if (cachedFilteredFlows) {
+        for (const f of msg.flows || []) {
+          if (matchesFlowFilters(f)) {
+            if (sortState.colId && sortState.direction) {
+              const idx = findSortedInsertIndex(cachedFilteredFlows, f);
+              cachedFilteredFlows.splice(idx, 0, f);
+            } else {
+              cachedFilteredFlows.push(f);
+            }
+            if (cachedFilteredIds) cachedFilteredIds.add(f.id);
+          }
+        }
+        if (cachedFilterSnapshot) {
+          cachedFilterSnapshot.flowCount = flows.length;
+        }
+      }
       handleFlowsChanged();
       scheduleFlowListRender();
       break;
@@ -203,13 +238,15 @@ window.addEventListener("message", (event) => {
     case "updateFlows":
       for (const f of msg.flows) {
         const idx = flowIndexById.get(f.id);
-        if (Number.isInteger(idx)) {
-          f._seq = flows[idx]._seq;
-          flows[idx] = f;
-          if (selectedFlowId === f.id) renderDetail(f);
+        if (!Number.isInteger(idx)) continue;
+        f._seq = flows[idx]._seq;
+        const prev = flows[idx];
+        flows[idx] = f;
+        updateFlowInFilterCache(f);
+        if (selectedFlowId === f.id) {
+          refreshDetailForUpdatedFlow(prev, f);
         }
       }
-      rebuildFlowIndex();
       handleFlowsChanged();
       scheduleFlowListRender();
       break;
@@ -217,11 +254,12 @@ window.addEventListener("message", (event) => {
       const idx = flowIndexById.get(msg.flow.id);
       if (Number.isInteger(idx)) {
         msg.flow._seq = flows[idx]._seq;
+        const prev = flows[idx];
         flows[idx] = msg.flow;
-        rebuildFlowIndex();
+        invalidateFilterCache();
         handleFlowsChanged();
         scheduleFlowListRender();
-        if (selectedFlowId === msg.flow.id) renderDetail(msg.flow);
+        if (selectedFlowId === msg.flow.id) refreshDetailForUpdatedFlow(prev, msg.flow);
       }
       break;
     }
@@ -250,6 +288,12 @@ window.addEventListener("message", (event) => {
       showProxySetupStatus(msg.success ? "success" : "error", msg.message);
       break;
     case "showDetail":
+      // Drop stale replies — the user may have selected another flow while
+      // the extension was still fetching bodies for this one.
+      if (!msg.flow || msg.flow.id !== selectedFlowId) break;
+      currentDetailFlow = msg.flow;
+      detailBodiesPending = false;
+      fullBodyShown = { req: false, res: false };
       autoExpandRightPanel();
       renderDetail(msg.flow);
       break;
@@ -257,7 +301,10 @@ window.addEventListener("message", (event) => {
       flows = [];
       rebuildFlowIndex();
       nextSeq = 1;
+      invalidateFilterCache();
       clearFlowSelection();
+      currentDetailFlow = null;
+      detailBodiesPending = false;
       userResizedCols.clear();
       resetFilterContentState();
       renderFlowList();
@@ -268,40 +315,51 @@ window.addEventListener("message", (event) => {
       flows.forEach((f, i) => { if (f._seq == null) f._seq = i + 1; });
       rebuildFlowIndex();
       nextSeq = flows.reduce((max, flow) => Math.max(max, Number(flow._seq) || 0), 0) + 1;
+      invalidateFilterCache();
       if (msg.uiState) applySessionUiState(msg.uiState);
       clearFlowSelection();
+      currentDetailFlow = null;
+      detailBodiesPending = false;
       resetFilterContentState();
-      ensureFilterContentIfNeeded({ blocking: needsFilterContent(), force: true });
+      ensureFilterContentIfNeeded({ force: true });
       renderFlowList();
       renderEmptyDetail();
       footerStatus.textContent = t("webview.flow.loaded", { count: msg.flows.length });
       break;
-    case "filterContentProgress":
+    case "filterContentProgress": {
       if (msg.requestId !== filterContentState.requestId) break;
       filterContentState.preparing = true;
       filterContentState.completed = msg.completed || 0;
       filterContentState.total = msg.total || 0;
+      let setsChanged = false;
+      for (const id of msg.matchedIds || []) {
+        if (!filterBodyMatchedIds.has(id)) { filterBodyMatchedIds.add(id); setsChanged = true; }
+      }
+      for (const id of msg.unsearchedIds || []) {
+        if (!filterBodyUnsearchedIds.has(id)) { filterBodyUnsearchedIds.add(id); setsChanged = true; }
+      }
       updateFilterUi();
-      if (filterContentState.blocking) scheduleFlowListRender();
+      if (setsChanged) {
+        invalidateFilterCache();
+        scheduleFlowListRender();
+      }
       break;
+    }
     case "filterContentReady":
       if (msg.requestId !== filterContentState.requestId) break;
-      mergeUpdatedFlows(msg.flows || []);
-      if (selectedFlowId) {
-        const selected = flows.find((flow) => flow.id === selectedFlowId);
-        if (selected) renderDetail(selected);
-      }
+      filterBodyMatchedIds = new Set(msg.matchedIds || []);
+      filterBodyUnsearchedIds = new Set(msg.unsearchedIds || []);
       filterContentState.ready = true;
       filterContentState.preparing = false;
-      filterContentState.blocking = false;
-      filterContentState.completed = msg.flows ? msg.flows.length : 0;
-      filterContentState.total = msg.flows ? msg.flows.length : 0;
+      filterContentState.completed = msg.total || 0;
+      filterContentState.total = msg.total || 0;
       filterContentState.failed = msg.failed || 0;
+      invalidateFilterCache();
       updateFilterUi();
       renderFlowList();
       if (filterContentState.refreshQueued) {
         filterContentState.refreshQueued = false;
-        ensureFilterContentIfNeeded({ force: true, blocking: false });
+        ensureFilterContentIfNeeded({ force: true });
       }
       break;
     case "interfacesList":
@@ -642,6 +700,8 @@ function setEditorVisible(id, visible) {
   if (visible) updateLineNumbers(el);
 }
 
+const LINE_NUMBER_RENDER_CAP = 20000;
+
 function updateLineNumbers(editor) {
   const pane = getEditorPane(editor);
   if (!pane) return;
@@ -649,25 +709,23 @@ function updateLineNumbers(editor) {
   if (!gutter) return;
   const text = getEditorText(editor);
   const lines = text.split("\n");
-  const section = editor.closest(".message-editor");
   const style = window.getComputedStyle(editor);
   const lineHeight = parseFloat(style.lineHeight) || (parseFloat(style.fontSize) * 1.45) || 16;
-  const wrapping = section ? !section.classList.contains("no-wrap") : true;
-  const textIndex = buildTextNodeIndex(editor);
   const gutterLines = [];
   const separatorIndex = lines.findIndex((line, index) => index > 0 && line === "");
-  let offset = 0;
+  const totalLines = Math.max(1, lines.length);
+  // Cap the gutter for huge bodies — building hundreds of thousands of spans
+  // would block the main thread for seconds.
+  const renderCount = Math.min(totalLines, LINE_NUMBER_RENDER_CAP);
 
-  for (let i = 0; i < Math.max(1, lines.length); i++) {
-    const line = lines[i] || "";
+  for (let i = 0; i < renderCount; i++) {
     const isSeparator = i === separatorIndex;
-    const rowHeight = wrapping
-      ? measureRenderedLineHeight(textIndex, offset, offset + line.length, lineHeight)
-      : lineHeight;
     gutterLines.push(
-      `<span class="line-number${isSeparator ? " separator" : ""}" style="height:${rowHeight}px;line-height:${lineHeight}px">${i + 1}</span>`
+      `<span class="line-number${isSeparator ? " separator" : ""}" style="height:${lineHeight}px;line-height:${lineHeight}px">${i + 1}</span>`
     );
-    offset += line.length + 1;
+  }
+  if (totalLines > renderCount) {
+    gutterLines.push(`<span class="line-number" style="height:${lineHeight}px;line-height:${lineHeight}px">⋯</span>`);
   }
   gutter.innerHTML = gutterLines.join("");
   requestAnimationFrame(() => {
@@ -936,35 +994,50 @@ function applySearchHighlight(el, start, end, matchText) {
   }
 }
 
-function renderFlowList() {
-  const waitingForContent = isFilterContentPending();
-  let filtered = waitingForContent ? [] : getVisibleFlows();
+function renderFlowList(options = {}) {
+  const scrollOnly = !!options.scrollOnly;
+  let filtered = getVisibleFlows();
   lastVisibleFlows = filtered;
-  pruneFlowSelection();
 
-  flowCount.textContent = `${filtered.length} / ${flows.length}`;
-  updateFilterUi();
+  if (!scrollOnly) {
+    pruneFlowSelection();
+    flowCount.textContent = `${filtered.length} / ${flows.length}`;
+    updateFilterUi();
+    lastRenderWindow = null;
+  }
 
-  if (waitingForContent || filtered.length === 0) {
+  if (filtered.length === 0) {
     flowTableBody.innerHTML =
       '<tr class="empty-state"><td colspan="' + COLUMNS.length + '">' +
-      (waitingForContent ? filterContentMessage() : (flows.length === 0 ? t("webview.flow.empty") : t("webview.flow.noMatches"))) +
+      (flows.length === 0 ? t("webview.flow.empty") : t("webview.flow.noMatches")) +
       "</td></tr>";
     virtualStartIndex = 0;
+    lastRenderWindow = null;
     return;
   }
 
-  renderFlowRows(filtered);
+  renderFlowRows(filtered, scrollOnly);
 
-  autoFitContentColumns();
+  if (!scrollOnly) {
+    autoFitContentColumns();
+  }
 }
 
-function renderFlowRows(filtered) {
+function renderFlowRows(filtered, scrollOnly = false) {
   const wrapperHeight = flowTableWrapper ? flowTableWrapper.clientHeight : 600;
   const scrollTop = flowTableWrapper ? flowTableWrapper.scrollTop : 0;
   const viewportRows = Math.max(1, Math.ceil(wrapperHeight / FLOW_ROW_HEIGHT));
   const start = Math.max(0, Math.floor(scrollTop / FLOW_ROW_HEIGHT) - FLOW_RENDER_BUFFER_ROWS);
   const end = Math.min(filtered.length, start + viewportRows + FLOW_RENDER_BUFFER_ROWS * 2);
+
+  // While merely scrolling, skip the innerHTML rebuild if the visible window
+  // is still inside the previously rendered range.
+  if (scrollOnly && lastRenderWindow &&
+      lastRenderWindow.count === filtered.length &&
+      start >= lastRenderWindow.start && end <= lastRenderWindow.end) {
+    return;
+  }
+
   const rows = [];
   const topHeight = start * FLOW_ROW_HEIGHT;
   const bottomHeight = Math.max(0, (filtered.length - end) * FLOW_ROW_HEIGHT);
@@ -990,14 +1063,83 @@ function renderFlowRows(filtered) {
     rows.push(`<tr class="virtual-spacer" aria-hidden="true"><td colspan="${COLUMNS.length}" style="height:${bottomHeight}px"></td></tr>`);
   }
   flowTableBody.innerHTML = rows.join("");
+  lastRenderWindow = { start, end, count: filtered.length };
+}
+
+function isFilterCacheStale() {
+  if (!cachedFilteredFlows || !cachedFilterSnapshot) return true;
+  if (cachedFilterSnapshot.filterText !== filterText) return true;
+  if (!filterConfigsEqual(cachedFilterSnapshot.filterState, filterState)) return true;
+  if (cachedFilterSnapshot.sortColId !== sortState.colId) return true;
+  if (cachedFilterSnapshot.sortDir !== sortState.direction) return true;
+  if (cachedFilterSnapshot.flowCount !== flows.length) return true;
+  return false;
+}
+
+function invalidateFilterCache() {
+  cachedFilteredFlows = null;
+  cachedFilteredIds = null;
+  cachedFilterSnapshot = null;
+  lastRenderWindow = null;
 }
 
 function getVisibleFlows() {
+  if (!isFilterCacheStale()) {
+    return cachedFilteredFlows;
+  }
   let filtered = flows.filter(matchesFlowFilters);
   if (sortState.colId && sortState.direction) {
     filtered = sortFlows(filtered);
   }
+  cachedFilteredFlows = filtered;
+  cachedFilteredIds = new Set(filtered.map((flow) => flow.id));
+  cachedFilterSnapshot = {
+    filterText,
+    filterState: cloneFilterConfig(filterState),
+    sortColId: sortState.colId,
+    sortDir: sortState.direction,
+    flowCount: flows.length,
+  };
   return filtered;
+}
+
+// Replace an updated flow inside the cached filter result without a full
+// re-filter; only invalidate when its membership actually changed.
+function updateFlowInFilterCache(flow) {
+  if (!cachedFilteredFlows || !cachedFilteredIds) return;
+  const wasIncluded = cachedFilteredIds.has(flow.id);
+  const isIncluded = matchesFlowFilters(flow);
+  if (wasIncluded && isIncluded) {
+    const i = cachedFilteredFlows.findIndex((item) => item.id === flow.id);
+    if (i >= 0) {
+      cachedFilteredFlows[i] = flow;
+      lastRenderWindow = null;
+    }
+    return;
+  }
+  if (!wasIncluded && !isIncluded) return;
+  invalidateFilterCache();
+}
+
+function findSortedInsertIndex(arr, flow) {
+  if (!sortState.colId || !sortState.direction) return arr.length;
+  const dir = sortState.direction === "asc" ? 1 : -1;
+  const key = getSortValue(flow, sortState.colId);
+  let lo = 0;
+  let hi = arr.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    const cmp = compareSortKeys(getSortValue(arr[mid], sortState.colId), key) * dir;
+    if (cmp < 0) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
+function compareSortKeys(a, b) {
+  if (a < b) return -1;
+  if (a > b) return 1;
+  return 0;
 }
 
 function getVisibleFlowIds() {
@@ -1021,6 +1163,11 @@ function getFlowRowClass(flowId) {
   const classes = [];
   if (selectedFlowIds.has(flowId)) classes.push("selected");
   if (selectedFlowId === flowId) classes.push("focused");
+  // Body filter could not verify this flow (fetch failed / unavailable / still
+  // loading) — it stays visible but is visually marked as unverified.
+  if (needsFilterContent() && filterBodyUnsearchedIds.has(flowId) && !filterBodyMatchedIds.has(flowId)) {
+    classes.push("unverified");
+  }
   return classes.join(" ");
 }
 
@@ -1093,7 +1240,38 @@ function setFocusedFlow(flowId, options = {}) {
   if (!flowId) return;
   selectedFlowId = flowId;
   if (options.requestDetail) {
+    // Render an immediate placeholder from the (body-less) list flow so the
+    // detail panel responds instantly; bodies arrive via showDetail.
+    const idx = flowIndexById.get(flowId);
+    const listFlow = Number.isInteger(idx) ? flows[idx] : null;
+    if (listFlow && (!currentDetailFlow || currentDetailFlow.id !== flowId)) {
+      currentDetailFlow = { ...listFlow };
+      detailBodiesPending = true;
+      fullBodyShown = { req: false, res: false };
+      autoExpandRightPanel();
+      renderDetail(currentDetailFlow, { bodiesPending: true });
+    }
     vscode.postMessage({ command: "selectFlow", flowId });
+  }
+}
+
+// A list flow was updated (e.g. response completed) while shown in the detail
+// panel: keep already-transferred bodies, re-render, and re-request bodies
+// once the response is final.
+function refreshDetailForUpdatedFlow(prev, next) {
+  const merged = { ...next };
+  if (currentDetailFlow && currentDetailFlow.id === next.id) {
+    merged.req_body = currentDetailFlow.req_body;
+    merged.req_body_base64 = currentDetailFlow.req_body_base64;
+    merged.res_body = currentDetailFlow.res_body;
+    merged.res_body_base64 = currentDetailFlow.res_body_base64;
+  }
+  currentDetailFlow = merged;
+  renderDetail(merged, { bodiesPending: detailBodiesPending });
+  const justCompleted = (!prev || !prev.status_code) && next.status_code;
+  if (justCompleted) {
+    detailBodiesPending = true;
+    vscode.postMessage({ command: "selectFlow", flowId: next.id });
   }
 }
 
@@ -1129,19 +1307,18 @@ function matchesKeywordFilter(flow) {
   }
   if (scopes.has("reqHeaders") && includesLower(formatRequestHeaders(flow), term)) return true;
   if (scopes.has("resHeaders") && includesLower(formatHeaders(flow.res_headers), term)) return true;
-  if (scopes.has("reqBody") && includesLower(flow.req_body || "", term)) return true;
-  if (scopes.has("resBody") && includesLower(getResponseBodyForFilter(flow), term)) return true;
+  // Body matching runs in the extension (bodies never reach the webview).
+  // Unsearched flows (fetch failed / unavailable / pending) are NOT treated
+  // as non-matching — they stay visible, marked as unverified.
+  if (scopes.has("reqBody") || scopes.has("resBody")) {
+    if (filterBodyMatchedIds.has(flow.id)) return true;
+    if (filterBodyUnsearchedIds.has(flow.id)) return true;
+  }
   return false;
 }
 
 function includesLower(value, term) {
   return String(value || "").toLowerCase().includes(term);
-}
-
-function getResponseBodyForFilter(flow) {
-  if (flow.res_body) return flow.res_body;
-  if (flow.res_body_base64) return decodeBase64Body(flow.res_body_base64, flow.res_size);
-  return "";
 }
 
 function getStatusBucket(flow) {
@@ -1792,7 +1969,74 @@ function renderEmptyDetail() {
   clearSearch();
 }
 
-function renderDetail(flow) {
+// Above this size the body is shown truncated with an explicit notice and a
+// "load full content" action — the full body stays available (search-in-detail
+// covers only the displayed part until expanded; filter/export always use the
+// complete body on the extension side).
+const DETAIL_BODY_DISPLAY_LIMIT = 2 * 1024 * 1024;
+
+// Decide what to show in place of a body that has no displayable content.
+// Returns null when the body is genuinely empty (show "(empty)") and a
+// status text for every other case — never conflate them.
+function bodyStatusPlaceholder(flow, side, bodiesPending) {
+  const isReq = side === "req";
+  const size = isReq ? flow.req_size : flow.res_size;
+  const state = isReq ? flow._reqBodyState : flow._resBodyState;
+  const error = isReq ? flow._reqBodyError : flow._resBodyError;
+  if (!isReq && !flow.status_code && !flow.error) {
+    return t("webview.detail.bodyPendingResponse");
+  }
+  if (!(size > 0) && state !== "error") return null; // genuinely no body
+  // bodiesPending takes priority over "ready": the extension has the body but
+  // it has not been transferred to this panel yet — never flash "(empty)".
+  if (bodiesPending || state === "loading") return t("webview.detail.bodyLoading");
+  if (state === "ready") return null;
+  if (state === "pending") return t("webview.detail.bodyPendingResponse");
+  if (state === "error") return t("webview.detail.bodyError", { message: error || "unknown" });
+  if (state === "unavailable") return t("webview.detail.bodyUnavailable");
+  return t("webview.detail.bodyNotLoaded");
+}
+
+function prepareBodyForDisplay(body, side) {
+  if (!body || body.length <= DETAIL_BODY_DISPLAY_LIMIT || fullBodyShown[side]) {
+    return { text: body || "", truncated: false, total: body ? body.length : 0 };
+  }
+  return { text: body.slice(0, DETAIL_BODY_DISPLAY_LIMIT), truncated: true, total: body.length };
+}
+
+function updateBodyNotice(side, displayInfo) {
+  const section = $(side + "Section");
+  if (!section) return;
+  let notice = section.querySelector(".body-notice");
+  if (!displayInfo || !displayInfo.truncated) {
+    if (notice) notice.remove();
+    return;
+  }
+  if (!notice) {
+    notice = document.createElement("div");
+    notice.className = "body-notice";
+    const text = document.createElement("span");
+    text.className = "body-notice-text";
+    const btn = document.createElement("button");
+    btn.className = "btn btn-sm btn-outline body-notice-btn";
+    btn.textContent = t("webview.detail.loadFullBody");
+    btn.addEventListener("click", () => {
+      fullBodyShown[side] = true;
+      if (currentDetailFlow) renderDetail(currentDetailFlow, { bodiesPending: detailBodiesPending });
+    });
+    notice.appendChild(text);
+    notice.appendChild(btn);
+    const header = section.querySelector(".section-header");
+    if (header) header.insertAdjacentElement("afterend", notice);
+  }
+  notice.querySelector(".body-notice-text").textContent = t("webview.detail.bodyTruncatedNotice", {
+    shown: formatSize(displayInfo.text.length),
+    total: formatSize(displayInfo.total),
+  });
+}
+
+function renderDetail(flow, options = {}) {
+  const bodiesPending = !!options.bodiesPending;
   $("detailPlaceholder").style.display = "none";
   $("detailContent").style.display = "flex";
   $("detailSearchGroup").style.display = "";
@@ -1807,11 +2051,19 @@ function renderDetail(flow) {
   const reqBody = flow.req_body || "";
   const reqBase64 = flow.req_body_base64 || "";
   const reqContentType = (flow.req_headers && flow.req_headers["content-type"]) || "";
-  const reqDisplayBody = reqBody || (reqBase64 ? decodeBase64Body(reqBase64, flow.req_size) : "");
-  const reqFormatted = formatBodyForEditor(reqDisplayBody, reqContentType, flow.req_size);
-  const reqRaw = isBinaryContentType(reqContentType)
-    ? previewBinaryText(reqDisplayBody, flow.req_size)
-    : (reqDisplayBody || "(empty)");
+  const reqPlaceholder = (!reqBody && !reqBase64) ? bodyStatusPlaceholder(flow, "req", bodiesPending) : null;
+  const reqFullBody = reqBody || (reqBase64 ? decodeBase64Body(reqBase64, flow.req_size) : "");
+  const reqDisplay = prepareBodyForDisplay(reqFullBody, "req");
+  updateBodyNotice("req", reqDisplay);
+  const reqDisplayBody = reqDisplay.text;
+  const reqFormatted = reqPlaceholder
+    ? { text: reqPlaceholder, className: "body-view body-status" }
+    : formatBodyForEditor(reqDisplayBody, reqContentType, flow.req_size);
+  const reqRaw = reqPlaceholder
+    ? reqPlaceholder
+    : (isBinaryContentType(reqContentType)
+      ? previewBinaryText(reqDisplayBody, flow.req_size)
+      : (reqDisplayBody || "(empty)"));
   const reqFormattedMessage = composeHttpMessage(requestStartLine(flow), reqHeadersText, reqFormatted.text);
   setMessageClass($("reqMessageFormatted"), reqFormatted.className);
   setEditorHtml(
@@ -1828,11 +2080,19 @@ function renderDetail(flow) {
   // Response body
   const resBody = flow.res_body || "";
   const resBase64 = flow.res_body_base64 || "";
-  const resDisplayBody = resBody || (resBase64 ? decodeBase64Body(resBase64, flow.res_size) : "");
-  const resFormatted = formatBodyForEditor(resDisplayBody, flow.content_type, flow.res_size);
-  const resRaw = isBinaryContentType(flow.content_type)
-    ? previewBinaryText(resDisplayBody, flow.res_size)
-    : (resDisplayBody || "(empty)");
+  const resPlaceholder = (!resBody && !resBase64) ? bodyStatusPlaceholder(flow, "res", bodiesPending) : null;
+  const resFullBody = resBody || (resBase64 ? decodeBase64Body(resBase64, flow.res_size) : "");
+  const resDisplay = prepareBodyForDisplay(resFullBody, "res");
+  updateBodyNotice("res", resDisplay);
+  const resDisplayBody = resDisplay.text;
+  const resFormatted = resPlaceholder
+    ? { text: resPlaceholder, className: "body-view body-status" }
+    : formatBodyForEditor(resDisplayBody, flow.content_type, flow.res_size);
+  const resRaw = resPlaceholder
+    ? resPlaceholder
+    : (isBinaryContentType(flow.content_type)
+      ? previewBinaryText(resDisplayBody, flow.res_size)
+      : (resDisplayBody || "(empty)"));
   const resFormattedMessage = composeHttpMessage(responseStartLine(flow), resHeadersText, resFormatted.text);
   setMessageClass($("resMessageFormatted"), resFormatted.className);
   setEditorHtml(
@@ -1898,6 +2158,8 @@ function formatRequestHeaders(flow) {
   return lines.length > 0 ? lines.join("\n") : "(empty)";
 }
 
+const FORMAT_BODY_HIGHLIGHT_SIZE_LIMIT = 64 * 1024; // 64KB — skip parse/format/highlight above this
+
 function formatBodyForEditor(body, contentType, totalBytes) {
   if (!body) {
     return { text: "(empty)", className: "body-view" };
@@ -1911,9 +2173,12 @@ function formatBodyForEditor(body, contentType, totalBytes) {
     return { text: displayBody, className: "body-view binary" };
   }
 
+  // For large bodies, skip JSON parse/format/highlight — keep raw text only
+  const bodyTooLarge = body.length > FORMAT_BODY_HIGHLIGHT_SIZE_LIMIT;
+
   // Sniff JSON by first non-whitespace char — catches mismatched Content-Type
   const firstChar = body[body.search(/\S/)] || "";
-  if (firstChar === "{" || firstChar === "[") {
+  if (!bodyTooLarge && (firstChar === "{" || firstChar === "[")) {
     try {
       const parsed = JSON.parse(body);
       const text = JSON.stringify(parsed, null, 2);
@@ -1926,7 +2191,7 @@ function formatBodyForEditor(body, contentType, totalBytes) {
   }
 
   // Explicit JSON/JS content type
-  if (ct.includes("json") || ct.includes("javascript")) {
+  if (!bodyTooLarge && (ct.includes("json") || ct.includes("javascript"))) {
     try {
       const parsed = JSON.parse(body);
       const text = JSON.stringify(parsed, null, 2);
@@ -2065,18 +2330,146 @@ function getSearchableElements() {
   return els;
 }
 
-function performSearch(term) {
-  // Restore original text from cache before rebuilding mark highlights.
-  for (const [el, text] of _searchSavedTexts) {
+const MAX_SEARCH_MARKS_INITIAL = 500;
+const MAX_TOTAL_SEARCH_MATCHES = 2000;
+const MAX_SEARCH_MATCH_COUNT = 50000;
+const SEARCH_DEBOUNCE_MS = 180;
+const SEARCH_YIELD_INTERVAL_MS = 12;
+
+// Async search lifecycle: every run gets a generation number; bumping the
+// generation (new input, cleared search, re-rendered detail) cancels any
+// in-flight run at its next yield point.
+let _searchGeneration = 0;
+let _searchDebounceTimer = null;
+let _searchTotals = { req: 0, res: 0, overflow: false };
+let _searchMarkedEls = new Set();
+let _searchBusy = false;
+
+function yieldToUi() {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+function scheduleSearch(term) {
+  if (_searchDebounceTimer) clearTimeout(_searchDebounceTimer);
+  _searchDebounceTimer = setTimeout(() => {
+    _searchDebounceTimer = null;
+    performSearch(term);
+  }, SEARCH_DEBOUNCE_MS);
+}
+
+// Restore base HTML only on editors that actually carry marks.
+function restoreSearchBaseHtml() {
+  for (const el of _searchMarkedEls) {
+    const text = _searchSavedTexts.has(el) ? _searchSavedTexts.get(el) : getEditorText(el);
     el.innerHTML = el.dataset.baseHtml || escapeHtml(text);
     el.dataset.plainText = text;
-    updateLineNumbers(el);
   }
+  _searchMarkedEls.clear();
+}
+
+function setSearchBusy(busy) {
+  _searchBusy = busy;
+  if (busy) {
+    const label = "(" + t("webview.detail.searching") + ")";
+    $("reqSearchCount").classList.add("visible");
+    $("resSearchCount").classList.add("visible");
+    $("reqSearchCount").textContent = label;
+    $("resSearchCount").textContent = label;
+  }
+}
+
+// Run regex.exec over the full text in time-sliced chunks so even multi-MB
+// bodies are searched completely without freezing the UI.
+async function collectSearchMatches(regex, text, gen) {
+  const out = [];
+  out.overflow = false;
+  if (!text) return out;
+  regex.lastIndex = 0;
+  let lastYield = Date.now();
+  let m;
+  while ((m = regex.exec(text)) !== null) {
+    const start = m.index;
+    const end = start + m[0].length;
+    if (end > start) out.push({ start, end, text: m[0] });
+    if (m[0].length === 0) regex.lastIndex += 1; // avoid zero-width infinite loop
+    if (out.length >= MAX_SEARCH_MATCH_COUNT) {
+      out.overflow = true;
+      break;
+    }
+    if (out.length % 250 === 0 && Date.now() - lastYield > SEARCH_YIELD_INTERVAL_MS) {
+      await yieldToUi();
+      if (gen !== _searchGeneration) return null;
+      lastYield = Date.now();
+    }
+  }
+  return out;
+}
+
+function findSearchTextPositionBinary(index, offset) {
+  const nodes = index.nodes;
+  if (nodes.length === 0) return null;
+  const clamped = Math.max(0, Math.min(offset, index.length));
+  let lo = 0;
+  let hi = nodes.length - 1;
+  let ans = nodes.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (clamped <= nodes[mid].end) {
+      ans = mid;
+      hi = mid - 1;
+    } else {
+      lo = mid + 1;
+    }
+  }
+  const item = nodes[ans];
+  return { node: item.node, offset: Math.max(0, clamped - item.start) };
+}
+
+function applySearchHighlightIndexed(index, start, end, matchText) {
+  const startPos = findSearchTextPositionBinary(index, start);
+  const endPos = findSearchTextPositionBinary(index, end);
+  if (!startPos || !endPos) return null;
+
+  const range = document.createRange();
+  const mark = document.createElement("mark");
+  mark.className = getSearchHighlightClass(matchText);
+  try {
+    range.setStart(startPos.node, startPos.offset);
+    range.setEnd(endPos.node, endPos.offset);
+    mark.appendChild(range.extractContents());
+    range.insertNode(mark);
+    return mark;
+  } catch (_) {
+    return null;
+  } finally {
+    range.detach();
+  }
+}
+
+// Insert marks back-to-front against a single prebuilt text-node index —
+// earlier positions stay valid because mutations only happen at later offsets.
+// (Previously the index was rebuilt per mark: O(matches × nodes) — the direct
+// cause of "type one character, page freezes" on large highlighted bodies.)
+function applyMarksToEditor(el, entries) {
+  if (entries.length === 0) return;
+  const index = buildSearchTextNodeIndex(el);
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const e = entries[i];
+    e.el = applySearchHighlightIndexed(index, e.start, e.end, e.text);
+  }
+  _searchMarkedEls.add(el);
+}
+
+async function performSearch(term) {
+  const gen = ++_searchGeneration;
+  restoreSearchBaseHtml();
 
   if (!term || term.length < 1) {
     _searchTerm = "";
     _searchMatches = [];
     _searchCurrentIdx = -1;
+    _searchTotals = { req: 0, res: 0, overflow: false };
+    setSearchBusy(false);
     updateSearchCounts();
     return;
   }
@@ -2084,9 +2477,11 @@ function performSearch(term) {
   _searchTerm = term;
   _searchMatches = [];
   _searchCurrentIdx = -1;
+  _searchTotals = { req: 0, res: 0, overflow: false };
 
-  var pattern = buildSearchPattern(term, _searchRegex);
+  const pattern = buildSearchPattern(term, _searchRegex);
   if (pattern.error) {
+    setSearchBusy(false);
     $("reqSearchCount").classList.add("visible");
     $("reqSearchCount").classList.remove("has-matches");
     $("reqSearchCount").textContent = "(" + pattern.error + ")";
@@ -2095,52 +2490,66 @@ function performSearch(term) {
     $("resSearchCount").textContent = "(" + pattern.error + ")";
     return;
   }
-  var regex = pattern.regex;
 
+  setSearchBusy(true);
   const els = getSearchableElements();
+  let marksCreated = 0;
 
   for (const { el, section } of els) {
-    const text = _searchSavedTexts.get(el);
-    if (!text || text.length > 500000) continue;
+    if (!_searchSavedTexts.has(el)) {
+      _searchSavedTexts.set(el, getEditorText(el));
+    }
+    const text = _searchSavedTexts.get(el) || "";
+    const found = await collectSearchMatches(pattern.regex, text, gen);
+    if (gen !== _searchGeneration) return;
+    if (!found) return;
 
-    regex.lastIndex = 0;
-    const matches = [...text.matchAll(regex)];
-    if (matches.length === 0) continue;
+    _searchTotals[section] += found.length;
+    if (found.overflow) _searchTotals.overflow = true;
 
-    const sectionMarks = [];
-    for (let i = matches.length - 1; i >= 0; i--) {
-      const m = matches[i];
-      const start = m.index || 0;
-      const end = start + m[0].length;
-      if (end > start) {
-        const mark = applySearchHighlight(el, start, end, m[0]);
-        if (mark) sectionMarks.unshift(mark);
+    const remaining = MAX_TOTAL_SEARCH_MATCHES - _searchMatches.length;
+    if (remaining > 0 && found.length > 0) {
+      if (found.length > remaining) _searchTotals.overflow = true;
+      const stored = found.slice(0, remaining).map((m) => ({
+        section,
+        el: null,
+        start: m.start,
+        end: m.end,
+        text: m.text,
+      }));
+      const markBudget = Math.max(0, MAX_SEARCH_MARKS_INITIAL - marksCreated);
+      const toMark = stored.slice(0, markBudget);
+      if (toMark.length > 0) {
+        applyMarksToEditor(el, toMark);
+        marksCreated += toMark.length;
       }
+      for (const entry of stored) _searchMatches.push(entry);
     }
-    updateLineNumbers(el);
-
-    for (const mark of sectionMarks) {
-      _searchMatches.push({ el: mark, section });
-    }
+    await yieldToUi();
+    if (gen !== _searchGeneration) return;
   }
 
+  setSearchBusy(false);
   updateSearchCounts();
 }
 
 function clearHighlights() {
-  for (const [el, text] of _searchSavedTexts) {
-    el.innerHTML = el.dataset.baseHtml || escapeHtml(text);
-    el.dataset.plainText = text;
-    updateLineNumbers(el);
-  }
+  _searchGeneration += 1; // cancel any in-flight search
+  restoreSearchBaseHtml();
   _searchSavedTexts.clear();
 }
 
 function clearSearch() {
+  if (_searchDebounceTimer) {
+    clearTimeout(_searchDebounceTimer);
+    _searchDebounceTimer = null;
+  }
   clearHighlights();
   _searchTerm = "";
   _searchMatches = [];
   _searchCurrentIdx = -1;
+  _searchTotals = { req: 0, res: 0, overflow: false };
+  setSearchBusy(false);
   $("detailSearchInput").value = "";
   updateSearchCounts();
 }
@@ -2156,9 +2565,12 @@ function setSearchRegexEnabled(enabled) {
 }
 
 function updateSearchCounts() {
-  const reqCount = _searchMatches.filter(function(m) { return m.section === "req"; }).length;
-  const resCount = _searchMatches.filter(function(m) { return m.section === "res"; }).length;
-  const total = _searchMatches.length;
+  if (_searchBusy) return;
+  const storedReq = _searchMatches.filter(function(m) { return m.section === "req"; }).length;
+  const storedRes = _searchMatches.filter(function(m) { return m.section === "res"; }).length;
+  const actualReq = Math.max(_searchTotals.req, storedReq);
+  const actualRes = Math.max(_searchTotals.res, storedRes);
+  const oversize = !!_searchTotals.overflow;
 
   function apply(el, count) {
     if (_searchTerm) {
@@ -2170,11 +2582,38 @@ function updateSearchCounts() {
   }
 
   if (_searchTerm) {
-    $("reqSearchCount").textContent = reqCount > 0 ? "(" + reqCount + ")" : "(0)";
-    $("resSearchCount").textContent = resCount > 0 ? "(" + resCount + ")" : "(0)";
+    if (oversize && storedReq < actualReq) {
+      $("reqSearchCount").textContent = storedReq > 0 ? "(" + storedReq + "+/" + actualReq + ")" : "(0/" + actualReq + ")";
+    } else {
+      $("reqSearchCount").textContent = actualReq > 0 ? "(" + actualReq + ")" : "(0)";
+    }
+    if (oversize && storedRes < actualRes) {
+      $("resSearchCount").textContent = storedRes > 0 ? "(" + storedRes + "+/" + actualRes + ")" : "(0/" + actualRes + ")";
+    } else {
+      $("resSearchCount").textContent = actualRes > 0 ? "(" + actualRes + ")" : "(0)";
+    }
   }
-  apply($("reqSearchCount"), reqCount);
-  apply($("resSearchCount"), resCount);
+  apply($("reqSearchCount"), actualReq);
+  apply($("resSearchCount"), actualRes);
+}
+
+function getSearchableEditor(section) {
+  const els = getSearchableElements();
+  const found = els.find(function(e) { return e.section === section; });
+  return found ? found.el : null;
+}
+
+function ensureSearchMark(match) {
+  if (match.el) return true;
+  const editor = getSearchableEditor(match.section);
+  if (!editor) return false;
+  const mark = applySearchHighlight(editor, match.start, match.end, match.text);
+  if (mark) {
+    match.el = mark;
+    updateLineNumbers(editor);
+    return true;
+  }
+  return false;
 }
 
 function scrollMatchIntoPane(mark) {
@@ -2211,7 +2650,8 @@ function navigateSearch(forward) {
   if (_searchMatches.length === 0) return;
 
   if (_searchCurrentIdx >= 0 && _searchCurrentIdx < _searchMatches.length) {
-    _searchMatches[_searchCurrentIdx].el.classList.remove("current");
+    const current = _searchMatches[_searchCurrentIdx];
+    if (current.el) current.el.classList.remove("current");
   }
 
   if (forward) {
@@ -2221,8 +2661,11 @@ function navigateSearch(forward) {
   }
 
   const match = _searchMatches[_searchCurrentIdx];
-  match.el.classList.add("current");
-  scrollMatchIntoPane(match.el);
+  ensureSearchMark(match);
+  if (match.el) {
+    match.el.classList.add("current");
+    scrollMatchIntoPane(match.el);
+  }
 
   const reqCount = _searchMatches.filter(function(m) { return m.section === "req"; }).length;
   const total = _searchMatches.length;
@@ -2372,20 +2815,28 @@ document.addEventListener("click", (e) => {
 $("detailSearchInput").addEventListener("input", function() {
   const term = this.value.trim();
   if (term) {
-    cacheSearchTexts();
-    performSearch(term);
+    scheduleSearch(term);
   } else {
     clearSearch();
   }
 });
 
-$("detailSearchInput").addEventListener("keydown", function(e) {
+async function flushPendingSearch() {
+  const term = $("detailSearchInput").value.trim();
+  if (!term) return;
+  if (_searchDebounceTimer) {
+    clearTimeout(_searchDebounceTimer);
+    _searchDebounceTimer = null;
+    await performSearch(term);
+  } else if (_searchMatches.length === 0 && !_searchBusy) {
+    await performSearch(term);
+  }
+}
+
+$("detailSearchInput").addEventListener("keydown", async function(e) {
   if (e.key === "Enter") {
     e.preventDefault();
-    if (_searchMatches.length === 0) {
-      const term = this.value.trim();
-      if (term) { cacheSearchTexts(); performSearch(term); }
-    }
+    await flushPendingSearch();
     if (_searchMatches.length > 0) navigateSearch(!e.shiftKey);
   } else if (e.key === "Escape") {
     e.preventDefault();
@@ -2397,7 +2848,6 @@ $("detailRegexBtn").addEventListener("click", function() {
   setSearchRegexEnabled(!_searchRegex);
   const term = $("detailSearchInput").value.trim();
   if (term) {
-    cacheSearchTexts();
     performSearch(term);
   }
 });
@@ -2407,20 +2857,14 @@ $("detailClearSearchBtn").addEventListener("click", function() {
   $("detailSearchInput").focus();
 });
 
-$("detailPrevSearchBtn").addEventListener("click", function() {
-  if (_searchMatches.length === 0) {
-    const term = $("detailSearchInput").value.trim();
-    if (term) { cacheSearchTexts(); performSearch(term); }
-  }
+$("detailPrevSearchBtn").addEventListener("click", async function() {
+  await flushPendingSearch();
   navigateSearch(false);
   $("detailSearchInput").focus();
 });
 
-$("detailNextSearchBtn").addEventListener("click", function() {
-  if (_searchMatches.length === 0) {
-    const term = $("detailSearchInput").value.trim();
-    if (term) { cacheSearchTexts(); performSearch(term); }
-  }
+$("detailNextSearchBtn").addEventListener("click", async function() {
+  await flushPendingSearch();
   navigateSearch(true);
   $("detailSearchInput").focus();
 });
@@ -2607,34 +3051,27 @@ function needsFilterContent() {
   return !!filterText && (filterState.scopes.has("reqBody") || filterState.scopes.has("resBody"));
 }
 
-function isFilterContentPending() {
-  return needsFilterContent() && filterContentState.blocking && !filterContentState.ready;
-}
-
-function filterContentMessage() {
-  if (filterContentState.preparing) {
-    return t("webview.flow.waitingForFilter", {
-      completed: filterContentState.completed,
-      total: filterContentState.total,
-    });
-  }
-  return t("webview.filter.contentPreparing");
-}
-
-function resetFilterContentState(blocking = false) {
+function resetFilterContentState() {
   filterContentState.ready = false;
   filterContentState.preparing = false;
-  filterContentState.blocking = blocking;
   filterContentState.refreshQueued = false;
   filterContentState.completed = 0;
   filterContentState.total = 0;
   filterContentState.failed = 0;
+  filterBodyMatchedIds = new Set();
+  filterBodyUnsearchedIds = new Set();
+  if (filterRefreshTimer) {
+    clearTimeout(filterRefreshTimer);
+    filterRefreshTimer = null;
+  }
 }
 
 function ensureFilterContentIfNeeded(options = {}) {
   if (!needsFilterContent()) {
+    if (filterContentState.preparing) {
+      vscode.postMessage({ command: "cancelFilterContent", requestId: filterContentState.requestId });
+    }
     filterContentState.preparing = false;
-    filterContentState.blocking = false;
     updateFilterUi();
     return;
   }
@@ -2642,16 +3079,13 @@ function ensureFilterContentIfNeeded(options = {}) {
   if (filterContentState.ready && !options.force) return;
   filterContentState.requestId += 1;
   filterContentState.preparing = true;
-  filterContentState.blocking = !!options.blocking;
-  if (options.blocking) {
-    filterContentState.ready = false;
-  }
   filterContentState.completed = 0;
   filterContentState.total = flows.length;
   filterContentState.failed = 0;
   vscode.postMessage({
     command: "prepareFilterContent",
     requestId: filterContentState.requestId,
+    term: filterText,
     scopes: {
       reqBody: filterState.scopes.has("reqBody"),
       resBody: filterState.scopes.has("resBody"),
@@ -2661,25 +3095,17 @@ function ensureFilterContentIfNeeded(options = {}) {
 }
 
 function handleFlowsChanged() {
-  if (needsFilterContent()) {
-    if (filterContentState.preparing) {
-      filterContentState.refreshQueued = true;
-      return;
-    }
-    ensureFilterContentIfNeeded({ force: true, blocking: false });
+  if (!needsFilterContent()) return;
+  if (filterContentState.preparing) {
+    filterContentState.refreshQueued = true;
+    return;
   }
-}
-
-function mergeUpdatedFlows(updatedFlows) {
-  let changed = false;
-  for (const next of updatedFlows) {
-    const idx = flowIndexById.get(next.id);
-    if (!Number.isInteger(idx)) continue;
-    next._seq = flows[idx]._seq;
-    flows[idx] = next;
-    changed = true;
-  }
-  if (changed) rebuildFlowIndex();
+  // Debounce — new flows arrive continuously during capture
+  if (filterRefreshTimer) return;
+  filterRefreshTimer = setTimeout(() => {
+    filterRefreshTimer = null;
+    ensureFilterContentIfNeeded({ force: true });
+  }, 400);
 }
 
 function updateFilterUi() {
@@ -2704,20 +3130,46 @@ function updateFilterUi() {
 
   const status = $("filterStatusText");
   if (!status) return;
-  if (needsFilterContent() && filterContentState.preparing) {
-    status.textContent = t("webview.filter.contentLoading", {
-      completed: filterContentState.completed,
-      total: filterContentState.total,
-    });
-  } else if (needsFilterContent() && filterContentState.failed > 0) {
-    status.textContent = t("webview.filter.contentFailed", { count: filterContentState.failed });
-  } else if (needsFilterContent() && filterContentState.ready) {
-    status.textContent = t("webview.filter.contentReady");
+  const contentStatus = getFilterContentStatusText();
+  if (contentStatus) {
+    status.textContent = contentStatus;
   } else if (hasDraftFilterChanges()) {
     status.textContent = t("webview.filter.modified");
   } else {
     status.textContent = t("webview.filter.defaultHint");
   }
+
+  // The filter panel is usually closed while bodies are being scanned —
+  // mirror retrieval progress/completeness in the always-visible footer.
+  // Only on transitions, so other footer messages are not permanently masked.
+  if (contentStatus !== lastFilterFooterStatus) {
+    if (contentStatus) footerStatus.textContent = contentStatus;
+    lastFilterFooterStatus = contentStatus;
+  }
+}
+
+function getFilterContentStatusText() {
+  if (!needsFilterContent()) return "";
+  if (filterContentState.preparing) {
+    return t("webview.filter.contentLoading", {
+      completed: filterContentState.completed,
+      total: filterContentState.total,
+    });
+  }
+  if (filterContentState.ready) {
+    const unsearched = filterBodyUnsearchedIds.size;
+    if (unsearched > 0) {
+      return t("webview.filter.partialUnsearched", {
+        count: unsearched,
+        failed: filterContentState.failed,
+      });
+    }
+    if (filterContentState.failed > 0) {
+      return t("webview.filter.contentFailed", { count: filterContentState.failed });
+    }
+    return t("webview.filter.contentReady");
+  }
+  return t("webview.filter.contentPreparing");
 }
 
 function getActiveFilterCount() {
@@ -2837,8 +3289,9 @@ function applyFilters() {
   filterText = filterTextDraft;
   filterState = cloneFilterConfig(filterDraftState);
   filterPanelOpen = false;
-  resetFilterContentState(needsFilterContent());
-  ensureFilterContentIfNeeded({ blocking: needsFilterContent(), force: true });
+  invalidateFilterCache();
+  resetFilterContentState();
+  ensureFilterContentIfNeeded({ force: true });
   updateFilterUi();
   renderFlowList();
   sendSessionUiState();
@@ -2869,6 +3322,8 @@ function clearAllFilters() {
   filterDraftState = createFilterConfig();
   filterState = createFilterConfig();
   $("filterInput").value = "";
+  invalidateFilterCache();
+  vscode.postMessage({ command: "cancelFilterContent", requestId: filterContentState.requestId });
   resetFilterContentState();
   updateFilterUi();
   renderFlowList();
@@ -2991,7 +3446,7 @@ document.addEventListener("keydown", (e) => {
   }
 
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "a" && !isEditableShortcutTarget()) {
-    const filtered = isFilterContentPending() ? [] : getVisibleFlows();
+    const filtered = getVisibleFlows();
     if (filtered.length === 0) return;
     e.preventDefault();
     e.stopPropagation();
@@ -3021,7 +3476,7 @@ document.addEventListener("keydown", (e) => {
 
     e.preventDefault();
 
-    const filtered = isFilterContentPending() ? [] : getVisibleFlows();
+    const filtered = getVisibleFlows();
 
     if (filtered.length === 0) return;
 
@@ -3099,7 +3554,7 @@ window.addEventListener("resize", () => {
 
 if (flowTableWrapper) {
   flowTableWrapper.addEventListener("scroll", () => {
-    scheduleFlowListRender();
+    scheduleFlowListRender(true);
   }, { passive: true });
 }
 
