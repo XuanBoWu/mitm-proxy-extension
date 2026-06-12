@@ -68,12 +68,16 @@ Webview UI (HTML/CSS/JS) → vscode.postMessage → extension.js (Node.js)
 ### 版本更新规则
 
 - `package.json` 的 `version` 是测试构建标识，不只代表正式 GitHub Release。
-- 每完成一个可测试阶段，即使暂不发布，也必须更新 `package.json` 的 `version`。
+- 版本号不跟分支名绑定，而是跟“可测试 / 可发布的阶段结果”绑定。
+- topic 分支上的开发过程默认不 bump；当改动准备进入 `staging` 做候选验证，或准备直接交付给用户测试时，必须更新 `package.json` 的 `version` 和 `CHANGELOG.md`。
+- `staging` 中如果继续修复问题并形成新的可测试候选版本，每个候选阶段继续按风险 bump 版本。
+- `staging` 验证通过后合入 `master` 时，`master` 沿用 `staging` 中已经确定的版本号，不额外 bump。
+- 正式发布时，从 `master` 当前版本号创建对应 `v*` tag，例如 `package.json` 为 `0.3.1` 时打 `v0.3.1`。
 - bug 修复、小功能阶段、UI 调整、对测试有可验证影响的文档/流程修正，默认 bump `PATCH`。
 - 仅修改 `AGENTS.md` 等 agent 工作约束、协作规则或内部执行口径，且不改变扩展功能、用户文档、发布产物、CI 行为或测试流程时，不视为可测试阶段；默认不 bump `package.json`，也不新增正式 CHANGELOG 版本小节。
 - 新增一类用户可感知能力或完成较大阶段，bump `MINOR` 并将 `PATCH` 归零。
 - 不兼容配置、runtime 协议、用户迁移流程，或进入正式稳定大版本时，bump `MAJOR`。
-- 版本号不与每个 commit 绑定，而是与“可测试的阶段结果”绑定。
+- 版本号不与每个 commit 绑定。
 - 每次准备交给用户测试或准备提交阶段性成果前，至少更新：
   - `package.json`
   - `CHANGELOG.md`

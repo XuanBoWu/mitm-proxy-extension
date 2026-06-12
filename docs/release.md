@@ -29,6 +29,16 @@ The Git tag includes the leading `v`. The package version and runtime version do
 
 `package.json` version identifies each testable VSIX build, even before a public release. Bump the patch version for each completed bug fix or feature stage. `secmp.runtimeVersion` is independent and only changes when the packaged runtime actually changes.
 
+Version numbers are tied to testable/releasable milestones, not to branch names:
+
+- Topic branch work does not need a version bump while it is still exploratory.
+- Before a topic branch enters `staging` for candidate validation, bump `package.json` and update `CHANGELOG.md`.
+- If `staging` needs another fix round that produces a new candidate build, bump the version again, usually as a patch.
+- When `staging` is merged into `master`, keep the version already validated on `staging`; do not bump again just because the target branch changes.
+- For a release, create the `v*` tag from the current `master` version. For example, `package.json` version `0.3.1` should be released with tag `v0.3.1`.
+
+Use `PATCH` for bug fixes, focused performance/stability fixes, small UI changes, and other small testable stages. Use `MINOR` for a new user-visible capability or a larger completed feature stage. Use `MAJOR` for incompatible configuration, runtime protocol, data format, or migration changes.
+
 ## Release Checklist
 
 Before creating a release:
