@@ -69,8 +69,10 @@ Webview UI (HTML/CSS/JS) → vscode.postMessage → extension.js (Node.js)
 
 - `package.json` 的 `version` 是测试构建标识，不只代表正式 GitHub Release。
 - 版本号不跟分支名绑定，而是跟“可测试 / 可发布的阶段结果”绑定。
-- topic 分支上的开发过程默认不 bump；当改动准备进入 `staging` 做候选验证，或准备直接交付给用户测试时，必须更新 `package.json` 的 `version` 和 `CHANGELOG.md`。
-- `staging` 中如果继续修复问题并形成新的可测试候选版本，每个候选阶段继续按风险 bump 版本。
+- topic 分支上的开发过程默认不 bump；topic 分支合入 `staging` 做集成验证时也默认不 bump。
+- 版本 bump 统一在 `staging` 分支上进行；时机是 `staging` 已验证完成、准备提 PR 合入 `master` 前。
+- 准备从 `staging` 提 PR 到 `master` 时，必须更新 `package.json` 的 `version` 和 `CHANGELOG.md`，并按本次候选包含的全部变更整理版本说明。
+- 如果准备 PR 后继续在 `staging` 修复问题并形成新的可测试候选版本，每个候选阶段继续按风险 bump 版本。
 - `staging` 验证通过后合入 `master` 时，`master` 沿用 `staging` 中已经确定的版本号，不额外 bump。
 - 正式发布时，从 `master` 当前版本号创建对应 `v*` tag，例如 `package.json` 为 `0.3.1` 时打 `v0.3.1`。
 - bug 修复、小功能阶段、UI 调整、对测试有可验证影响的文档/流程修正，默认 bump `PATCH`。
@@ -78,7 +80,7 @@ Webview UI (HTML/CSS/JS) → vscode.postMessage → extension.js (Node.js)
 - 新增一类用户可感知能力或完成较大阶段，bump `MINOR` 并将 `PATCH` 归零。
 - 不兼容配置、runtime 协议、用户迁移流程，或进入正式稳定大版本时，bump `MAJOR`。
 - 版本号不与每个 commit 绑定。
-- 每次准备交给用户测试或准备提交阶段性成果前，至少更新：
+- 每次在 `staging` 准备向 `master` 提 PR，或准备直接从 `staging` 交付候选包给用户测试前，至少更新：
   - `package.json`
   - `CHANGELOG.md`
 - 正式发布前再额外更新：

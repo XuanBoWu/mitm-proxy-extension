@@ -32,8 +32,10 @@ The Git tag includes the leading `v`. The package version and runtime version do
 Version numbers are tied to testable/releasable milestones, not to branch names:
 
 - Topic branch work does not need a version bump while it is still exploratory.
-- Before a topic branch enters `staging` for candidate validation, bump `package.json` and update `CHANGELOG.md`.
-- If `staging` needs another fix round that produces a new candidate build, bump the version again, usually as a patch.
+- Merging a topic branch into `staging` for integration validation does not require a version bump.
+- Bump `package.json` and update `CHANGELOG.md` on `staging`, after validation is complete and before opening the PR from `staging` to `master`.
+- The `CHANGELOG.md` entry for that bump must summarize all changes included in the candidate, not only the final commit.
+- If `staging` needs another fix round after the PR-prep bump and that produces a new candidate build, bump the version again, usually as a patch.
 - When `staging` is merged into `master`, keep the version already validated on `staging`; do not bump again just because the target branch changes.
 - For a release, create the `v*` tag from the current `master` version. For example, `package.json` version `0.3.1` should be released with tag `v0.3.1`.
 
