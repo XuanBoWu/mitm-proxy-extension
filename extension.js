@@ -36,6 +36,10 @@ const GITHUB_RELEASE_LATEST_URL = `${DEFAULT_RUNTIME_REPO}/releases/latest`;
 const WINDOWS_RUNTIME_API_VERSION = 1;
 const WINDOWS_RUNTIME_RETAIN_PREVIOUS_COUNT = 1;
 const DEFAULT_UPDATE_CHECK_INTERVAL_HOURS = 24;
+const DEFAULT_FONT_SCALE = 1.08;
+const MIN_FONT_SCALE = 1;
+const MAX_FONT_SCALE = 1.3;
+const FONT_SCALE_STEP = 0.05;
 const UPDATE_LAST_CHECK_KEY = "secmp.lastUpdateCheckAt";
 const RECENT_SESSIONS_KEY = "secmp.recentSessions";
 const extensionPackage = loadExtensionPackage();
@@ -90,6 +94,15 @@ function getConfiguredLocale() {
 function shouldOpenPanelAfterNewSession() {
   const config = vscode.workspace.getConfiguration("secmp");
   return config.get("openPanelAfterNewSession", true) !== false;
+}
+
+function getConfiguredFontScale() {
+  const config = vscode.workspace.getConfiguration("secmp");
+  const raw = Number(config.get("fontScale", DEFAULT_FONT_SCALE));
+  if (!Number.isFinite(raw)) return DEFAULT_FONT_SCALE;
+  const rounded = Math.round(raw / FONT_SCALE_STEP) * FONT_SCALE_STEP;
+  const clamped = Math.min(MAX_FONT_SCALE, Math.max(MIN_FONT_SCALE, rounded));
+  return Number(clamped.toFixed(2));
 }
 
 function loadL10nBundle(locale) {
@@ -2340,6 +2353,7 @@ function getWebviewContent(webview) {
   html = html.replace("./app.js", scriptUri.toString());
   html = html.replace("./assets/header-icon.png", headerIconUri.toString());
   html = html.replaceAll("__EXTENSION_VERSION__", normalizeVersion(extensionPackage.version));
+  html = html.replaceAll("__SECMP_FONT_SCALE__", String(getConfiguredFontScale()));
   const l10n = getCurrentL10nPayload();
   html = html.replace("__SECMP_LOCALE__", l10n.locale);
   html = html.replace("__SECMP_MESSAGES_JSON__", JSON.stringify(l10n.messages).replace(/</g, "\\u003c"));
@@ -3706,6 +3720,12 @@ function activate(context) {
         panel.webview.html = getWebviewContent(panel.webview);
         postEnvironmentStatus(context);
       }
+    }
+    if (event.affectsConfiguration("secmp.fontScale") && panel) {
+      panel.webview.postMessage({
+        command: "fontScale",
+        fontScale: getConfiguredFontScale(),
+      });
     }
   });
 

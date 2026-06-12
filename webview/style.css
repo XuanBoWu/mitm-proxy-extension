@@ -41,6 +41,14 @@
   --radius: 2px;
   --font-mono: 'Cascadia Code', 'JetBrains Mono', 'Fira Code', 'Consolas', 'Courier New', monospace;
   --font-ui: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  --secmp-font-scale: 1.08;
+  --flow-header-font-size: 11.88px;
+  --flow-font-size: 12.96px;
+  --flow-meta-font-size: 11.88px;
+  --flow-badge-font-size: 10.8px;
+  --flow-row-height: 28.08px;
+  --detail-body-font-size: 11.88px;
+  --detail-body-line-height: 1.45;
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -619,12 +627,12 @@ dd { color: var(--text-primary); }
   position: relative;
   background: var(--bg-secondary);
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: var(--flow-header-font-size);
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.2px;
   padding: 4px 8px;
-  height: 26px;
+  height: var(--flow-row-height);
   text-align: left;
   border-bottom: 1px solid var(--border);
   cursor: grab;
@@ -653,7 +661,7 @@ dd { color: var(--text-primary); }
 #flowTable tbody tr {
   cursor: pointer;
   border-bottom: 1px solid transparent;
-  height: 26px;
+  height: var(--flow-row-height);
   user-select: none;
 }
 #flowTable tbody tr.virtual-spacer {
@@ -676,7 +684,7 @@ dd { color: var(--text-primary); }
 
 #flowTable td {
   padding: 2px 8px;
-  font-size: 12px;
+  font-size: var(--flow-font-size);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -685,7 +693,7 @@ dd { color: var(--text-primary); }
 
 /* TLS version label */
 .tls-label {
-  font-size: 10px;
+  font-size: var(--flow-badge-font-size);
   font-weight: 600;
   padding: 0 4px;
   border-radius: var(--radius);
@@ -697,7 +705,7 @@ dd { color: var(--text-primary); }
 
 .method {
   font-weight: 600;
-  font-size: 11px;
+  font-size: var(--flow-meta-font-size);
   padding: 0 3px;
   border-radius: var(--radius);
   color: var(--text-primary);
@@ -719,9 +727,9 @@ dd { color: var(--text-primary); }
 .status.s0xx { color: var(--red); }
 .status.pending { color: var(--text-muted); }
 
-.time { font-family: var(--font-mono); font-size: 11px; }
+.time { font-family: var(--font-mono); font-size: var(--flow-meta-font-size); }
 .mime-tag {
-  font-size: 10px;
+  font-size: var(--flow-badge-font-size);
   background: var(--bg-surface);
   padding: 0 4px;
   border-radius: var(--radius);
@@ -729,7 +737,7 @@ dd { color: var(--text-primary); }
 }
 
 .proto-tag {
-  font-size: 10px;
+  font-size: var(--flow-badge-font-size);
   font-weight: 600;
   padding: 0 5px;
   border-radius: var(--radius);
@@ -946,9 +954,9 @@ dd { color: var(--text-primary); }
   background: var(--bg-secondary);
   border-right: 1px solid var(--border);
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: var(--detail-body-font-size);
   font-family: var(--font-mono);
-  line-height: 1.45;
+  line-height: var(--detail-body-line-height);
   text-align: right;
   white-space: normal;
   user-select: none;
@@ -970,14 +978,14 @@ dd { color: var(--text-primary); }
   padding: 8px;
   border: none;
   border-radius: 0;
-  font-size: 11px;
+  font-size: var(--detail-body-font-size);
   font-family: var(--font-mono);
   color: var(--text-primary);
   margin: 0;
   width: 100%;
   resize: none;
   outline: none;
-  line-height: 1.45;
+  line-height: var(--detail-body-line-height);
   tab-size: 2;
   white-space: pre-wrap;
   overflow-wrap: anywhere;

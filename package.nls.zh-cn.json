@@ -9,6 +9,7 @@
   "secmp.config.language.auto": "跟随 VS Code",
   "secmp.config.language.zhCN": "简体中文",
   "secmp.config.language.enUS": "英文",
+  "secmp.config.fontScale": "SecMP Webview 字体缩放比例。1.00 接近旧版大小，1.08 为默认值，最大 1.30。",
   "secmp.config.openPanelAfterNewSession": "新建临时或持久 SecMP 会话后自动打开抓包面板。",
   "secmp.config.windowsRuntimePath": "已废弃的兼容设置。请改用 secmp.runtimePath。",
   "secmp.config.windowsRuntimeArchivePath": "已废弃的兼容设置。请改用 secmp.runtimeArchivePath。",
