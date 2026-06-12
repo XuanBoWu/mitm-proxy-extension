@@ -4,6 +4,13 @@ All notable changes to SecMP are documented in this file.
 
 ## Unreleased
 
+## 0.3.1 - 2026-06-13
+
+- Added `secmp.fontSize`, a Webview font-size dropdown with 12-16 px options, so users can enlarge the captured request list and Request/Response detail text without changing the global VS Code zoom.
+- Kept virtual list row-height calculations, column auto-fit measurement, and detail line numbers synchronized with the selected font size.
+- Documented the topic → `staging` → `master` version bump policy for candidate builds and releases.
+- Kept `secmp.runtimeVersion` at `0.1.2` because runtime binaries and the extension-runtime protocol are unchanged.
+
 ## 0.3.0 - 2026-06-10
 
 ### 修复 body 可信度（列表有 size 但详情显示 (empty)）
