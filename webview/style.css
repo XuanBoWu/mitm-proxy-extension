@@ -41,13 +41,13 @@
   --radius: 2px;
   --font-mono: 'Cascadia Code', 'JetBrains Mono', 'Fira Code', 'Consolas', 'Courier New', monospace;
   --font-ui: 'Segoe UI', system-ui, -apple-system, sans-serif;
-  --secmp-font-scale: 1.08;
-  --flow-header-font-size: 11.88px;
-  --flow-font-size: 12.96px;
-  --flow-meta-font-size: 11.88px;
-  --flow-badge-font-size: 10.8px;
-  --flow-row-height: 28.08px;
-  --detail-body-font-size: 11.88px;
+  --secmp-font-size: 13px;
+  --flow-header-font-size: 12px;
+  --flow-font-size: 13px;
+  --flow-meta-font-size: 12px;
+  --flow-badge-font-size: 11px;
+  --flow-row-height: 28px;
+  --detail-body-font-size: 12px;
   --detail-body-line-height: 1.45;
 }
 

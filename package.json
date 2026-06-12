@@ -85,13 +85,24 @@
           ],
           "description": "%secmp.config.language%"
         },
-        "secmp.fontScale": {
+        "secmp.fontSize": {
           "type": "number",
-          "default": 1.08,
-          "minimum": 1,
-          "maximum": 1.3,
-          "multipleOf": 0.05,
-          "description": "%secmp.config.fontScale%"
+          "default": 13,
+          "enum": [
+            12,
+            13,
+            14,
+            15,
+            16
+          ],
+          "enumDescriptions": [
+            "%secmp.config.fontSize.compact%",
+            "%secmp.config.fontSize.default%",
+            "%secmp.config.fontSize.comfortable%",
+            "%secmp.config.fontSize.large%",
+            "%secmp.config.fontSize.maximum%"
+          ],
+          "description": "%secmp.config.fontSize%"
         },
         "secmp.openPanelAfterNewSession": {
           "type": "boolean",

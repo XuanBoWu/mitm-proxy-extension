@@ -16,11 +16,10 @@ function readSecmpMessages() {
 
 const SECMP_MESSAGES = readSecmpMessages();
 const SECMP_STATIC_FALLBACKS = readStaticI18nFallbacks();
-const DEFAULT_FONT_SCALE = 1.08;
-const MIN_FONT_SCALE = 1;
-const MAX_FONT_SCALE = 1.3;
-const FONT_SCALE_STEP = 0.05;
-const FLOW_ROW_BASE_HEIGHT = 26;
+const DEFAULT_FONT_SIZE = 13;
+const MIN_FONT_SIZE = 12;
+const MAX_FONT_SIZE = 16;
+const FLOW_ROW_HEIGHT_RATIO = 2.16;
 
 // State
 let flows = [];
@@ -115,8 +114,8 @@ let cachedFilteredFlows = null;
 let cachedFilteredIds = null;
 let cachedFilterSnapshot = null;
 let lastRenderWindow = null; // { start, end, count } — skip rebuild while scrolling inside it
-let currentFontScale = normalizeFontScale(readInitialFontScale());
-let flowRowHeight = FLOW_ROW_BASE_HEIGHT * currentFontScale;
+let currentFontSize = normalizeFontSize(readInitialFontSize());
+let flowRowHeight = computeFlowRowHeight(currentFontSize);
 const FLOW_RENDER_BUFFER_ROWS = 24;
 const FLOW_AUTOFIT_SAMPLE_ROWS = 80;
 
@@ -178,19 +177,22 @@ const proxyStatusText = $("proxyStatusText");
 const footerStatus = $("footerStatus");
 const flowTableWrapper = document.querySelector(".table-wrapper");
 
-applyFontScale(currentFontScale);
+applyFontSize(currentFontSize);
 
-function normalizeFontScale(raw) {
+function normalizeFontSize(raw) {
   const value = Number(raw);
-  if (!Number.isFinite(value)) return DEFAULT_FONT_SCALE;
-  const rounded = Math.round(value / FONT_SCALE_STEP) * FONT_SCALE_STEP;
-  return Number(Math.min(MAX_FONT_SCALE, Math.max(MIN_FONT_SCALE, rounded)).toFixed(2));
+  if (!Number.isFinite(value)) return DEFAULT_FONT_SIZE;
+  return Math.min(MAX_FONT_SIZE, Math.max(MIN_FONT_SIZE, Math.round(value)));
 }
 
-function readInitialFontScale() {
-  const templateScale = document.getElementById("secmpI18n")?.dataset?.fontScale;
-  const rootScale = getComputedStyle(document.documentElement).getPropertyValue("--secmp-font-scale");
-  return templateScale || rootScale || DEFAULT_FONT_SCALE;
+function readInitialFontSize() {
+  const templateSize = document.getElementById("secmpI18n")?.dataset?.fontSize;
+  const rootSize = getComputedStyle(document.documentElement).getPropertyValue("--secmp-font-size");
+  return templateSize || rootSize || DEFAULT_FONT_SIZE;
+}
+
+function computeFlowRowHeight(fontSize) {
+  return Math.round(fontSize * FLOW_ROW_HEIGHT_RATIO);
 }
 
 function updateFlowRowHeight() {
@@ -199,19 +201,19 @@ function updateFlowRowHeight() {
     flowRowHeight = renderedRow.offsetHeight;
     return;
   }
-  flowRowHeight = FLOW_ROW_BASE_HEIGHT * currentFontScale;
+  flowRowHeight = computeFlowRowHeight(currentFontSize);
 }
 
-function applyFontScale(raw, options = {}) {
-  currentFontScale = normalizeFontScale(raw);
+function applyFontSize(raw, options = {}) {
+  currentFontSize = normalizeFontSize(raw);
   const root = document.documentElement;
-  root.style.setProperty("--secmp-font-scale", currentFontScale.toFixed(2));
-  root.style.setProperty("--flow-header-font-size", `${11 * currentFontScale}px`);
-  root.style.setProperty("--flow-font-size", `${12 * currentFontScale}px`);
-  root.style.setProperty("--flow-meta-font-size", `${11 * currentFontScale}px`);
-  root.style.setProperty("--flow-badge-font-size", `${10 * currentFontScale}px`);
-  root.style.setProperty("--flow-row-height", `${FLOW_ROW_BASE_HEIGHT * currentFontScale}px`);
-  root.style.setProperty("--detail-body-font-size", `${11 * currentFontScale}px`);
+  root.style.setProperty("--secmp-font-size", `${currentFontSize}px`);
+  root.style.setProperty("--flow-header-font-size", `${Math.max(11, currentFontSize - 1)}px`);
+  root.style.setProperty("--flow-font-size", `${currentFontSize}px`);
+  root.style.setProperty("--flow-meta-font-size", `${Math.max(11, currentFontSize - 1)}px`);
+  root.style.setProperty("--flow-badge-font-size", `${Math.max(10, currentFontSize - 2)}px`);
+  root.style.setProperty("--flow-row-height", `${computeFlowRowHeight(currentFontSize)}px`);
+  root.style.setProperty("--detail-body-font-size", `${Math.max(11, currentFontSize - 1)}px`);
   updateFlowRowHeight();
   if (!options.rerender) return;
   lastRenderWindow = null;
@@ -250,8 +252,8 @@ function scheduleFlowListRender(scrollOnly = false) {
 window.addEventListener("message", (event) => {
   const msg = event.data;
   switch (msg.command) {
-    case "fontScale":
-      applyFontScale(msg.fontScale, { rerender: true });
+    case "fontSize":
+      applyFontSize(msg.fontSize, { rerender: true });
       break;
     case "addFlows":
       for (const f of msg.flows || []) {
@@ -1681,7 +1683,7 @@ function _autoFitContentColumns() {
   const rootStyle = getComputedStyle(document.documentElement);
   measureEl.style.position = "absolute";
   measureEl.style.visibility = "hidden";
-  measureEl.style.fontSize = `${12 * currentFontScale}px`;
+  measureEl.style.fontSize = `${currentFontSize}px`;
   measureEl.style.fontFamily = rootStyle.getPropertyValue("--font-ui") || "-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif";
   measureEl.style.whiteSpace = "nowrap";
   measureEl.style.pointerEvents = "none";
