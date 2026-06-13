@@ -121,6 +121,11 @@
         <div class="input-row">
           <label data-i18n="webview.device.port">端口</label>
           <input type="number" id="proxyPort" value="8080" min="1024" max="65535" />
+          <button id="editProxyPortBtn" class="btn btn-sm btn-outline" style="display:none;" data-i18n="webview.device.editPort">修改</button>
+        </div>
+        <div id="proxyPortEditActions" class="inline-actions" style="display:none;">
+          <button id="applyProxyPortBtn" class="btn btn-sm btn-primary" data-i18n="webview.device.applyPort">应用</button>
+          <button id="cancelProxyPortBtn" class="btn btn-sm btn-outline" data-i18n="common.cancel">取消</button>
         </div>
         <div class="input-row">
           <label data-i18n="webview.device.interface">网卡</label>

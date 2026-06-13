@@ -31,6 +31,7 @@ let allowPanelDispose = false;
 let sidebarProvider = null;
 let activeProxyPort = null;
 let suppressNextProxyStoppedState = false;
+let suppressNextProxyStoppedStatus = false;
 
 const TOOLS_DIR = path.join(__dirname, "tools");
 const DEFAULT_RUNTIME_VERSION = "0.1.2";
@@ -2508,11 +2509,14 @@ async function startProxyEngine(port) {
         started = true;
         reject(new Error(t("extension.proxy.startupExited", { code })));
       }
-      if (panel) {
+      if (suppressNextProxyStoppedStatus) {
+        suppressNextProxyStoppedStatus = false;
+      } else if (panel) {
         panel.webview.postMessage({
           command: "proxyStatus",
           running: false,
           port: port,
+          phase: "stopped",
         });
       }
     });
@@ -2531,6 +2535,7 @@ async function startProxyEngine(port) {
 async function stopProxyEngine(options = {}) {
   const recordStoppedState = options.recordState !== false;
   const preserveRecordedRunningState = !!options.preserveRecordedRunningState;
+  const suppressStoppedStatus = !!options.suppressStoppedStatus;
   if (!proxyProcess) {
     if (recordStoppedState) {
       recordSessionProxyState(false, { reason: options.reason || "proxyStopped" });
@@ -2557,39 +2562,99 @@ async function stopProxyEngine(options = {}) {
       return;
     }
 
+    const stoppingProcess = proxyProcess;
     if (recordStoppedState) {
       recordSessionProxyState(false, { port: activeProxyPort, reason: options.reason || "proxyStopped" });
     }
     if (recordStoppedState || preserveRecordedRunningState) {
       suppressNextProxyStoppedState = true;
     }
+    if (suppressStoppedStatus) {
+      suppressNextProxyStoppedStatus = true;
+    }
     stopFlowPolling();
     resetBodyFetchQueue();
     flushActiveSession();
 
-    proxyProcess.on("close", () => {
-      proxyProcess = null;
-      webPort = null;
-      authToken = null;
-      activeProxyPort = null;
+    stoppingProcess.on("close", () => {
+      if (proxyProcess === stoppingProcess) {
+        proxyProcess = null;
+        webPort = null;
+        authToken = null;
+        activeProxyPort = null;
+      }
       flushActiveSession();
       resolve({ success: true, message: t("extension.proxy.stopped") });
     });
 
     if (process.platform === "win32") {
-      spawn("taskkill", ["/pid", String(proxyProcess.pid), "/f", "/t"]);
+      spawn("taskkill", ["/pid", String(stoppingProcess.pid), "/f", "/t"]);
     } else {
-      proxyProcess.kill("SIGTERM");
+      stoppingProcess.kill("SIGTERM");
     }
 
     setTimeout(() => {
-      if (proxyProcess) {
+      if (proxyProcess === stoppingProcess) {
         try {
-          proxyProcess.kill("SIGKILL");
+          stoppingProcess.kill("SIGKILL");
         } catch (_) {}
       }
     }, 3000);
   });
+}
+
+function postProxyStatus(status = {}) {
+  if (!panel) return;
+  panel.webview.postMessage({
+    command: "proxyStatus",
+    running: !!proxyProcess,
+    port: activeProxyPort,
+    phase: proxyProcess ? "running" : "stopped",
+    ...status,
+  });
+}
+
+async function restartProxyEngine(port) {
+  const nextPort = Number(port);
+  if (!Number.isInteger(nextPort) || nextPort <= 0 || nextPort > 65535) {
+    throw new Error(t("extension.input.mustBeNumber"));
+  }
+  const previousPort = activeProxyPort;
+  postProxyStatus({
+    running: true,
+    port: previousPort,
+    pendingPort: nextPort,
+    phase: "restarting",
+    message: t("extension.proxy.restarting", { port: nextPort }),
+  });
+  if (proxyProcess) {
+    await stopProxyEngine({
+      recordState: false,
+      preserveRecordedRunningState: true,
+      suppressStoppedStatus: true,
+      reason: "proxyRestart",
+    });
+  }
+  try {
+    const result = await startProxyEngine(nextPort);
+    postProxyStatus({
+      running: true,
+      port: nextPort,
+      phase: "running",
+      message: result.message,
+    });
+    return result;
+  } catch (err) {
+    recordSessionProxyState(false, { port: nextPort, reason: "proxyRestartFailed" });
+    postProxyStatus({
+      running: false,
+      port: previousPort || nextPort,
+      pendingPort: nextPort,
+      phase: "error",
+      message: err.message,
+    });
+    throw err;
+  }
 }
 
 // ===== Webview Panel =====
@@ -2644,6 +2709,8 @@ async function createPanel() {
         panel.webview.postMessage({
           command: "setStatus",
           proxyRunning: proxyProcess !== null,
+          proxyPort: activeProxyPort,
+          proxyPhase: proxyProcess ? "running" : "stopped",
           device: deviceInfo,
           flowCount: capturedFlows.length,
         });
@@ -2819,16 +2886,17 @@ async function createPanel() {
         const port = message.port || 8080;
         try {
           const result = await startProxyEngine(port);
-          panel.webview.postMessage({
-            command: "proxyStatus",
+          postProxyStatus({
             running: true,
             port: port,
+            phase: "running",
             message: result.message,
           });
         } catch (err) {
-          panel.webview.postMessage({
-            command: "proxyStatus",
+          postProxyStatus({
             running: false,
+            port,
+            phase: "error",
             message: err.message,
           });
         }
@@ -2838,11 +2906,22 @@ async function createPanel() {
 
       case "stopProxy": {
         const result = await stopProxyEngine();
-        panel.webview.postMessage({
-          command: "proxyStatus",
+        postProxyStatus({
           running: false,
+          phase: "stopped",
           message: result.message,
         });
+        await postEnvironmentStatus(context);
+        break;
+      }
+
+      case "restartProxy": {
+        const port = message.port || 8080;
+        try {
+          await restartProxyEngine(port);
+        } catch (_) {
+          // restartProxyEngine already posts the user-visible failure state.
+        }
         await postEnvironmentStatus(context);
         break;
       }
@@ -3716,24 +3795,20 @@ async function maybeAutoStartProxyForSession() {
   if (!port || proxyProcess) return;
   try {
     const result = await startProxyEngine(port);
-    if (panel) {
-      panel.webview.postMessage({
-        command: "proxyStatus",
-        running: true,
-        port,
-        message: result.message,
-      });
-    }
+    postProxyStatus({
+      running: true,
+      port,
+      phase: "running",
+      message: result.message,
+    });
   } catch (err) {
     log(`Failed to auto-start proxy from session state: ${err.message}`);
-    if (panel) {
-      panel.webview.postMessage({
-        command: "proxyStatus",
-        running: false,
-        port,
-        message: err.message,
-      });
-    }
+    postProxyStatus({
+      running: false,
+      port,
+      phase: "error",
+      message: err.message,
+    });
     vscode.window.showWarningMessage(t("extension.session.proxyAutoStartFailed", { message: err.message }));
   }
 }

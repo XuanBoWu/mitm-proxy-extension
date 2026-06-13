@@ -28,6 +28,10 @@ let selectedFlowId = null;
 let selectedFlowIds = new Set();
 let selectionAnchorFlowId = null;
 let proxyRunning = false;
+let proxyPhase = "stopped";
+let currentProxyPort = 8080;
+let proxyPortEditing = false;
+let proxyPortBeforeEdit = currentProxyPort;
 let environmentStatus = null;
 let aboutPopoverOpen = false;
 const EXTENSION_VERSION = window.__SECMP_EXTENSION_VERSION__ || document.getElementById("footerVersion")?.textContent?.trim() || "-";
@@ -318,6 +322,11 @@ window.addEventListener("message", (event) => {
     }
     case "setStatus":
       proxyRunning = msg.proxyRunning;
+      proxyPhase = msg.proxyPhase || (msg.proxyRunning ? "running" : "stopped");
+      if (Number.isFinite(Number(msg.proxyPort)) && Number(msg.proxyPort) > 0) {
+        currentProxyPort = Number(msg.proxyPort);
+        $("proxyPort").value = String(currentProxyPort);
+      }
       updateProxyIndicator();
       if (msg.flowCount != null) {
         scheduleFlowListRender();
@@ -325,6 +334,13 @@ window.addEventListener("message", (event) => {
       break;
     case "proxyStatus":
       proxyRunning = msg.running;
+      proxyPhase = msg.phase || (msg.running ? "running" : "stopped");
+      if (Number.isFinite(Number(msg.port)) && Number(msg.port) > 0) {
+        currentProxyPort = Number(msg.port);
+        if (!proxyPortEditing || proxyPhase === "running") {
+          $("proxyPort").value = String(currentProxyPort);
+        }
+      }
       updateProxyIndicator();
       footerStatus.textContent = msg.message || (msg.running ? t("webview.proxy.runningStatus") : t("webview.proxy.stoppedStatus"));
       break;
@@ -430,18 +446,47 @@ window.addEventListener("message", (event) => {
 
 // ===== Proxy Indicator =====
 
+function getProxyPortInputValue() {
+  const value = parseInt($("proxyPort").value, 10);
+  return Number.isInteger(value) && value > 0 && value <= 65535 ? value : 8080;
+}
+
+function setProxyControlsDisabled(disabled) {
+  $("proxyPort").disabled = disabled;
+  $("editProxyPortBtn").disabled = disabled;
+  $("applyProxyPortBtn").disabled = disabled;
+  $("cancelProxyPortBtn").disabled = disabled;
+  $("startProxyBtn").disabled = disabled;
+  $("stopProxyBtn").disabled = disabled;
+  $("setDeviceProxyBtn").disabled = disabled;
+  $("clearDeviceProxyBtn").disabled = disabled;
+}
+
+function updateProxyPortControls() {
+  const transitioning = proxyPhase === "starting" || proxyPhase === "stopping" || proxyPhase === "restarting";
+  $("editProxyPortBtn").style.display = proxyRunning && !proxyPortEditing && !transitioning ? "inline-flex" : "none";
+  $("proxyPortEditActions").style.display = proxyRunning && proxyPortEditing && !transitioning ? "flex" : "none";
+  $("startProxyBtn").style.display = proxyRunning ? "none" : "block";
+  $("stopProxyBtn").style.display = proxyRunning ? "block" : "none";
+  setProxyControlsDisabled(transitioning);
+  $("proxyPort").disabled = transitioning || (proxyRunning && !proxyPortEditing);
+}
+
 function updateProxyIndicator() {
-  if (proxyRunning) {
+  const transitioning = proxyPhase === "starting" || proxyPhase === "stopping" || proxyPhase === "restarting";
+  if (transitioning) {
+    proxyIndicator.className = "indicator pending";
+    proxyStatusText.textContent = proxyPhase === "restarting"
+      ? t("webview.proxy.restarting", { port: getProxyPortInputValue() })
+      : t("webview.proxy.switching");
+  } else if (proxyRunning) {
     proxyIndicator.className = "indicator running";
-    proxyStatusText.textContent = t("webview.proxy.running");
-    $("startProxyBtn").style.display = "none";
-    $("stopProxyBtn").style.display = "block";
+    proxyStatusText.textContent = t("webview.proxy.runningOnPort", { port: currentProxyPort });
   } else {
     proxyIndicator.className = "indicator stopped";
     proxyStatusText.textContent = t("webview.proxy.stopped");
-    $("startProxyBtn").style.display = "block";
-    $("stopProxyBtn").style.display = "none";
   }
+  updateProxyPortControls();
 }
 
 // ===== Device Panel =====
@@ -2961,12 +3006,49 @@ $("startProxyBtn").addEventListener("click", () => {
     showProxySetupStatus("error", t("webview.interfaces.needSelect"));
     return;
   }
-  const port = parseInt($("proxyPort").value) || 8080;
+  const port = getProxyPortInputValue();
+  proxyPhase = "starting";
+  updateProxyIndicator();
+  footerStatus.textContent = t("webview.proxy.starting", { port });
   vscode.postMessage({ command: "startProxy", port: port });
 });
 
 $("stopProxyBtn").addEventListener("click", () => {
+  proxyPhase = "stopping";
+  updateProxyIndicator();
+  footerStatus.textContent = t("webview.proxy.stopping");
   vscode.postMessage({ command: "stopProxy" });
+});
+
+$("editProxyPortBtn").addEventListener("click", () => {
+  proxyPortBeforeEdit = currentProxyPort || getProxyPortInputValue();
+  proxyPortEditing = true;
+  $("proxyPort").value = String(proxyPortBeforeEdit);
+  $("proxyPort").focus();
+  $("proxyPort").select();
+  updateProxyIndicator();
+});
+
+$("cancelProxyPortBtn").addEventListener("click", () => {
+  $("proxyPort").value = String(proxyPortBeforeEdit || currentProxyPort || 8080);
+  proxyPortEditing = false;
+  updateProxyIndicator();
+});
+
+$("applyProxyPortBtn").addEventListener("click", () => {
+  const nextPort = getProxyPortInputValue();
+  if (nextPort === currentProxyPort) {
+    proxyPortEditing = false;
+    $("proxyPort").value = String(currentProxyPort);
+    updateProxyIndicator();
+    return;
+  }
+  proxyPortEditing = false;
+  proxyPhase = "restarting";
+  $("proxyPort").value = String(nextPort);
+  updateProxyIndicator();
+  footerStatus.textContent = t("webview.proxy.restarting", { port: nextPort });
+  vscode.postMessage({ command: "restartProxy", port: nextPort });
 });
 
 $("setDeviceProxyBtn").addEventListener("click", () => {
@@ -2975,7 +3057,7 @@ $("setDeviceProxyBtn").addEventListener("click", () => {
     showProxySetupStatus("error", t("webview.interfaces.needSelect"));
     return;
   }
-  const port = parseInt($("proxyPort").value) || 8080;
+  const port = getProxyPortInputValue();
   vscode.postMessage({ command: "setProxy", port: port, ip: ip });
 });
 
