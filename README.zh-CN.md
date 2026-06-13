@@ -186,6 +186,8 @@ npm run runtime:windows -- -RuntimeVersion 0.1.2 -OutputDir dist
 npm run runtime:macos -- --runtime-version 0.1.2 --output-dir dist
 ```
 
+runtime 构建会嵌入平台图标资源：Windows 使用 `media/secmp.ico`，macOS 使用 `media/secmp.icns`。更新这些文件会改变打包后的 runtime 产物。
+
 打包扩展：
 
 ```powershell

@@ -47,6 +47,7 @@ Before creating a release:
 
 - Confirm the working tree contains only intended release changes.
 - Confirm the icon asset is selected and wired into `package.json`.
+- Confirm runtime icon assets are current when building runtime packages: `media/secmp.ico` for Windows and `media/secmp.icns` for macOS.
 - Confirm `README.md`, `README.zh-CN.md`, `LICENSE`, `CHANGELOG.md`, `SECURITY.md`, `RELEASE_NOTES.md`, and runtime documentation are up to date.
 - Confirm local packaged runtime build and extension runtime install smoke tests pass for the target platform.
 - Confirm GitHub Actions build, runtime smoke tests, and VSIX packaging pass.
@@ -152,3 +153,5 @@ Patch release for a focused bug fix or feature stage.
 
 Runtime assets are included only when `secmp.runtimeVersion` changes.
 ```
+
+Runtime icon-only changes still produce new runtime binaries when they affect `media/secmp.ico` or `media/secmp.icns`; handle them as runtime package changes for release planning.

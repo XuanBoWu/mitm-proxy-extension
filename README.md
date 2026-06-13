@@ -186,6 +186,8 @@ Build the macOS runtime:
 npm run runtime:macos -- --runtime-version 0.1.2 --output-dir dist
 ```
 
+Runtime builds embed platform icon assets from `media/secmp.ico` on Windows and `media/secmp.icns` on macOS. Updating those files changes the packaged runtime output.
+
 Package the extension:
 
 ```powershell
