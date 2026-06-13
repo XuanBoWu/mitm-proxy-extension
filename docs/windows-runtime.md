@@ -93,8 +93,8 @@ Configure a local runtime archive path for offline installation:
 
 ```json
 {
-  "secmp.runtimeVersion": "0.1.2",
-  "secmp.runtimeArchivePath": "C:\\Users\\me\\Downloads\\secmp-runtime-win32-x64-0.1.2.zip"
+  "secmp.runtimeVersion": "0.3.0",
+  "secmp.runtimeArchivePath": "C:\\Users\\me\\Downloads\\secmp-runtime-win32-x64-0.3.0.zip"
 }
 ```
 
@@ -102,7 +102,7 @@ You can also point directly to an extracted runtime directory:
 
 ```json
 {
-  "secmp.runtimeVersion": "0.1.2",
+  "secmp.runtimeVersion": "0.3.0",
   "secmp.runtimePath": "C:\\tools\\secmp-runtime\\runtime"
 }
 ```
@@ -111,8 +111,8 @@ For hosted distribution, configure the runtime URL:
 
 ```json
 {
-  "secmp.runtimeVersion": "0.1.2",
-  "secmp.runtimeUrl": "https://github.com/XuanBoWu/mitm-proxy-extension/releases/download/v0.1.2/secmp-runtime-win32-x64-0.1.2.zip",
+  "secmp.runtimeVersion": "0.3.0",
+  "secmp.runtimeUrl": "https://github.com/XuanBoWu/mitm-proxy-extension/releases/download/v0.3.0/secmp-runtime-win32-x64-0.3.0.zip",
   "secmp.runtimeSha256": "<sha256-from-ci>"
 }
 ```
@@ -150,7 +150,7 @@ The extension extracts the runtime into extension global storage and then starts
 
 ```json
 {
-  "runtimeVersion": "0.1.2",
+  "runtimeVersion": "0.3.0",
   "runtimeApiVersion": 1,
   "platform": "darwin",
   "arch": "arm64",

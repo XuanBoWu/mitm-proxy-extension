@@ -37,7 +37,7 @@ Version numbers are tied to testable/releasable milestones, not to branch names:
 - The `CHANGELOG.md` entry for that bump must summarize all changes included in the candidate, not only the final commit.
 - If `staging` needs another fix round after the PR-prep bump and that produces a new candidate build, bump the version again, usually as a patch.
 - When `staging` is merged into `master`, keep the version already validated on `staging`; do not bump again just because the target branch changes.
-- For a release, create the `v*` tag from the current `master` version. For example, `package.json` version `0.3.1` should be released with tag `v0.3.1`.
+- For a release, create the `v*` tag from the current `master` version. For example, `package.json` version `0.3.0` should be released with tag `v0.3.0`.
 
 Use `PATCH` for bug fixes, focused performance/stability fixes, small UI changes, and other small testable stages. Use `MINOR` for a new user-visible capability or a larger completed feature stage. Use `MAJOR` for incompatible configuration, runtime protocol, data format, or migration changes.
 
@@ -59,31 +59,31 @@ Before creating a release:
 Build the Windows runtime:
 
 ```powershell
-npm run runtime:windows -- -RuntimeVersion 0.1.2 -OutputDir dist
+npm run runtime:windows -- -RuntimeVersion 0.3.0 -OutputDir dist
 ```
 
 Build the macOS runtime:
 
 ```bash
-npm run runtime:macos -- --runtime-version 0.1.2 --output-dir dist
+npm run runtime:macos -- --runtime-version 0.3.0 --output-dir dist
 ```
 
 Smoke test the runtime:
 
 ```powershell
-.\scripts\test-windows-runtime.ps1 -RuntimeZip .\dist\secmp-runtime-win32-x64-0.1.2.zip -RuntimeVersion 0.1.2
+.\scripts\test-windows-runtime.ps1 -RuntimeZip .\dist\secmp-runtime-win32-x64-0.3.0.zip -RuntimeVersion 0.3.0
 ```
 
 Smoke test extension runtime installation:
 
 ```powershell
-npm run runtime:windows:test-install -- --runtime-zip .\dist\secmp-runtime-win32-x64-0.1.2.zip --runtime-version 0.1.2
+npm run runtime:windows:test-install -- --runtime-zip .\dist\secmp-runtime-win32-x64-0.3.0.zip --runtime-version 0.3.0
 ```
 
 On macOS, use the same install smoke test with the macOS runtime zip:
 
 ```bash
-node scripts/test-extension-runtime-install.js --runtime-zip dist/secmp-runtime-darwin-arm64-0.1.2.zip --runtime-version 0.1.2
+node scripts/test-extension-runtime-install.js --runtime-zip dist/secmp-runtime-darwin-arm64-0.3.0.zip --runtime-version 0.3.0
 ```
 
 Package the VSIX:
@@ -119,7 +119,7 @@ For a manual release run, trigger the workflow with:
 
 ```text
 publish=true
-runtime_version=0.1.2
+runtime_version=0.3.0
 release_tag=v0.1.3
 ```
 

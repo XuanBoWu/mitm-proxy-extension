@@ -67,7 +67,7 @@
         },
         "secmp.runtimeVersion": {
           "type": "string",
-          "default": "0.1.2",
+          "default": "0.3.0",
           "description": "%secmp.config.runtimeVersion%"
         },
         "secmp.language": {
@@ -131,7 +131,7 @@
         },
         "secmp.windowsRuntimeVersion": {
           "type": "string",
-          "default": "0.1.2",
+          "default": "0.3.0",
           "description": "%secmp.config.windowsRuntimeVersion%"
         },
         "secmp.updateCheckEnabled": {
