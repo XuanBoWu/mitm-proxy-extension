@@ -27,6 +27,8 @@ let flowIndexById = new Map();
 let selectedFlowId = null;
 let selectedFlowIds = new Set();
 let selectionAnchorFlowId = null;
+let contextTargetFlowId = null;
+let flowContextMenuEl = null;
 let proxyRunning = false;
 let proxyPhase = "stopped";
 let currentProxyPort = 8080;
@@ -440,6 +442,9 @@ window.addEventListener("message", (event) => {
       break;
     case "environmentActionResult":
       showEnvironmentActionStatus(msg.message || "", !!msg.running);
+      break;
+    case "flowActionStatus":
+      if (msg.message) footerStatus.textContent = msg.message;
       break;
   }
 });
@@ -1262,6 +1267,7 @@ function getFlowRowClass(flowId) {
   const classes = [];
   if (selectedFlowIds.has(flowId)) classes.push("selected");
   if (selectedFlowId === flowId) classes.push("focused");
+  if (contextTargetFlowId === flowId) classes.push("context-target");
   // Body filter could not verify this flow (fetch failed / unavailable / still
   // loading) — it stays visible but is visually marked as unverified.
   if (needsFilterContent() && filterBodyUnsearchedIds.has(flowId) && !filterBodyMatchedIds.has(flowId)) {
@@ -1296,6 +1302,149 @@ flowTableBody.addEventListener("click", (event) => {
   if (!row || !flowTableBody.contains(row)) return;
   handleFlowRowClick(row.dataset.id, event);
 });
+
+const FLOW_CONTEXT_ACTIONS = [
+  { id: "copyUrl", type: "copy", copyType: "url", labelKey: "webview.context.copyUrl", fallback: "复制 URL", scope: "all" },
+  { id: "copyHost", type: "copy", copyType: "host", labelKey: "webview.context.copyHost", fallback: "复制 Host", scope: "all" },
+  { id: "copySummary", type: "copy", copyType: "summary", labelKey: "webview.context.copySummary", fallback: "复制请求摘要", scope: "all" },
+  { id: "copyRequestHeaders", type: "copy", copyType: "requestHeaders", labelKey: "webview.context.copyRequestHeaders", fallback: "复制请求头", scope: "all" },
+  { id: "copyResponseHeaders", type: "copy", copyType: "responseHeaders", labelKey: "webview.context.copyResponseHeaders", fallback: "复制响应头", scope: "all" },
+  { id: "copyCurl", type: "copy", copyType: "curl", labelKey: "webview.context.copyCurl", fallback: "复制为 cURL", scope: "single" },
+  { id: "copyRequestBody", type: "copy", copyType: "requestBody", labelKey: "webview.context.copyRequestBody", fallback: "复制请求体", scope: "single" },
+  { id: "copyResponseBody", type: "copy", copyType: "responseBody", labelKey: "webview.context.copyResponseBody", fallback: "复制响应体", scope: "single" },
+  { id: "divider-copy-export", type: "divider", scope: "all" },
+  { id: "exportJson", type: "export", format: "json", labelKey: "webview.context.exportJson", fallback: "导出为 JSON", scope: "all" },
+  { id: "exportHar", type: "export", format: "har", labelKey: "webview.context.exportHar", fallback: "导出为 HAR", scope: "all" },
+];
+
+function getSelectedVisibleFlowIds() {
+  return getSelectedVisibleFlows().map((flow) => flow.id);
+}
+
+function getContextFlowIds() {
+  const ids = getSelectedVisibleFlowIds();
+  if (ids.length > 0) return ids;
+  return contextTargetFlowId ? [contextTargetFlowId] : [];
+}
+
+function closeFlowContextMenu(options = {}) {
+  if (flowContextMenuEl) {
+    flowContextMenuEl.remove();
+    flowContextMenuEl = null;
+  }
+  const hadTarget = !!contextTargetFlowId;
+  contextTargetFlowId = null;
+  if (options.render !== false && hadTarget) {
+    renderFlowList();
+  }
+}
+
+function getFlowContextActions(count) {
+  return FLOW_CONTEXT_ACTIONS.filter((action) => action.scope !== "single" || count === 1);
+}
+
+function positionFlowContextMenu(menu, x, y) {
+  const margin = 8;
+  menu.style.left = `${x}px`;
+  menu.style.top = `${y}px`;
+  const rect = menu.getBoundingClientRect();
+  const left = Math.max(margin, Math.min(x, window.innerWidth - rect.width - margin));
+  const top = Math.max(margin, Math.min(y, window.innerHeight - rect.height - margin));
+  menu.style.left = `${left}px`;
+  menu.style.top = `${top}px`;
+}
+
+function showFlowContextMenu(x, y) {
+  if (flowContextMenuEl) {
+    flowContextMenuEl.remove();
+    flowContextMenuEl = null;
+  }
+  const flowIds = getContextFlowIds();
+  if (flowIds.length === 0) return;
+
+  const menu = document.createElement("div");
+  menu.className = "flow-context-menu";
+  menu.setAttribute("role", "menu");
+  menu.setAttribute("aria-label", t("webview.context.menuLabel", {}, "请求操作"));
+
+  for (const action of getFlowContextActions(flowIds.length)) {
+    if (action.type === "divider") {
+      const divider = document.createElement("div");
+      divider.className = "flow-context-menu-divider";
+      menu.appendChild(divider);
+      continue;
+    }
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "flow-context-menu-item";
+    button.setAttribute("role", "menuitem");
+    button.dataset.actionId = action.id;
+    button.textContent = t(action.labelKey, { count: flowIds.length }, action.fallback);
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const currentIds = getContextFlowIds();
+      closeFlowContextMenu();
+      if (action.type === "copy") {
+        vscode.postMessage({
+          command: "copyFlows",
+          flowIds: currentIds,
+          copyType: action.copyType,
+        });
+      } else if (action.type === "export") {
+        vscode.postMessage({
+          command: "exportFlows",
+          flowIds: currentIds,
+          format: action.format,
+        });
+      }
+    });
+    menu.appendChild(button);
+  }
+
+  menu.addEventListener("contextmenu", (event) => event.preventDefault());
+  menu.addEventListener("click", (event) => event.stopPropagation());
+  document.body.appendChild(menu);
+  flowContextMenuEl = menu;
+  positionFlowContextMenu(menu, x, y);
+}
+
+function handleFlowRowContextMenu(flowId, event) {
+  if (!flowId) return;
+  event.preventDefault();
+  event.stopPropagation();
+  focusFlowList();
+  clearNativeSelection();
+
+  if (!selectedFlowIds.has(flowId)) {
+    selectSingleFlow(flowId);
+    selectionAnchorFlowId = flowId;
+  }
+  contextTargetFlowId = flowId;
+  setFocusedFlow(flowId, { requestDetail: true });
+  renderFlowList();
+  showFlowContextMenu(event.clientX, event.clientY);
+}
+
+flowTableBody.addEventListener("contextmenu", (event) => {
+  const row = event.target.closest("tr[data-id]");
+  if (!row || !flowTableBody.contains(row)) return;
+  handleFlowRowContextMenu(row.dataset.id, event);
+});
+
+document.addEventListener("click", (event) => {
+  if (!flowContextMenuEl) return;
+  if (flowContextMenuEl.contains(event.target)) return;
+  closeFlowContextMenu();
+});
+
+document.addEventListener("contextmenu", (event) => {
+  if (event.target.closest(".flow-context-menu")) return;
+  const row = event.target.closest("tr[data-id]");
+  if (row && flowTableBody.contains(row)) return;
+  event.preventDefault();
+  closeFlowContextMenu();
+}, true);
 
 function selectSingleFlow(flowId) {
   selectedFlowIds = new Set([flowId]);
@@ -3581,6 +3730,12 @@ function scrollFlowRowIntoView(flowId) {
 }
 
 document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && flowContextMenuEl) {
+    e.preventDefault();
+    closeFlowContextMenu();
+    return;
+  }
+
   // Ctrl/Cmd+F: focus filter
   if ((e.ctrlKey || e.metaKey) && e.key === "f") {
     e.preventDefault();
@@ -3690,6 +3845,7 @@ updateFilterUi();
 
 // Recalculate table width and wrapped line numbers when container resizes
 window.addEventListener("resize", () => {
+  closeFlowContextMenu();
   updateTableWidth();
   updateAllLineNumbers();
   scheduleFlowListRender();
@@ -3697,6 +3853,7 @@ window.addEventListener("resize", () => {
 
 if (flowTableWrapper) {
   flowTableWrapper.addEventListener("scroll", () => {
+    closeFlowContextMenu();
     scheduleFlowListRender(true);
   }, { passive: true });
 }
