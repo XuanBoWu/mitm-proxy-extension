@@ -1,12 +1,25 @@
-<svg width="24" height="24" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-  <g fill="none" stroke="currentColor" stroke-width="1.1" stroke-linecap="round" stroke-linejoin="round">
-    <path d="M6.1 5.2h4.4c1.5 0 2.7 1.2 2.7 2.7v8.2c0 1.5-1.2 2.7-2.7 2.7H6.1"/>
-    <path d="M6 12h7.2"/>
-    <circle cx="4.3" cy="5.2" r="1.9" fill="currentColor" stroke="none"/>
-    <circle cx="4.3" cy="12" r="1.9" fill="currentColor" stroke="none"/>
-    <circle cx="4.3" cy="18.8" r="1.9" fill="currentColor" stroke="none"/>
-    <path d="M16.4 7h-1.2c-1.1 0-2 .9-2 2v6c0 1.1.9 2 2 2h1.2"/>
-    <path d="M19.6 7h1.2c1.1 0 2 .9 2 2v6c0 1.1-.9 2-2 2h-1.2"/>
-    <rect x="16.2" y="10.6" width="3.6" height="2.8" rx="0.7" fill="currentColor" stroke="none"/>
+<svg width="24" height="24" viewBox="120 100 850 850" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="SecMP">
+  <defs>
+    <mask id="code-lines">
+      <rect width="1024" height="1024" fill="white"/>
+      <rect x="690" y="482" width="100" height="16" rx="8" ry="8" fill="black"/>
+      <rect x="690" y="527" width="135" height="16" rx="8" ry="8" fill="black"/>
+      <rect x="840" y="527" width="48" height="16" rx="8" ry="8" fill="black"/>
+    </mask>
+  </defs>
+
+  <g fill="none" stroke="currentColor" stroke-width="38" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M315 265 H386 C435 265 461 290 478 332 L516 425 C535 472 568 512 637 512"/>
+    <path d="M304 512 H637"/>
+    <path d="M315 759 H386 C435 759 461 734 478 692 L516 599 C535 552 568 512 637 512"/>
+    <path d="M632 390 H595 C568 390 547 411 547 438 V586 C547 613 568 634 595 634 H632"/>
+    <path d="M838 390 H875 C902 390 923 411 923 438 V586 C923 613 902 634 875 634 H838"/>
+  </g>
+
+  <g fill="currentColor" mask="url(#code-lines)">
+    <circle cx="247" cy="265" r="68"/>
+    <circle cx="236" cy="512" r="68"/>
+    <circle cx="247" cy="759" r="68"/>
+    <rect x="638" y="442" width="236" height="140" rx="22" ry="22"/>
   </g>
 </svg>

@@ -691,6 +691,9 @@ dd { color: var(--text-primary); }
 #flowTable tbody tr.focused {
   box-shadow: inset 2px 0 0 var(--accent);
 }
+#flowTable tbody tr.context-target {
+  box-shadow: inset 2px 0 0 var(--accent), inset 0 0 0 1px var(--accent);
+}
 
 #flowTable td {
   padding: 2px 8px;
@@ -699,6 +702,49 @@ dd { color: var(--text-primary); }
   overflow: hidden;
   text-overflow: ellipsis;
   color: var(--text-secondary);
+}
+
+.flow-context-menu {
+  position: fixed;
+  z-index: 1000;
+  min-width: 180px;
+  max-width: 260px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-secondary);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.32);
+}
+
+.flow-context-menu-item {
+  display: block;
+  width: 100%;
+  min-height: 26px;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.flow-context-menu-item:hover,
+.flow-context-menu-item:focus {
+  outline: none;
+  background: var(--bg-hover);
+}
+
+.flow-context-menu-divider {
+  height: 1px;
+  margin: 4px 2px;
+  background: var(--border);
 }
 
 /* TLS version label */

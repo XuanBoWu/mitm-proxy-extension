@@ -24,6 +24,12 @@ secmp-runtime-darwin-arm64-<runtimeVersion>.zip
 secmp-runtime-darwin-arm64-<runtimeVersion>.zip.sha256
 ```
 
+Runtime icon assets are shared with the package build:
+
+- Windows PyInstaller builds embed `media/secmp.ico` into `proxy_engine.exe` and `cert_manager.exe`.
+- macOS PyInstaller builds embed `media/secmp.icns` into `proxy_engine` and `cert_manager`.
+- Updating either runtime icon changes the packaged runtime output. Bump `secmp.runtimeVersion` when a release or test candidate needs those new runtime binaries.
+
 For tag releases, `<runtimeVersion>` is resolved from `secmp.runtimeVersion` in `package.json` unless a manual workflow dispatch provides `runtime_version`. VSIX-only patch releases can therefore publish a new `secmp-<extensionVersion>.vsix` while reusing an older runtime release.
 
 Before release, CI smoke-tests the runtime by:
@@ -79,7 +85,7 @@ https://github.com/XuanBoWu/mitm-proxy-extension/releases/download/v<version>/se
 
 For `0.1.0` on `win32-x64`, the extension also includes the release SHA-256 checksum. Other platform/version combinations use the matching GitHub Release URL and can optionally be pinned with `secmp.runtimeSha256`.
 
-`secmp.runtimeVersion` is intentionally separate from the VSIX version. Patch releases that only change Webview, documentation, or extension-side behavior can keep using the previous runtime. Bump the runtime version when `tools/proxy_engine.py`, `tools/cert_manager.py`, `requirements-runtime.txt`, the runtime package layout, or the extension/runtime command protocol changes.
+`secmp.runtimeVersion` is intentionally separate from the VSIX version. Patch releases that only change Webview, documentation, or extension-side behavior can keep using the previous runtime. Bump the runtime version when `tools/proxy_engine.py`, `tools/cert_manager.py`, `requirements-runtime.txt`, runtime icon assets, the runtime package layout, or the extension/runtime command protocol changes.
 
 The runtime manifest also has `runtimeApiVersion`. It guards the extension-to-runtime command/output contract. Missing `runtimeApiVersion` is treated as `1` for compatibility with the first `0.1.0` runtime package. Bump it only for incompatible protocol changes.
 

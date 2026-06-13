@@ -6,7 +6,7 @@ SecMP 是用于 Android 设备安全测试的 VSCodium / VS Code 插件，整合
 
 ```
 Webview UI (HTML/CSS/JS) → vscode.postMessage → extension.js (Node.js)
-                                                     ├── Windows: install/use packaged runtime exe
+                                                     ├── Windows/macOS: install/use packaged runtime
                                                      ├── source/dev: spawn proxy_engine.py (WebMaster, REST API + WebSocket)
                                                      ├── poll http://127.0.0.1:{webPort}/flows.json (500ms)
                                                      └── spawn cert_manager entrypoint (ADB 证书管理)
@@ -26,13 +26,16 @@ Webview UI (HTML/CSS/JS) → vscode.postMessage → extension.js (Node.js)
 | `webview/assets/header-icon.png` | Webview 左上角品牌图标 |
 | `media/icon.png` | VS Code 扩展图标 |
 | `media/secmp.ico` | PyInstaller 打包 `proxy_engine.exe` / `cert_manager.exe` 使用的 Windows 图标 |
-| `requirements-runtime.txt` | Windows runtime 打包依赖，当前固定 `mitmproxy==12.2.2`、`pyinstaller==6.11.1` |
+| `media/secmp.icns` | PyInstaller 打包 macOS `proxy_engine` / `cert_manager` 使用的图标 |
+| `media/icon_pack/` | 图标源包，保留多平台导出素材；通过 `.vscodeignore` 排除出 VSIX |
+| `requirements-runtime.txt` | Windows/macOS runtime 打包依赖，当前固定 `mitmproxy==12.2.2`、`pyinstaller==6.11.1` |
 | `scripts/build-windows-runtime.ps1` | 构建 Windows runtime zip，输出 `secmp-runtime-win32-<arch>-<version>.zip` |
+| `scripts/build-macos-runtime.sh` | 构建 macOS runtime zip，输出 `secmp-runtime-darwin-<arch>-<version>.zip` |
 | `scripts/test-windows-runtime.ps1` | runtime 烟测：校验 manifest、entrypoints、mitmweb `/state.json` |
 | `scripts/test-extension-runtime-install.js` | 模拟 VS Code 扩展安装 runtime 并启动代理 |
 | `.github/workflows/build-windows-runtime.yml` | CI 构建 runtime、测试 runtime、打包 VSIX、tag 发布 GitHub Release |
 | `docs/release.md` | 正式发布编排、检查清单和 release notes 模板 |
-| `docs/windows-runtime.md` | Windows runtime 包格式、安装优先级和手动测试说明 |
+| `docs/windows-runtime.md` | 历史路径保留；当前说明 Windows/macOS packaged runtime 包格式、安装优先级和手动测试 |
 
 ## 品牌与命名约定
 
@@ -97,6 +100,7 @@ Webview UI (HTML/CSS/JS) → vscode.postMessage → extension.js (Node.js)
   - 修改 `tools/proxy_engine.py`
   - 修改 `tools/cert_manager.py`
   - 修改 `requirements-runtime.txt`
+  - 修改 `media/secmp.ico` 或 `media/secmp.icns` 并需要发布/交付新 runtime 二进制
   - 修改 runtime package layout
   - 修改 extension ↔ runtime 命令、参数或输出协议
 - 只修改 Webview、extension 侧逻辑、文档或发布流程时，默认不更新 `secmp.runtimeVersion`。
@@ -114,26 +118,30 @@ Webview UI (HTML/CSS/JS) → vscode.postMessage → extension.js (Node.js)
 - 一个提交只做一类事情；bugfix、版本发布、文档整理尽量分开。
 - 创建 Git commits 时，不添加 agent/AI co-author trailer，不添加 agent attribution。
 
-## Windows Runtime 打包
+## Packaged Runtime 打包（Windows / macOS）
 
-Windows 用户默认走打包 runtime，不要求本机安装 Python 或 mitmproxy：
+Windows 和 macOS 用户默认走打包 runtime，不要求本机安装 Python 或 mitmproxy：
 
 1. 扩展检查 VS Code global storage 中的缓存 runtime。
-2. 如果缓存不存在，依次尝试 `secmp.windowsRuntimePath`、`secmp.windowsRuntimeArchivePath`、`secmp.windowsRuntimeUrl`。
-3. 如果用户没有配置 runtime 来源，扩展会根据 `secmp.windowsRuntimeVersion` 自动拼出 GitHub Release 下载 URL：`https://github.com/XuanBoWu/mitm-proxy-extension/releases/download/v<version>/secmp-runtime-win32-<arch>-<version>.zip`。
-4. 默认下载源集中维护在 `DEFAULT_WINDOWS_RUNTIME_SOURCES`，key 为 `<runtimeVersion>:win32:<arch>`；当前 `0.1.0:win32:x64` 内置 URL 和 SHA-256 校验值。
-5. 如果默认下载失败，提示用户下载 runtime zip 并设置 `secmp.windowsRuntimeArchivePath`，或配置 `secmp.windowsRuntimeUrl`。
+2. 如果缓存不存在，依次尝试 `secmp.runtimePath`、`secmp.runtimeArchivePath`、`secmp.runtimeUrl`；旧的 `secmp.windowsRuntime*` 仍作为兼容别名生效。
+3. 如果用户没有配置 runtime 来源，扩展会根据 `secmp.runtimeVersion`、平台和架构自动拼出 GitHub Release 下载 URL：`https://github.com/XuanBoWu/mitm-proxy-extension/releases/download/v<version>/secmp-runtime-<platform>-<arch>-<version>.zip`。
+4. 默认下载源集中维护在 `DEFAULT_WINDOWS_RUNTIME_SOURCES`，key 为 `<runtimeVersion>:<platform>:<arch>`；当前保留首个 Windows runtime 的内置 URL 和 SHA-256 校验值，其他平台/版本可通过 `secmp.runtimeSha256` 固定校验。
+5. 如果默认下载失败，提示用户下载 runtime zip 并设置 `secmp.runtimeArchivePath`，或配置 `secmp.runtimeUrl`。
 6. runtime 解压后必须包含 `runtime/manifest.json` 和两个 entrypoint：
-   - `bin/proxy_engine/proxy_engine.exe`
-   - `bin/cert_manager/cert_manager.exe`
+   - Windows: `bin/proxy_engine/proxy_engine.exe`、`bin/cert_manager/cert_manager.exe`
+   - macOS: `bin/proxy_engine/proxy_engine`、`bin/cert_manager/cert_manager`
 7. `runtimeVersion` 与 VSIX 版本独立；仅 Webview/文档/extension 侧变更可继续复用旧 runtime。
 8. `runtimeApiVersion` 表示 extension ↔ runtime 命令/输出协议版本；缺失时按 `1` 兼容首个 `0.1.0` runtime，协议不兼容时才升级。
-9. `SecMP: Clean Runtime Cache` 只清理 VS Code global storage 下的 `windows-runtime/`，代理运行中拒绝执行；默认保留当前 runtime 版本和最新的上一个版本，删除更旧 runtime、`_staging` 和旧下载 zip，不删除 `mitmproxy-conf`。
+9. `SecMP: Clean Runtime Cache` 只清理当前平台在 VS Code global storage 下的 runtime 缓存，代理运行中拒绝执行；默认保留当前 runtime 版本和最新的上一个版本，删除更旧 runtime、`_staging` 和旧下载 zip，不删除 `mitmproxy-conf`。
 
 构建命令：
 
 ```powershell
 npm run runtime:windows -- -RuntimeVersion 0.1.0 -OutputDir dist
+```
+
+```bash
+npm run runtime:macos -- --runtime-version 0.1.0 --output-dir dist
 ```
 
 验证命令：
@@ -144,12 +152,17 @@ npm run runtime:windows:test-install -- --runtime-zip .\dist\secmp-runtime-win32
 npx --yes @vscode/vsce package
 ```
 
+```bash
+node scripts/test-extension-runtime-install.js --runtime-zip dist/secmp-runtime-darwin-arm64-0.1.0.zip --runtime-version 0.1.0
+```
+
 注意：
 
 - `scripts/build-windows-runtime.ps1` 会将 `media/secmp.ico` 嵌入两个 exe。
+- `scripts/build-macos-runtime.sh` 会将 `media/secmp.icns` 嵌入两个 macOS entrypoint。
 - `.vscodeignore` 必须排除 `.github/`、`scripts/`、`.build/`、`dist/`、`.venv/`、`certificate/`、`*.vsix` 等开发/构建产物。
 - ADB 仍然是外部依赖，不打包进 runtime。
-- Windows 第一次运行 `proxy_engine.exe` 时可能触发防火墙授权提示，这是当前可接受行为。
+- Windows 第一次运行 `proxy_engine.exe` 时可能触发防火墙授权提示；macOS 第一次运行 runtime 时可能触发网络访问或安全验证提示，这是当前可接受行为。
 
 ## CI 与发布流程
 
@@ -167,12 +180,14 @@ npx --yes @vscode/vsce package
   - `secmp-<version>.vsix`
   - `secmp-runtime-win32-x64-<version>.zip`
   - `secmp-runtime-win32-x64-<version>.zip.sha256`
+  - `secmp-runtime-darwin-arm64-<version>.zip`
+  - `secmp-runtime-darwin-arm64-<version>.zip.sha256`
 
 当前首个正式 release 是 `v0.1.0`。后续变更发布前先更新 `CHANGELOG.md`、`RELEASE_NOTES.md`、`README.md`、`README.zh-CN.md` 和相关 docs。
 
 ## 数据流
 
-1. 用户点击「启动代理」→ extension.js 在 Windows 启动打包 runtime entrypoint，在源码开发模式启动 `proxy_engine.py --port 8080 --web-port {random}`
+1. 用户点击「启动代理」→ extension.js 在 Windows/macOS 启动打包 runtime entrypoint，在 Linux/source-dev 启动 `proxy_engine.py --port 8080 --web-port {random}`
 2. proxy_engine.py 启动 WebMaster，在 stderr 输出 `WEB_PORT={port}` 和 `AUTH_TOKEN={32-char-hex}`
 3. extension.js 解析 stderr 获取 webPort 和 authToken，启动 500ms 定时轮询
 4. 轮询 `GET http://127.0.0.1:{webPort}/flows.json?token={token}` 获取全部 flow 元数据（不含 body）
@@ -267,7 +282,8 @@ WebSocket 和 REST API 返回的 flow JSON 格式（`mitmproxy/tools/web/app.py:
 ## 平台差异
 
 - Windows: 优先使用打包 runtime exe + `taskkill /pid /f /t`
-- macOS/Linux: `python3` + `SIGTERM`；优先使用 `.venv/bin/python3`（Homebrew Python 不允许全局 pip install）
+- macOS: 优先使用打包 runtime entrypoint + `SIGTERM`
+- Linux/source-dev: `python3` + `SIGTERM`；优先使用 `.venv/bin/python3`（Homebrew Python 不允许全局 pip install）
 
 ## Webview UI 功能
 

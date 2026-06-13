@@ -46,6 +46,7 @@ const MIN_FONT_SIZE = 12;
 const MAX_FONT_SIZE = 16;
 const UPDATE_LAST_CHECK_KEY = "secmp.lastUpdateCheckAt";
 const RECENT_SESSIONS_KEY = "secmp.recentSessions";
+const LAST_FILE_DIALOG_DIR_KEY = "secmp.lastFileDialogDir";
 const extensionPackage = loadExtensionPackage();
 const SUPPORTED_RUNTIME_PLATFORMS = new Set(["win32", "darwin"]);
 const SUPPORTED_LOCALES = new Set(["zh-CN", "en-US"]);
@@ -61,6 +62,8 @@ const FILTER_BODY_FETCH_CONCURRENCY = 4;
 const BODY_AUTOFETCH_CONCURRENCY = 2;
 const BODY_AUTOFETCH_MAX_BYTES = 8 * 1024 * 1024;
 const BODY_DRAIN_CONCURRENCY = 6;
+const COPY_BODY_CONFIRM_BYTES = 1 * 1024 * 1024;
+const COPY_BODY_MAX_BYTES = BODY_AUTOFETCH_MAX_BYTES;
 const DEFAULT_RUNTIME_SOURCES = {
   "0.1.0:win32:x64": {
     url: "https://github.com/XuanBoWu/mitm-proxy-extension/releases/download/v0.1.0/secmp-runtime-win32-x64-0.1.0.zip",
@@ -542,9 +545,14 @@ async function promptForWindowsRuntimeArchive() {
     filters: {
       "Runtime Package": ["zip"],
     },
+    defaultUri: getDefaultFileDialogUri(),
   });
 
-  return selected?.[0]?.fsPath || null;
+  if (selected?.[0]?.fsPath) {
+    await rememberFileDialogDir(selected[0].fsPath);
+    return selected[0].fsPath;
+  }
+  return null;
 }
 
 function requestJson(url, redirectCount = 0) {
@@ -1644,9 +1652,10 @@ async function saveActiveSessionAs() {
   if (!activeSession) return null;
   const result = await vscode.window.showSaveDialog({
     filters: { "SecMP Session": ["secmp"] },
-    defaultUri: vscode.Uri.file(`${activeSession.sessionName || "capture"}.secmp`),
+    defaultUri: getDefaultFileDialogUri(`${activeSession.sessionName || "capture"}.secmp`),
   });
   if (!result) return null;
+  await rememberFileDialogDir(result.fsPath);
   activeSession.saveAs(result.fsPath, path.basename(result.fsPath, ".secmp"));
   writeResumeMarker({ running: !!proxyProcess });
   rememberSession(activeSession);
@@ -3032,6 +3041,24 @@ async function createPanel() {
         await exportJson();
         break;
 
+      case "copyFlows":
+        await handleCopyFlows(message.flowIds, message.copyType);
+        break;
+
+      case "exportFlows":
+        await handleExportFlows(message.flowIds, message.format);
+        break;
+
+      case "saveFlowBody":
+        await handleSaveFlowBody(message.flowId, message.side);
+        break;
+
+      case "showWarningMessage":
+        if (message.message) {
+          vscode.window.showWarningMessage(String(message.message));
+        }
+        break;
+
       case "pushCert": {
         const caPath = path.join(certDir, "mitmproxy-ca-cert.pem");
         if (!fs.existsSync(caPath)) {
@@ -3592,27 +3619,469 @@ function showExportResult(count, filePath, failed) {
   }
 }
 
-async function exportHar() {
-  if (capturedFlows.length === 0) {
+function normalizeFlowIds(flowIds) {
+  const ids = Array.isArray(flowIds) ? flowIds : [];
+  const seen = new Set();
+  const normalized = [];
+  for (const id of ids) {
+    const value = String(id || "");
+    if (!value || seen.has(value)) continue;
+    seen.add(value);
+    normalized.push(value);
+  }
+  return normalized;
+}
+
+function resolveFlowsForIds(flowIds) {
+  const ids = normalizeFlowIds(flowIds);
+  if (ids.length === 0) {
+    return {
+      flows: capturedFlows.slice(),
+      missing: [],
+      selected: false,
+    };
+  }
+  const flows = [];
+  const missing = [];
+  for (const id of ids) {
+    const flow = capturedFlowById.get(id);
+    if (flow) {
+      flows.push(flow);
+    } else {
+      missing.push(id);
+    }
+  }
+  return { flows, missing, selected: true };
+}
+
+function getFlowOrdinal(flow) {
+  const idx = capturedFlowIndexById.get(flow?.id);
+  return Number.isInteger(idx) ? idx + 1 : Math.max(1, capturedFlows.indexOf(flow) + 1);
+}
+
+function sanitizeFilePart(value) {
+  const clean = String(value || "")
+    .trim()
+    .replace(/[^A-Za-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return clean.slice(0, 80) || "flow";
+}
+
+function getDefaultExportFileName(format, flows, selected) {
+  const ext = format === "har" ? "har" : "json";
+  if (!selected) return `capture.${ext}`;
+  if (flows.length === 1) {
+    const flow = flows[0];
+    const ordinal = String(getFlowOrdinal(flow)).padStart(6, "0");
+    return `secmp-flow-${ordinal}-${sanitizeFilePart(flow.host || "unknown")}.${ext}`;
+  }
+  return `secmp-flows-${flows.length}-items.${ext}`;
+}
+
+function getBodyContentType(flow, side) {
+  if (side === "request") {
+    return String(flow.req_headers?.["content-type"] || "");
+  }
+  return String(flow.content_type || flow.res_headers?.["content-type"] || "");
+}
+
+function getCompressionExtensionFromBuffer(buffer) {
+  if (!Buffer.isBuffer(buffer) || buffer.length < 4) return "";
+  if (buffer[0] === 0x50 && buffer[1] === 0x4b &&
+      (buffer[2] === 0x03 || buffer[2] === 0x05 || buffer[2] === 0x07) &&
+      (buffer[3] === 0x04 || buffer[3] === 0x06 || buffer[3] === 0x08)) return "zip";
+  if (buffer[0] === 0x1f && buffer[1] === 0x8b) return "gz";
+  if (buffer.length >= 6 &&
+      buffer[0] === 0x37 && buffer[1] === 0x7a && buffer[2] === 0xbc &&
+      buffer[3] === 0xaf && buffer[4] === 0x27 && buffer[5] === 0x1c) return "7z";
+  if (buffer.length >= 7 &&
+      buffer[0] === 0x52 && buffer[1] === 0x61 && buffer[2] === 0x72 &&
+      buffer[3] === 0x21 && buffer[4] === 0x1a && buffer[5] === 0x07) return "rar";
+  if (buffer[0] === 0x42 && buffer[1] === 0x5a && buffer[2] === 0x68) return "bz2";
+  if (buffer.length >= 6 &&
+      buffer[0] === 0xfd && buffer[1] === 0x37 && buffer[2] === 0x7a &&
+      buffer[3] === 0x58 && buffer[4] === 0x5a && buffer[5] === 0x00) return "xz";
+  if (buffer[0] === 0x28 && buffer[1] === 0xb5 && buffer[2] === 0x2f && buffer[3] === 0xfd) return "zst";
+  if (buffer.length >= 262 && buffer.subarray(257, 262).toString("ascii") === "ustar") return "tar";
+  return "";
+}
+
+function getBodyFileExtension(contentType, buffer = null) {
+  const sniffed = getCompressionExtensionFromBuffer(buffer);
+  const ct = String(contentType || "").toLowerCase().split(";")[0].trim();
+  if (!ct) return sniffed || "bin";
+  if (ct === "application/json" || ct.endsWith("+json")) return "json";
+  if (ct === "text/html") return "html";
+  if (ct === "text/plain") return "txt";
+  if (ct === "application/xml" || ct === "text/xml" || ct.endsWith("+xml")) return "xml";
+  if (ct === "application/javascript" || ct === "text/javascript") return "js";
+  if (ct === "image/png") return "png";
+  if (ct === "image/jpeg" || ct === "image/jpg") return "jpg";
+  if (ct === "image/gif") return "gif";
+  if (ct === "image/webp") return "webp";
+  if (ct === "application/pdf") return "pdf";
+  if (ct === "application/zip" || ct === "application/x-zip-compressed") return "zip";
+  if (ct === "application/gzip" || ct === "application/x-gzip") return "gz";
+  if (ct === "application/x-tar") return "tar";
+  if (ct === "application/x-bzip2") return "bz2";
+  if (ct === "application/x-7z-compressed") return "7z";
+  if (ct === "application/x-rar-compressed" || ct === "application/vnd.rar") return "rar";
+  if (ct === "application/x-xz") return "xz";
+  if (ct === "application/zstd" || ct === "application/x-zstd") return "zst";
+  if (ct === "application/x-brotli") return "br";
+  return sniffed || "bin";
+}
+
+function getDefaultBodyFileName(flow, side, contentType, buffer = null) {
+  const ordinal = String(getFlowOrdinal(flow)).padStart(6, "0");
+  const label = side === "request" ? "request" : "response";
+  const ext = getBodyFileExtension(contentType, buffer);
+  return `secmp-${label}-body-${ordinal}-${sanitizeFilePart(flow.host || "unknown")}.${ext}`;
+}
+
+function getDefaultFileDialogUri(fileName = "") {
+  const safeName = fileName ? path.basename(String(fileName)) : "";
+  const lastDir = extensionContext?.globalState?.get?.(LAST_FILE_DIALOG_DIR_KEY);
+  if (lastDir && fs.existsSync(lastDir)) {
+    try {
+      if (fs.statSync(lastDir).isDirectory()) {
+        return vscode.Uri.file(safeName ? path.join(lastDir, safeName) : lastDir);
+      }
+    } catch (_) {}
+  }
+  const workspaceFolder = vscode.workspace.workspaceFolders?.find((folder) => folder.uri.scheme === "file");
+  const baseDir = workspaceFolder?.uri.fsPath || os.homedir();
+  return vscode.Uri.file(safeName ? path.join(baseDir, safeName) : baseDir);
+}
+
+async function rememberFileDialogDir(filePath) {
+  const dir = path.dirname(String(filePath || ""));
+  if (!dir || dir === ".") return;
+  await extensionContext?.globalState?.update?.(LAST_FILE_DIALOG_DIR_KEY, dir);
+}
+
+function postFlowActionStatus(message, level = "info") {
+  if (panel) {
+    panel.webview.postMessage({
+      command: "flowActionStatus",
+      level,
+      message,
+    });
+  }
+}
+
+function formatHeaderValue(value) {
+  if (Array.isArray(value)) return value.map((item) => String(item)).join(", ");
+  return String(value == null ? "" : value);
+}
+
+function formatHeaderLines(headers) {
+  return Object.entries(headers || {})
+    .flatMap(([name, value]) => (
+      Array.isArray(value)
+        ? value.map((item) => `${name}: ${formatHeaderValue(item)}`)
+        : [`${name}: ${formatHeaderValue(value)}`]
+    ))
+    .join("\n");
+}
+
+function getFlowSummary(flow) {
+  const ordinal = getFlowOrdinal(flow);
+  const status = flow.error ? "ERR" : (flow.status_code || "...");
+  const mime = flow.content_type || "";
+  return [ordinal, flow.method || "GET", flow.url || "", status, mime].filter(Boolean).join(" ");
+}
+
+function formatFlowBlocks(flows, bodyBuilder) {
+  return flows.map((flow) => {
+    const body = bodyBuilder(flow);
+    const title = `# ${getFlowSummary(flow)}`;
+    return body ? `${title}\n${body}` : title;
+  }).join("\n\n");
+}
+
+function shellQuote(value) {
+  return `'${String(value == null ? "" : value).replace(/'/g, "'\\''")}'`;
+}
+
+function getRequestBodySize(flow) {
+  if (flow.req_body_base64) return Buffer.byteLength(flow.req_body_base64, "base64");
+  if (flow.req_body) return Buffer.byteLength(flow.req_body, "utf8");
+  return Number(flow.req_size) || 0;
+}
+
+function getResponseBodySize(flow) {
+  if (flow.res_body_base64) return Buffer.byteLength(flow.res_body_base64, "base64");
+  if (flow.res_body) return Buffer.byteLength(flow.res_body, "utf8");
+  return Number(flow.res_size) || 0;
+}
+
+function formatBytes(bytes) {
+  const n = Number(bytes) || 0;
+  if (n >= 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(n >= 10 * 1024 * 1024 ? 0 : 1)} MB`;
+  if (n >= 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${n} B`;
+}
+
+async function confirmLargeBodyCopy(bytes) {
+  if (bytes <= COPY_BODY_CONFIRM_BYTES) return true;
+  if (bytes > COPY_BODY_MAX_BYTES) {
+    vscode.window.showWarningMessage(t("extension.copy.bodyTooLarge", {
+      size: formatBytes(bytes),
+      limit: formatBytes(COPY_BODY_MAX_BYTES),
+    }));
+    postFlowActionStatus(t("extension.copy.bodyTooLarge", {
+      size: formatBytes(bytes),
+      limit: formatBytes(COPY_BODY_MAX_BYTES),
+    }), "warning");
+    return false;
+  }
+  const action = t("extension.copy.largeBodyContinue");
+  const choice = await vscode.window.showWarningMessage(
+    t("extension.copy.largeBodyConfirm", { size: formatBytes(bytes) }),
+    { modal: true },
+    action
+  );
+  return choice === action;
+}
+
+async function ensureCopyableBody(flow, side) {
+  const isRequest = side === "request";
+  const estimatedSize = isRequest ? getRequestBodySize(flow) : getResponseBodySize(flow);
+  if (estimatedSize > COPY_BODY_MAX_BYTES) {
+    vscode.window.showWarningMessage(t("extension.copy.bodyTooLarge", {
+      size: formatBytes(estimatedSize),
+      limit: formatBytes(COPY_BODY_MAX_BYTES),
+    }));
+    postFlowActionStatus(t("extension.copy.bodyTooLarge", {
+      size: formatBytes(estimatedSize),
+      limit: formatBytes(COPY_BODY_MAX_BYTES),
+    }), "warning");
+    return null;
+  }
+  if (!isRequest && !isResponseComplete(flow)) {
+    vscode.window.showWarningMessage(t("extension.copy.responsePending"));
+    postFlowActionStatus(t("extension.copy.responsePending"), "warning");
+    return null;
+  }
+
+  const result = await fetchFlowBodies(flow, {
+    request: isRequest,
+    response: !isRequest,
+  });
+  if (isRequest && !result.requestOk) {
+    const message = flow._reqBodyError || t("common.unknown");
+    vscode.window.showWarningMessage(t("extension.copy.bodyUnavailable", { message }));
+    postFlowActionStatus(t("extension.copy.bodyUnavailable", { message }), "warning");
+    return null;
+  }
+  if (!isRequest && !result.responseOk) {
+    const message = flow._resBodyError || t("common.unknown");
+    vscode.window.showWarningMessage(t("extension.copy.bodyUnavailable", { message }));
+    postFlowActionStatus(t("extension.copy.bodyUnavailable", { message }), "warning");
+    return null;
+  }
+
+  const base64 = isRequest ? flow.req_body_base64 : flow.res_body_base64;
+  if (base64) {
+    vscode.window.showWarningMessage(t("extension.copy.binaryBodyUnsupported"));
+    postFlowActionStatus(t("extension.copy.binaryBodyUnsupported"), "warning");
+    return null;
+  }
+  const text = isRequest ? (flow.req_body || "") : (flow.res_body || "");
+  const actualSize = Buffer.byteLength(text, "utf8");
+  if (!(await confirmLargeBodyCopy(actualSize))) return null;
+  return text;
+}
+
+async function getFlowBodyBufferForSave(flow, side) {
+  const isRequest = side === "request";
+  if (!isRequest && !isResponseComplete(flow)) {
+    return { ok: false, message: t("extension.bodySave.responsePending") };
+  }
+
+  if (activeSession && flow?.id) {
+    const state = activeSession.bodyState(flow.id, side);
+    if (state.state === "ready") {
+      return { ok: true, buffer: activeSession.getBodyBuffer(flow.id, side) };
+    }
+  }
+
+  const result = await fetchFlowBodies(flow, {
+    request: isRequest,
+    response: !isRequest,
+  });
+  if (isRequest && !result.requestOk) {
+    return {
+      ok: false,
+      message: t("extension.bodySave.unavailable", { message: flow._reqBodyError || t("common.unknown") }),
+    };
+  }
+  if (!isRequest && !result.responseOk) {
+    return {
+      ok: false,
+      message: t("extension.bodySave.unavailable", { message: flow._resBodyError || t("common.unknown") }),
+    };
+  }
+
+  if (activeSession && flow?.id) {
+    const state = activeSession.bodyState(flow.id, side);
+    if (state.state === "ready") {
+      return { ok: true, buffer: activeSession.getBodyBuffer(flow.id, side) };
+    }
+  }
+
+  const base64 = isRequest ? flow.req_body_base64 : flow.res_body_base64;
+  if (base64) return { ok: true, buffer: Buffer.from(base64, "base64") };
+  const text = isRequest ? (flow.req_body || "") : (flow.res_body || "");
+  return { ok: true, buffer: Buffer.from(text, "utf8") };
+}
+
+async function handleSaveFlowBody(flowId, side) {
+  const normalizedSide = side === "response" ? "response" : "request";
+  const flow = capturedFlowById.get(String(flowId || ""));
+  if (!flow) {
+    vscode.window.showWarningMessage(t("extension.bodySave.noFlow"));
+    return;
+  }
+
+  const bodyResult = await getFlowBodyBufferForSave(flow, normalizedSide);
+  if (!bodyResult.ok) {
+    vscode.window.showWarningMessage(bodyResult.message);
+    postFlowActionStatus(bodyResult.message, "warning");
+    return;
+  }
+
+  const contentType = getBodyContentType(flow, normalizedSide);
+  const ext = getBodyFileExtension(contentType, bodyResult.buffer);
+  const result = await vscode.window.showSaveDialog({
+    filters: {
+      "Body Files": [ext],
+      "All Files": ["*"],
+    },
+    defaultUri: getDefaultFileDialogUri(getDefaultBodyFileName(flow, normalizedSide, contentType, bodyResult.buffer)),
+  });
+  if (!result) return;
+
+  try {
+    fs.writeFileSync(result.fsPath, bodyResult.buffer);
+    await rememberFileDialogDir(result.fsPath);
+    const message = t("extension.bodySave.completed", { path: result.fsPath });
+    vscode.window.showInformationMessage(message);
+    postFlowActionStatus(message);
+  } catch (err) {
+    const message = t("extension.bodySave.failed", { message: err.message });
+    vscode.window.showErrorMessage(message);
+    postFlowActionStatus(message, "error");
+  }
+}
+
+async function buildCurlCommand(flow) {
+  if (getRequestBodySize(flow) > COPY_BODY_MAX_BYTES) {
+    const message = t("extension.copy.bodyTooLarge", {
+      size: formatBytes(getRequestBodySize(flow)),
+      limit: formatBytes(COPY_BODY_MAX_BYTES),
+    });
+    vscode.window.showWarningMessage(message);
+    postFlowActionStatus(message, "warning");
+    return null;
+  }
+  const hasBody = (Number(flow.req_size) || 0) > 0 || !!flow.req_body || !!flow.req_body_base64;
+  let body = "";
+  if (hasBody) {
+    body = await ensureCopyableBody(flow, "request");
+    if (body == null) return null;
+  }
+  const parts = [`curl -X ${shellQuote(flow.method || "GET")}`, shellQuote(flow.url || "")];
+  for (const [name, value] of Object.entries(flow.req_headers || {})) {
+    if (Array.isArray(value)) {
+      for (const item of value) parts.push("-H " + shellQuote(`${name}: ${formatHeaderValue(item)}`));
+    } else {
+      parts.push("-H " + shellQuote(`${name}: ${formatHeaderValue(value)}`));
+    }
+  }
+  if (hasBody) {
+    parts.push("--data-binary " + shellQuote(body));
+  }
+  return parts.join(" \\\n  ");
+}
+
+async function buildCopyText(flows, copyType) {
+  switch (copyType) {
+    case "url":
+      return flows.map((flow) => flow.url || "").join("\n");
+    case "host":
+      return flows.map((flow) => flow.host || "").join("\n");
+    case "summary":
+      return flows.map(getFlowSummary).join("\n");
+    case "requestHeaders":
+      return formatFlowBlocks(flows, (flow) => formatHeaderLines(flow.req_headers));
+    case "responseHeaders":
+      return formatFlowBlocks(flows, (flow) => formatHeaderLines(flow.res_headers));
+    case "requestBody":
+      return ensureCopyableBody(flows[0], "request");
+    case "responseBody":
+      return ensureCopyableBody(flows[0], "response");
+    case "curl":
+      return buildCurlCommand(flows[0]);
+    default:
+      return null;
+  }
+}
+
+async function handleCopyFlows(flowIds, copyType) {
+  const { flows, missing } = resolveFlowsForIds(flowIds);
+  if (flows.length === 0) {
+    vscode.window.showWarningMessage(t("extension.copy.noFlows"));
+    return;
+  }
+  if (["requestBody", "responseBody", "curl"].includes(copyType) && flows.length > 1) {
+    vscode.window.showWarningMessage(t("extension.copy.singleOnly"));
+    postFlowActionStatus(t("extension.copy.singleOnly"), "warning");
+    return;
+  }
+
+  const text = await buildCopyText(flows, copyType);
+  if (text == null) return;
+  await vscode.env.clipboard.writeText(text);
+  const message = missing.length > 0
+    ? t("extension.copy.completedWithMissing", { count: flows.length, missing: missing.length })
+    : t("extension.copy.completed", { count: flows.length });
+  vscode.window.showInformationMessage(message);
+  postFlowActionStatus(message);
+}
+
+async function handleExportFlows(flowIds, format) {
+  if (format === "har") {
+    await exportHar({ flowIds });
+  } else if (format === "json") {
+    await exportJson({ flowIds });
+  }
+}
+
+async function exportHar(options = {}) {
+  const { flows: flowsToExport, selected } = resolveFlowsForIds(options.flowIds);
+  if (flowsToExport.length === 0) {
     vscode.window.showWarningMessage(t("extension.export.noFlows"));
     return;
   }
 
   const result = await vscode.window.showSaveDialog({
     filters: { "HAR Files": ["har"] },
-    defaultUri: vscode.Uri.file("capture.har"),
+    defaultUri: getDefaultFileDialogUri(getDefaultExportFileName("har", flowsToExport, selected)),
   });
 
   if (!result) return;
+  await rememberFileDialogDir(result.fsPath);
 
   // Fetch bodies for all flows not yet loaded (parallel with bounded concurrency)
-  const fetchResult = await fetchAllFlowBodiesWithProgress(capturedFlows);
+  const fetchResult = await fetchAllFlowBodiesWithProgress(flowsToExport);
 
   const har = {
     log: {
       version: "1.2",
       creator: { name: "SecMP", version: extensionPackage.version },
-      entries: capturedFlows.map(f => {
+      entries: flowsToExport.map(f => {
         const entry = {
           startedDateTime: new Date(f.req_timestamp * 1000).toISOString(),
           time: f.duration_ms || 0,
@@ -3659,28 +4128,30 @@ async function exportHar() {
   };
 
   fs.writeFileSync(result.fsPath, JSON.stringify(har, null, 2));
-  showExportResult(capturedFlows.length, result.fsPath, fetchResult.failed);
+  showExportResult(flowsToExport.length, result.fsPath, fetchResult.failed);
 }
 
-async function exportJson() {
-  if (capturedFlows.length === 0) {
+async function exportJson(options = {}) {
+  const { flows: flowsToExport, selected } = resolveFlowsForIds(options.flowIds);
+  if (flowsToExport.length === 0) {
     vscode.window.showWarningMessage(t("extension.export.noFlows"));
     return;
   }
 
   const result = await vscode.window.showSaveDialog({
     filters: { "JSON Files": ["json"] },
-    defaultUri: vscode.Uri.file("capture.json"),
+    defaultUri: getDefaultFileDialogUri(getDefaultExportFileName("json", flowsToExport, selected)),
   });
 
   if (!result) return;
+  await rememberFileDialogDir(result.fsPath);
 
   // Fetch bodies for all flows not yet loaded (parallel with bounded concurrency)
-  const fetchResult = await fetchAllFlowBodiesWithProgress(capturedFlows);
+  const fetchResult = await fetchAllFlowBodiesWithProgress(flowsToExport);
 
-  const flowsWithSeq = capturedFlows.map((f, i) => ({ _num: i + 1, ...f }));
+  const flowsWithSeq = flowsToExport.map((f) => ({ _num: getFlowOrdinal(f), ...f }));
   fs.writeFileSync(result.fsPath, JSON.stringify(flowsWithSeq, null, 2));
-  showExportResult(capturedFlows.length, result.fsPath, fetchResult.failed);
+  showExportResult(flowsToExport.length, result.fsPath, fetchResult.failed);
 }
 
 async function saveSession() {
@@ -3692,9 +4163,10 @@ async function saveSession() {
     if (!sessionName) return;
     const result = await vscode.window.showSaveDialog({
       filters: { "SecMP Session": ["secmp"] },
-      defaultUri: vscode.Uri.file(`${sessionName}.secmp`),
+      defaultUri: getDefaultFileDialogUri(`${sessionName}.secmp`),
     });
     if (!result) return;
+    await rememberFileDialogDir(result.fsPath);
     activeSession = CaptureSession.createNamed(result.fsPath, sessionName, extensionPackage.version);
     flushActiveSession();
     rememberSession(activeSession);
@@ -3732,9 +4204,10 @@ async function newPersistentSession() {
   if (!sessionName) return;
   const result = await vscode.window.showSaveDialog({
     filters: { "SecMP Session": ["secmp"] },
-    defaultUri: vscode.Uri.file(`${sessionName}.secmp`),
+    defaultUri: getDefaultFileDialogUri(`${sessionName}.secmp`),
   });
   if (!result) return;
+  await rememberFileDialogDir(result.fsPath);
   if (activeSession && !(await confirmAndCloseActiveSession({ restorePanelOnCancel: !!panel }))) return;
   activeSession = CaptureSession.createNamed(result.fsPath, sessionName, extensionPackage.version);
   flushActiveSession();
@@ -3753,9 +4226,11 @@ async function loadSession() {
   const [fileUri] = await vscode.window.showOpenDialog({
     filters: { "SecMP Session": ["secmp"] },
     canSelectMany: false,
+    defaultUri: getDefaultFileDialogUri(),
   });
 
   if (!fileUri) return;
+  await rememberFileDialogDir(fileUri.fsPath);
 
   try {
     await openSessionFile(fileUri.fsPath);

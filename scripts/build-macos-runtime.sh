@@ -33,6 +33,7 @@ DIST_DIR="$BUILD_ROOT/dist"
 WORK_DIR="$BUILD_ROOT/work"
 PACKAGE_ROOT="$BUILD_ROOT/package"
 RUNTIME_DIR="$PACKAGE_ROOT/runtime"
+RUNTIME_ICON="$REPO_ROOT/media/secmp.icns"
 
 if [[ -z "$OUTPUT_DIR" ]]; then
   OUTPUT_DIR="$REPO_ROOT/dist"
@@ -85,6 +86,7 @@ echo "Building proxy_engine"
   --clean \
   --onedir \
   --name proxy_engine \
+  --icon "$RUNTIME_ICON" \
   --distpath "$DIST_DIR" \
   --workpath "$WORK_DIR" \
   --specpath "$BUILD_ROOT" \
@@ -100,6 +102,7 @@ echo "Building cert_manager"
   --clean \
   --onedir \
   --name cert_manager \
+  --icon "$RUNTIME_ICON" \
   --distpath "$DIST_DIR" \
   --workpath "$WORK_DIR" \
   --specpath "$BUILD_ROOT" \
