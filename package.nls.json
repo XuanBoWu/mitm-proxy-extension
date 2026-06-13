@@ -33,6 +33,9 @@
   "secmp.command.exportHar": "SecMP: Export as HAR",
   "secmp.command.exportJson": "SecMP: Export as JSON",
   "secmp.command.showPanel": "SecMP: Show Capture Panel",
+  "secmp.command.openRecentSession": "Open",
+  "secmp.command.revealRecentSession": "Reveal File",
+  "secmp.command.removeRecentSession": "Remove",
   "secmp.viewsContainer.title": "SecMP",
   "secmp.view.sidebar.name": "Sessions"
 }

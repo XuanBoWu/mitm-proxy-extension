@@ -204,7 +204,38 @@
       {
         "command": "secmp.showPanel",
         "title": "%secmp.command.showPanel%"
+      },
+      {
+        "command": "secmp.openRecentSession",
+        "title": "%secmp.command.openRecentSession%"
+      },
+      {
+        "command": "secmp.revealRecentSession",
+        "title": "%secmp.command.revealRecentSession%"
+      },
+      {
+        "command": "secmp.removeRecentSession",
+        "title": "%secmp.command.removeRecentSession%"
       }
-    ]
+    ],
+    "menus": {
+      "view/item/context": [
+        {
+          "command": "secmp.openRecentSession",
+          "when": "view == secmp.sidebar && viewItem == recentSession",
+          "group": "navigation@1"
+        },
+        {
+          "command": "secmp.revealRecentSession",
+          "when": "view == secmp.sidebar && viewItem == recentSession",
+          "group": "navigation@2"
+        },
+        {
+          "command": "secmp.removeRecentSession",
+          "when": "view == secmp.sidebar && viewItem == recentSession",
+          "group": "inline@9"
+        }
+      ]
+    }
   }
 }

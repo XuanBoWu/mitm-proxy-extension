@@ -21,12 +21,16 @@ let pollingTimer = null;
 let pollingInProgress = false;
 let idlePollCount = 0;
 let flowWebSocketReconnectTimer = null;
+let mitmwebHadFlows = false;
 let knownFlowIds = new Set();
 let ignoredFlowIdsAfterClear = new Set();
 let extensionContext = null;
 let activeSession = null;
+let activeSessionSyncTimer = null;
 let allowPanelDispose = false;
 let sidebarProvider = null;
+let activeProxyPort = null;
+let suppressNextProxyStoppedState = false;
 
 const TOOLS_DIR = path.join(__dirname, "tools");
 const DEFAULT_RUNTIME_VERSION = "0.1.2";
@@ -50,6 +54,8 @@ const FLOW_POLL_ACTIVE_MS = 500;
 const FLOW_POLL_IDLE_MS = 2000;
 const FLOW_POLL_IDLE_THRESHOLD = 3;
 const MITMWEB_REQUEST_TIMEOUT_MS = 5000;
+const SESSION_SYNC_DELAY_MS = 3000;
+const SESSION_FLUSH_DIRTY_BYTES = 2 * 1024 * 1024;
 const FILTER_BODY_FETCH_CONCURRENCY = 4;
 const BODY_AUTOFETCH_CONCURRENCY = 2;
 const BODY_AUTOFETCH_MAX_BYTES = 8 * 1024 * 1024;
@@ -1408,8 +1414,27 @@ function ensureActiveSession() {
   return session;
 }
 
+function cancelActiveSessionSync() {
+  if (activeSessionSyncTimer) {
+    clearTimeout(activeSessionSyncTimer);
+    activeSessionSyncTimer = null;
+  }
+}
+
+function syncActiveSession() {
+  if (!activeSession) return;
+  cancelActiveSessionSync();
+  try {
+    activeSession.sync();
+    writeResumeMarker({ running: !!proxyProcess });
+  } catch (err) {
+    log(`Failed to sync SecMP session: ${err.message}`);
+  }
+}
+
 function flushActiveSession() {
   if (!activeSession) return;
+  cancelActiveSessionSync();
   try {
     activeSession.flush();
     writeResumeMarker({ running: !!proxyProcess });
@@ -1418,14 +1443,37 @@ function flushActiveSession() {
   }
 }
 
-function closeActiveSession() {
+function scheduleActiveSessionSync() {
   if (!activeSession) return;
+  if (activeSession.dirtyBytes >= SESSION_FLUSH_DIRTY_BYTES) {
+    flushActiveSession();
+    return;
+  }
+  if (activeSessionSyncTimer) return;
+  activeSessionSyncTimer = setTimeout(() => {
+    activeSessionSyncTimer = null;
+    syncActiveSession();
+  }, SESSION_SYNC_DELAY_MS);
+}
+
+function closeActiveSession(options = {}) {
+  if (!activeSession) return;
+  const session = activeSession;
+  const shouldDeleteTemporary = !!options.deleteTemporary && session.temporary;
   try {
-    activeSession.close();
+    session.close();
   } catch (err) {
     log(`Failed to close SecMP session: ${err.message}`);
   }
+  if (shouldDeleteTemporary) {
+    try {
+      if (fs.existsSync(session.filePath)) fs.unlinkSync(session.filePath);
+    } catch (err) {
+      log(`Failed to delete temporary SecMP session: ${err.message}`);
+    }
+  }
   activeSession = null;
+  cancelActiveSessionSync();
   clearResumeMarker();
   refreshSidebar();
 }
@@ -1438,6 +1486,10 @@ function refreshSidebar() {
 
 function writeResumeMarker(extra = {}) {
   if (!activeSession) return;
+  if (!activeSession.temporary) {
+    clearResumeMarker();
+    return;
+  }
   try {
     const markerPath = getResumeMarkerPath();
     fs.mkdirSync(path.dirname(markerPath), { recursive: true });
@@ -1470,6 +1522,13 @@ function getRecentSessions() {
     : [];
 }
 
+function resolveRecentSessionFilePath(input) {
+  if (typeof input === "string") return input;
+  if (input?.filePath) return input.filePath;
+  if (input?.resourceUri?.fsPath) return input.resourceUri.fsPath;
+  return "";
+}
+
 function rememberSession(session) {
   if (!session || session.temporary || !extensionContext?.globalState) return;
   const current = getRecentSessions().filter((item) => item.filePath !== session.filePath);
@@ -1481,12 +1540,14 @@ function rememberSession(session) {
   extensionContext.globalState.update(RECENT_SESSIONS_KEY, current.slice(0, 12));
 }
 
-async function ensureCanSwitchSession() {
-  if (proxyProcess) {
-    vscode.window.showWarningMessage(t("extension.session.stopBeforeLoad"));
-    return false;
-  }
-  return true;
+function removeRecentSession(filePath) {
+  if (!filePath || !extensionContext?.globalState) return false;
+  const current = extensionContext.globalState.get(RECENT_SESSIONS_KEY, []) || [];
+  if (!Array.isArray(current)) return false;
+  const next = current.filter((item) => item?.filePath !== filePath);
+  extensionContext.globalState.update(RECENT_SESSIONS_KEY, next);
+  refreshSidebar();
+  return next.length !== current.length;
 }
 
 async function checkInterruptedSession() {
@@ -1503,32 +1564,76 @@ async function checkInterruptedSession() {
     clearResumeMarker();
     return;
   }
+  if (!marker.temporary) {
+    clearResumeMarker();
+    return;
+  }
+  let interruptedSession = null;
+  try {
+    interruptedSession = CaptureSession.open(marker.filePath);
+  } catch (err) {
+    log(`Failed to open interrupted SecMP session: ${err.message}`);
+    clearResumeMarker();
+    return;
+  }
+  if (!interruptedSession.hasFlows()) {
+    try {
+      interruptedSession.file.close();
+      fs.unlinkSync(marker.filePath);
+    } catch (_) {}
+    clearResumeMarker();
+    return;
+  }
   const restore = t("extension.session.restoreSession");
-  const keep = t("extension.session.keepSession");
+  const saveAs = t("extension.session.saveInterruptedSession");
   const discard = t("extension.session.discardTempSession");
   const choice = await vscode.window.showWarningMessage(
     t("extension.session.interrupted", { name: marker.sessionName || "SecMP" }),
     restore,
-    keep,
+    saveAs,
     discard
   );
   if (choice === restore) {
     try {
-      activeSession = CaptureSession.open(marker.filePath);
+      activeSession = interruptedSession;
+      interruptedSession = null;
       setCapturedFlows(markSessionLoadedFlows(activeSession.getFlows({ includeBodies: false })));
       knownFlowIds.clear();
       for (const flow of capturedFlows) knownFlowIds.add(flow.id);
       refreshSidebar();
       vscode.window.showInformationMessage(t("extension.session.loaded", { count: capturedFlows.length }));
+      await createPanel();
+      await maybeAutoStartProxyForSession();
     } catch (err) {
       vscode.window.showErrorMessage(t("extension.session.parseFailed", { message: err.message }));
       clearResumeMarker();
     }
     return;
   }
+  if (choice === saveAs) {
+    activeSession = interruptedSession;
+    interruptedSession = null;
+    const saved = await saveActiveSessionAs();
+    if (saved) {
+      closeActiveSession({ deleteTemporary: false });
+    } else if (activeSession) {
+      try {
+        activeSession.file.close();
+      } catch (_) {}
+      activeSession = null;
+      refreshSidebar();
+    }
+    return;
+  }
   if (choice === discard && marker.temporary) {
     try {
+      interruptedSession.file.close();
       fs.unlinkSync(marker.filePath);
+    } catch (_) {}
+  }
+  if (interruptedSession) {
+    try {
+      interruptedSession.file.close();
     } catch (_) {}
   }
   clearResumeMarker();
@@ -1544,6 +1649,7 @@ async function saveActiveSessionAs() {
   activeSession.saveAs(result.fsPath, path.basename(result.fsPath, ".secmp"));
   writeResumeMarker({ running: !!proxyProcess });
   rememberSession(activeSession);
+  if (panel) panel.title = getCapturePanelTitle();
   refreshSidebar();
   vscode.window.showInformationMessage(t("extension.session.saved", { path: result.fsPath }));
   return result.fsPath;
@@ -1554,9 +1660,7 @@ function recordSessionFlows(flows) {
   for (const flow of flows) {
     activeSession.putFlow(flow);
   }
-  if (activeSession.dirtyBytes >= 2 * 1024 * 1024) {
-    flushActiveSession();
-  }
+  scheduleActiveSessionSync();
 }
 
 function markSessionLoadedFlows(flows) {
@@ -1570,12 +1674,127 @@ function saveSessionUiState(state) {
   if (!activeSession) return;
   try {
     activeSession.setUiState(state || {});
-    if (activeSession.dirtyBytes >= 2 * 1024 * 1024) {
-      flushActiveSession();
-    }
+    scheduleActiveSessionSync();
   } catch (err) {
     log(`Failed to save session UI state: ${err.message}`);
   }
+}
+
+function recordSessionProxyState(running, options = {}) {
+  if (!activeSession) return;
+  const port = Number(options.port ?? activeProxyPort ?? activeSession.getProxyState?.()?.port ?? 0);
+  const state = {
+    running: !!running,
+    port: Number.isInteger(port) && port > 0 ? port : 0,
+    reason: options.reason || (running ? "proxyStarted" : "proxyStopped"),
+    updatedAt: new Date().toISOString(),
+  };
+  try {
+    activeSession.setProxyState(state);
+    scheduleActiveSessionSync();
+  } catch (err) {
+    log(`Failed to save SecMP proxy state: ${err.message}`);
+  }
+}
+
+function getSessionProxyAutoStartPort(session = activeSession) {
+  const state = session?.getProxyState?.();
+  if (!state?.running) return 0;
+  const port = Number(state.port);
+  if (!Number.isInteger(port) || port <= 0 || port > 65535) return 0;
+  return port;
+}
+
+function activeSessionHasFlows() {
+  return !!(activeSession?.hasFlows?.() || capturedFlows.length > 0);
+}
+
+async function stopProxyForSessionExit() {
+  const wasRunning = !!proxyProcess;
+  recordSessionProxyState(wasRunning, {
+    port: activeProxyPort,
+    reason: "sessionExit",
+  });
+  flushActiveSession();
+  if (wasRunning) {
+    await stopProxyEngine({
+      recordState: false,
+      preserveRecordedRunningState: true,
+      reason: "sessionExit",
+    });
+  }
+}
+
+async function closeActiveSessionForExit(options = {}) {
+  await stopProxyForSessionExit();
+  closeActiveSession({ deleteTemporary: !!options.deleteTemporary });
+  resetCapturedFlows();
+  knownFlowIds.clear();
+  ignoredFlowIdsAfterClear.clear();
+  mitmwebHadFlows = false;
+}
+
+async function confirmAndCloseActiveSession(options = {}) {
+  if (!activeSession) return true;
+  const restorePanelOnCancel = !!options.restorePanelOnCancel;
+  const hasFlows = activeSessionHasFlows();
+
+  if (activeSession.temporary) {
+    if (!hasFlows) {
+      await closeActiveSessionForExit({ deleteTemporary: true });
+      return true;
+    }
+
+    const saveAndExit = t("extension.session.closeSaveExit");
+    const discardAndExit = t("extension.session.closeDiscardExit");
+    const cancel = t("extension.session.closeCancel");
+    const choice = await vscode.window.showWarningMessage(
+      t("extension.session.closeTempWithFlows"),
+      { modal: true },
+      saveAndExit,
+      discardAndExit,
+      cancel
+    );
+    if (choice === saveAndExit) {
+      recordSessionProxyState(!!proxyProcess, {
+        port: activeProxyPort,
+        reason: "sessionExit",
+      });
+      const saved = await saveActiveSessionAs();
+      if (!saved) {
+        if (restorePanelOnCancel) await createPanel();
+        return false;
+      }
+      await closeActiveSessionForExit({ deleteTemporary: false });
+      return true;
+    }
+    if (choice === discardAndExit) {
+      await closeActiveSessionForExit({ deleteTemporary: true });
+      return true;
+    }
+    if (restorePanelOnCancel) await createPanel();
+    return false;
+  }
+
+  if (!hasFlows && !proxyProcess) {
+    await closeActiveSessionForExit({ deleteTemporary: false });
+    return true;
+  }
+
+  const exit = t("extension.session.closeExit");
+  const cancel = t("extension.session.closeCancel");
+  const choice = await vscode.window.showWarningMessage(
+    t("extension.session.closePersistentConfirm", { name: activeSession.sessionName || "SecMP" }),
+    { modal: true },
+    exit,
+    cancel
+  );
+  if (choice === exit) {
+    await closeActiveSessionForExit({ deleteTemporary: false });
+    return true;
+  }
+  if (restorePanelOnCancel) await createPanel();
+  return false;
 }
 
 function resetCapturedFlows() {
@@ -1896,9 +2115,13 @@ function handleWebSocketFlowEvent(msg) {
   if (cmd === "reset") {
     resetCapturedFlows();
     resetBodyFetchQueue();
-    if (activeSession) activeSession.resetFlows();
+    if (activeSession) {
+      activeSession.resetFlows();
+      scheduleActiveSessionSync();
+    }
     knownFlowIds.clear();
     ignoredFlowIdsAfterClear.clear();
+    mitmwebHadFlows = false;
     if (panel) {
       panel.webview.postMessage({ command: "flowsCleared" });
     }
@@ -1958,16 +2181,23 @@ async function pollFlows() {
     const flows = await mitmwebGetJson("/flows.json");
 
     // Detect if flows were cleared (e.g., via clearFlows command)
-    if (flows.length === 0 && capturedFlows.length > 0) {
+    if (flows.length === 0 && mitmwebHadFlows && capturedFlows.length > 0) {
       resetCapturedFlows();
       resetBodyFetchQueue();
-      if (activeSession) activeSession.resetFlows();
+      if (activeSession) {
+        activeSession.resetFlows();
+        scheduleActiveSessionSync();
+      }
       knownFlowIds.clear();
       ignoredFlowIdsAfterClear.clear();
+      mitmwebHadFlows = false;
       if (panel) {
         panel.webview.postMessage({ command: "flowsCleared" });
       }
       return;
+    }
+    if (flows.length > 0) {
+      mitmwebHadFlows = true;
     }
 
     // Check for new flows
@@ -2064,8 +2294,11 @@ function scheduleNextPoll() {
 function startFlowPolling() {
   stopFlowPolling();
   knownFlowIds.clear();
+  for (const flow of capturedFlows) {
+    if (flow?.id) knownFlowIds.add(flow.id);
+  }
   ignoredFlowIdsAfterClear.clear();
-  resetCapturedFlows();
+  mitmwebHadFlows = false;
   idlePollCount = 0;
   ensureActiveSession();
   pollFlows();
@@ -2204,7 +2437,9 @@ async function startProxyEngine(port) {
         clearTimeout(startupTimer);
         startupTimer = null;
       }
+      activeProxyPort = Number(port);
       startFlowPolling();
+      recordSessionProxyState(true, { port: activeProxyPort, reason: "proxyStarted" });
       resolve({ success: true, message: t("extension.proxy.started", { port }), webPort: wPort });
     }
 
@@ -2259,6 +2494,12 @@ async function startProxyEngine(port) {
       stopFlowPolling();
       webPort = null;
       authToken = null;
+      if (suppressNextProxyStoppedState) {
+        suppressNextProxyStoppedState = false;
+      } else {
+        recordSessionProxyState(false, { port: activeProxyPort || port, reason: "proxyExited" });
+      }
+      activeProxyPort = null;
       if (startupTimer) {
         clearTimeout(startupTimer);
         startupTimer = null;
@@ -2287,8 +2528,13 @@ async function startProxyEngine(port) {
   });
 }
 
-async function stopProxyEngine() {
+async function stopProxyEngine(options = {}) {
+  const recordStoppedState = options.recordState !== false;
+  const preserveRecordedRunningState = !!options.preserveRecordedRunningState;
   if (!proxyProcess) {
+    if (recordStoppedState) {
+      recordSessionProxyState(false, { reason: options.reason || "proxyStopped" });
+    }
     flushActiveSession();
     return { success: true, message: t("extension.proxy.notRunning") };
   }
@@ -2303,11 +2549,20 @@ async function stopProxyEngine() {
 
   return new Promise((resolve) => {
     if (!proxyProcess) {
+      if (recordStoppedState) {
+        recordSessionProxyState(false, { reason: options.reason || "proxyStopped" });
+      }
       flushActiveSession();
       resolve({ success: true, message: t("extension.proxy.notRunning") });
       return;
     }
 
+    if (recordStoppedState) {
+      recordSessionProxyState(false, { port: activeProxyPort, reason: options.reason || "proxyStopped" });
+    }
+    if (recordStoppedState || preserveRecordedRunningState) {
+      suppressNextProxyStoppedState = true;
+    }
     stopFlowPolling();
     resetBodyFetchQueue();
     flushActiveSession();
@@ -2316,6 +2571,7 @@ async function stopProxyEngine() {
       proxyProcess = null;
       webPort = null;
       authToken = null;
+      activeProxyPort = null;
       flushActiveSession();
       resolve({ success: true, message: t("extension.proxy.stopped") });
     });
@@ -2671,8 +2927,12 @@ async function createPanel() {
         }
         resetCapturedFlows();
         resetBodyFetchQueue();
-        if (activeSession) activeSession.resetFlows();
+        if (activeSession) {
+          activeSession.resetFlows();
+          scheduleActiveSessionSync();
+        }
         knownFlowIds.clear();
+        mitmwebHadFlows = false;
         // Also clear flows in mitmproxy via REST API
         if (webPort && authToken) {
           try {
@@ -2752,38 +3012,7 @@ async function createPanel() {
 }
 
 async function handlePanelClosedDuringCapture() {
-  flushActiveSession();
-  const saveAndStop = t("extension.session.closeSaveStop");
-  const stopOnly = t("extension.session.closeStopOnly");
-  const cancel = t("extension.session.closeCancel");
-  const choice = await vscode.window.showWarningMessage(
-    t("extension.session.closeWhileCapturing"),
-    { modal: true },
-    saveAndStop,
-    stopOnly,
-    cancel
-  );
-  if (choice === saveAndStop) {
-    if (activeSession?.temporary) {
-      const saved = await saveActiveSessionAs();
-      if (!saved) {
-        await createPanel();
-        return;
-      }
-    } else {
-      flushActiveSession();
-    }
-    await stopProxyEngine();
-    closeActiveSession();
-    return;
-  }
-  if (choice === stopOnly) {
-    flushActiveSession();
-    await stopProxyEngine();
-    closeActiveSession();
-    return;
-  }
-  await createPanel();
+  await confirmAndCloseActiveSession({ restorePanelOnCancel: true });
 }
 
 // ===== REST API helpers (with method support) =====
@@ -2922,6 +3151,7 @@ function applyFetchedBody(flow, side, buf, contentType) {
       contentType,
       contentKind: binary ? "binary" : "text",
     });
+    scheduleActiveSessionSync();
   }
   flow._bodyFetched = !!(flow._reqBodyFetched && flow._resBodyFetched);
 }
@@ -3402,8 +3632,7 @@ async function saveSession() {
 }
 
 async function newTemporarySession() {
-  if (!(await ensureCanSwitchSession())) return;
-  if (activeSession) closeActiveSession();
+  if (activeSession && !(await confirmAndCloseActiveSession({ restorePanelOnCancel: !!panel }))) return;
   activeSession = CaptureSession.createTemporary(getSessionCacheDir(), extensionPackage.version);
   writeResumeMarker({ running: false });
   resetCapturedFlows();
@@ -3417,7 +3646,6 @@ async function newTemporarySession() {
 }
 
 async function newPersistentSession() {
-  if (!(await ensureCanSwitchSession())) return;
   const sessionName = await vscode.window.showInputBox({
     prompt: t("extension.session.namePrompt"),
     value: "SecMP Capture",
@@ -3428,7 +3656,7 @@ async function newPersistentSession() {
     defaultUri: vscode.Uri.file(`${sessionName}.secmp`),
   });
   if (!result) return;
-  if (activeSession) closeActiveSession();
+  if (activeSession && !(await confirmAndCloseActiveSession({ restorePanelOnCancel: !!panel }))) return;
   activeSession = CaptureSession.createNamed(result.fsPath, sessionName, extensionPackage.version);
   flushActiveSession();
   rememberSession(activeSession);
@@ -3458,8 +3686,7 @@ async function loadSession() {
 }
 
 async function openSessionFile(filePath) {
-  if (!(await ensureCanSwitchSession())) return;
-  if (activeSession) closeActiveSession();
+  if (activeSession && !(await confirmAndCloseActiveSession({ restorePanelOnCancel: !!panel }))) return;
   activeSession = CaptureSession.open(filePath);
   rememberSession(activeSession);
   const loadedFlows = markSessionLoadedFlows(activeSession.getFlows({ includeBodies: false }));
@@ -3481,6 +3708,34 @@ async function openSessionFile(filePath) {
   vscode.window.showInformationMessage(t("extension.session.loaded", { count: capturedFlows.length }));
   await createPanel();
   await vscode.commands.executeCommand("workbench.action.closeSidebar");
+  await maybeAutoStartProxyForSession();
+}
+
+async function maybeAutoStartProxyForSession() {
+  const port = getSessionProxyAutoStartPort(activeSession);
+  if (!port || proxyProcess) return;
+  try {
+    const result = await startProxyEngine(port);
+    if (panel) {
+      panel.webview.postMessage({
+        command: "proxyStatus",
+        running: true,
+        port,
+        message: result.message,
+      });
+    }
+  } catch (err) {
+    log(`Failed to auto-start proxy from session state: ${err.message}`);
+    if (panel) {
+      panel.webview.postMessage({
+        command: "proxyStatus",
+        running: false,
+        port,
+        message: err.message,
+      });
+    }
+    vscode.window.showWarningMessage(t("extension.session.proxyAutoStartFailed", { message: err.message }));
+  }
 }
 
 async function openCapturePanelForSession() {
@@ -3551,6 +3806,9 @@ class SecmpSidebarProvider {
     const item = new vscode.TreeItem(label, vscode.TreeItemCollapsibleState.None);
     item.description = path.dirname(entry.filePath);
     item.tooltip = entry.filePath;
+    item.contextValue = "recentSession";
+    item.filePath = entry.filePath;
+    item.resourceUri = vscode.Uri.file(entry.filePath);
     item.iconPath = new vscode.ThemeIcon("file");
     item.command = {
       command: "secmp.openRecentSession",
@@ -3566,7 +3824,6 @@ function activate(context) {
   outputChannel = vscode.window.createOutputChannel("SecMP");
   log("SecMP extension activated");
   initializeRuntimeStorage(context);
-  checkInterruptedSession();
   checkForExtensionUpdate(context, { manual: false });
   sidebarProvider = new SecmpSidebarProvider();
   const sidebarView = vscode.window.createTreeView("secmp.sidebar", {
@@ -3594,13 +3851,28 @@ function activate(context) {
     loadSession();
   });
 
-  const openRecentSessionCmd = vscode.commands.registerCommand("secmp.openRecentSession", async (filePath) => {
+  const openRecentSessionCmd = vscode.commands.registerCommand("secmp.openRecentSession", async (input) => {
+    const filePath = resolveRecentSessionFilePath(input);
     if (filePath) {
       try {
         await openSessionFile(filePath);
       } catch (err) {
         vscode.window.showErrorMessage(t("extension.session.parseFailed", { message: err.message }));
       }
+    }
+  });
+
+  const revealRecentSessionCmd = vscode.commands.registerCommand("secmp.revealRecentSession", async (input) => {
+    const filePath = resolveRecentSessionFilePath(input);
+    if (!filePath) return;
+    await vscode.commands.executeCommand("revealFileInOS", vscode.Uri.file(filePath));
+  });
+
+  const removeRecentSessionCmd = vscode.commands.registerCommand("secmp.removeRecentSession", (input) => {
+    const filePath = resolveRecentSessionFilePath(input);
+    if (!filePath) return;
+    if (removeRecentSession(filePath)) {
+      vscode.window.showInformationMessage(t("extension.session.removedFromHistory"));
     }
   });
 
@@ -3729,6 +4001,7 @@ function activate(context) {
   context.subscriptions.push(
     showPanelCmd, startProxyCmd, stopProxyCmd, pushCertCmd,
     openCapturePanelCmd, newTemporarySessionCmd, newPersistentSessionCmd, openSessionCmd, openRecentSessionCmd,
+    revealRecentSessionCmd, removeRecentSessionCmd,
     setupProxyCmd, clearProxyCmd, cleanRuntimeCacheCmd, checkForUpdatesCmd, exportHarCmd, exportJsonCmd,
     languageConfigListener,
     sidebarView,
@@ -3736,10 +4009,15 @@ function activate(context) {
   );
 
   log("Commands registered");
+  checkInterruptedSession();
 }
 
 function deactivate() {
   stopFlowPolling();
+  recordSessionProxyState(!!proxyProcess, {
+    port: activeProxyPort,
+    reason: "extensionDeactivate",
+  });
   flushActiveSession();
   writeResumeMarker({ shutdownAt: new Date().toISOString(), proxyRunning: !!proxyProcess });
   try {

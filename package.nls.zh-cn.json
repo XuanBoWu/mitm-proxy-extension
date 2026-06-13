@@ -33,6 +33,9 @@
   "secmp.command.exportHar": "SecMP: 导出 HAR",
   "secmp.command.exportJson": "SecMP: 导出 JSON",
   "secmp.command.showPanel": "SecMP: 显示抓包面板",
+  "secmp.command.openRecentSession": "打开",
+  "secmp.command.revealRecentSession": "定位文件",
+  "secmp.command.removeRecentSession": "移除",
   "secmp.viewsContainer.title": "SecMP",
   "secmp.view.sidebar.name": "会话"
 }
