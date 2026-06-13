@@ -16,6 +16,10 @@ function readSecmpMessages() {
 
 const SECMP_MESSAGES = readSecmpMessages();
 const SECMP_STATIC_FALLBACKS = readStaticI18nFallbacks();
+const DEFAULT_FONT_SIZE = 13;
+const MIN_FONT_SIZE = 12;
+const MAX_FONT_SIZE = 16;
+const FLOW_ROW_HEIGHT_RATIO = 2.16;
 
 // State
 let flows = [];
@@ -23,7 +27,17 @@ let flowIndexById = new Map();
 let selectedFlowId = null;
 let selectedFlowIds = new Set();
 let selectionAnchorFlowId = null;
+let contextTargetFlowId = null;
+let flowContextMenuEl = null;
+let detailContextMenuEl = null;
+let detailContextSide = null;
+let detailContextSelectionText = "";
+let imageContextMenuEl = null;
 let proxyRunning = false;
+let proxyPhase = "stopped";
+let currentProxyPort = 8080;
+let proxyPortEditing = false;
+let proxyPortBeforeEdit = currentProxyPort;
 let environmentStatus = null;
 let aboutPopoverOpen = false;
 const EXTENSION_VERSION = window.__SECMP_EXTENSION_VERSION__ || document.getElementById("footerVersion")?.textContent?.trim() || "-";
@@ -110,7 +124,8 @@ let cachedFilteredFlows = null;
 let cachedFilteredIds = null;
 let cachedFilterSnapshot = null;
 let lastRenderWindow = null; // { start, end, count } — skip rebuild while scrolling inside it
-const FLOW_ROW_HEIGHT = 26;
+let currentFontSize = normalizeFontSize(readInitialFontSize());
+let flowRowHeight = computeFlowRowHeight(currentFontSize);
 const FLOW_RENDER_BUFFER_ROWS = 24;
 const FLOW_AUTOFIT_SAMPLE_ROWS = 80;
 
@@ -172,6 +187,51 @@ const proxyStatusText = $("proxyStatusText");
 const footerStatus = $("footerStatus");
 const flowTableWrapper = document.querySelector(".table-wrapper");
 
+applyFontSize(currentFontSize);
+
+function normalizeFontSize(raw) {
+  const value = Number(raw);
+  if (!Number.isFinite(value)) return DEFAULT_FONT_SIZE;
+  return Math.min(MAX_FONT_SIZE, Math.max(MIN_FONT_SIZE, Math.round(value)));
+}
+
+function readInitialFontSize() {
+  const templateSize = document.getElementById("secmpI18n")?.dataset?.fontSize;
+  const rootSize = getComputedStyle(document.documentElement).getPropertyValue("--secmp-font-size");
+  return templateSize || rootSize || DEFAULT_FONT_SIZE;
+}
+
+function computeFlowRowHeight(fontSize) {
+  return Math.round(fontSize * FLOW_ROW_HEIGHT_RATIO);
+}
+
+function updateFlowRowHeight() {
+  const renderedRow = flowTableBody?.querySelector("tr[data-id]");
+  if (renderedRow?.offsetHeight) {
+    flowRowHeight = renderedRow.offsetHeight;
+    return;
+  }
+  flowRowHeight = computeFlowRowHeight(currentFontSize);
+}
+
+function applyFontSize(raw, options = {}) {
+  currentFontSize = normalizeFontSize(raw);
+  const root = document.documentElement;
+  root.style.setProperty("--secmp-font-size", `${currentFontSize}px`);
+  root.style.setProperty("--flow-header-font-size", `${Math.max(11, currentFontSize - 1)}px`);
+  root.style.setProperty("--flow-font-size", `${currentFontSize}px`);
+  root.style.setProperty("--flow-meta-font-size", `${Math.max(11, currentFontSize - 1)}px`);
+  root.style.setProperty("--flow-badge-font-size", `${Math.max(10, currentFontSize - 2)}px`);
+  root.style.setProperty("--flow-row-height", `${computeFlowRowHeight(currentFontSize)}px`);
+  root.style.setProperty("--detail-body-font-size", `${Math.max(11, currentFontSize - 1)}px`);
+  updateFlowRowHeight();
+  if (!options.rerender) return;
+  lastRenderWindow = null;
+  renderFlowList();
+  document.querySelectorAll(".message-textarea").forEach((editor) => updateLineNumbers(editor));
+  autoFitContentColumns();
+}
+
 function rebuildFlowIndex() {
   flowIndexById = new Map();
   flows.forEach((flow, index) => {
@@ -202,6 +262,9 @@ function scheduleFlowListRender(scrollOnly = false) {
 window.addEventListener("message", (event) => {
   const msg = event.data;
   switch (msg.command) {
+    case "fontSize":
+      applyFontSize(msg.fontSize, { rerender: true });
+      break;
     case "addFlows":
       for (const f of msg.flows || []) {
         f._seq = nextSeq++;
@@ -265,6 +328,11 @@ window.addEventListener("message", (event) => {
     }
     case "setStatus":
       proxyRunning = msg.proxyRunning;
+      proxyPhase = msg.proxyPhase || (msg.proxyRunning ? "running" : "stopped");
+      if (Number.isFinite(Number(msg.proxyPort)) && Number(msg.proxyPort) > 0) {
+        currentProxyPort = Number(msg.proxyPort);
+        $("proxyPort").value = String(currentProxyPort);
+      }
       updateProxyIndicator();
       if (msg.flowCount != null) {
         scheduleFlowListRender();
@@ -272,6 +340,13 @@ window.addEventListener("message", (event) => {
       break;
     case "proxyStatus":
       proxyRunning = msg.running;
+      proxyPhase = msg.phase || (msg.running ? "running" : "stopped");
+      if (Number.isFinite(Number(msg.port)) && Number(msg.port) > 0) {
+        currentProxyPort = Number(msg.port);
+        if (!proxyPortEditing || proxyPhase === "running") {
+          $("proxyPort").value = String(currentProxyPort);
+        }
+      }
       updateProxyIndicator();
       footerStatus.textContent = msg.message || (msg.running ? t("webview.proxy.runningStatus") : t("webview.proxy.stoppedStatus"));
       break;
@@ -372,23 +447,55 @@ window.addEventListener("message", (event) => {
     case "environmentActionResult":
       showEnvironmentActionStatus(msg.message || "", !!msg.running);
       break;
+    case "flowActionStatus":
+      if (msg.message) footerStatus.textContent = msg.message;
+      break;
   }
 });
 
 // ===== Proxy Indicator =====
 
+function getProxyPortInputValue() {
+  const value = parseInt($("proxyPort").value, 10);
+  return Number.isInteger(value) && value > 0 && value <= 65535 ? value : 8080;
+}
+
+function setProxyControlsDisabled(disabled) {
+  $("proxyPort").disabled = disabled;
+  $("editProxyPortBtn").disabled = disabled;
+  $("applyProxyPortBtn").disabled = disabled;
+  $("cancelProxyPortBtn").disabled = disabled;
+  $("startProxyBtn").disabled = disabled;
+  $("stopProxyBtn").disabled = disabled;
+  $("setDeviceProxyBtn").disabled = disabled;
+  $("clearDeviceProxyBtn").disabled = disabled;
+}
+
+function updateProxyPortControls() {
+  const transitioning = proxyPhase === "starting" || proxyPhase === "stopping" || proxyPhase === "restarting";
+  $("editProxyPortBtn").style.display = proxyRunning && !proxyPortEditing && !transitioning ? "inline-flex" : "none";
+  $("proxyPortEditActions").style.display = proxyRunning && proxyPortEditing && !transitioning ? "flex" : "none";
+  $("startProxyBtn").style.display = proxyRunning ? "none" : "block";
+  $("stopProxyBtn").style.display = proxyRunning ? "block" : "none";
+  setProxyControlsDisabled(transitioning);
+  $("proxyPort").disabled = transitioning || (proxyRunning && !proxyPortEditing);
+}
+
 function updateProxyIndicator() {
-  if (proxyRunning) {
+  const transitioning = proxyPhase === "starting" || proxyPhase === "stopping" || proxyPhase === "restarting";
+  if (transitioning) {
+    proxyIndicator.className = "indicator pending";
+    proxyStatusText.textContent = proxyPhase === "restarting"
+      ? t("webview.proxy.restarting", { port: getProxyPortInputValue() })
+      : t("webview.proxy.switching");
+  } else if (proxyRunning) {
     proxyIndicator.className = "indicator running";
-    proxyStatusText.textContent = t("webview.proxy.running");
-    $("startProxyBtn").style.display = "none";
-    $("stopProxyBtn").style.display = "block";
+    proxyStatusText.textContent = t("webview.proxy.runningOnPort", { port: currentProxyPort });
   } else {
     proxyIndicator.className = "indicator stopped";
     proxyStatusText.textContent = t("webview.proxy.stopped");
-    $("startProxyBtn").style.display = "block";
-    $("stopProxyBtn").style.display = "none";
   }
+  updateProxyPortControls();
 }
 
 // ===== Device Panel =====
@@ -1024,10 +1131,11 @@ function renderFlowList(options = {}) {
 }
 
 function renderFlowRows(filtered, scrollOnly = false) {
+  updateFlowRowHeight();
   const wrapperHeight = flowTableWrapper ? flowTableWrapper.clientHeight : 600;
   const scrollTop = flowTableWrapper ? flowTableWrapper.scrollTop : 0;
-  const viewportRows = Math.max(1, Math.ceil(wrapperHeight / FLOW_ROW_HEIGHT));
-  const start = Math.max(0, Math.floor(scrollTop / FLOW_ROW_HEIGHT) - FLOW_RENDER_BUFFER_ROWS);
+  const viewportRows = Math.max(1, Math.ceil(wrapperHeight / flowRowHeight));
+  const start = Math.max(0, Math.floor(scrollTop / flowRowHeight) - FLOW_RENDER_BUFFER_ROWS);
   const end = Math.min(filtered.length, start + viewportRows + FLOW_RENDER_BUFFER_ROWS * 2);
 
   // While merely scrolling, skip the innerHTML rebuild if the visible window
@@ -1039,8 +1147,8 @@ function renderFlowRows(filtered, scrollOnly = false) {
   }
 
   const rows = [];
-  const topHeight = start * FLOW_ROW_HEIGHT;
-  const bottomHeight = Math.max(0, (filtered.length - end) * FLOW_ROW_HEIGHT);
+  const topHeight = start * flowRowHeight;
+  const bottomHeight = Math.max(0, (filtered.length - end) * flowRowHeight);
 
   virtualStartIndex = start;
   if (topHeight > 0) {
@@ -1163,6 +1271,7 @@ function getFlowRowClass(flowId) {
   const classes = [];
   if (selectedFlowIds.has(flowId)) classes.push("selected");
   if (selectedFlowId === flowId) classes.push("focused");
+  if (contextTargetFlowId === flowId) classes.push("context-target");
   // Body filter could not verify this flow (fetch failed / unavailable / still
   // loading) — it stays visible but is visually marked as unverified.
   if (needsFilterContent() && filterBodyUnsearchedIds.has(flowId) && !filterBodyMatchedIds.has(flowId)) {
@@ -1196,6 +1305,475 @@ flowTableBody.addEventListener("click", (event) => {
   const row = event.target.closest("tr[data-id]");
   if (!row || !flowTableBody.contains(row)) return;
   handleFlowRowClick(row.dataset.id, event);
+});
+
+const FLOW_CONTEXT_ACTIONS = [
+  { id: "copyUrl", type: "copy", copyType: "url", labelKey: "webview.context.copyUrl", fallback: "复制 URL", scope: "all" },
+  { id: "copyHost", type: "copy", copyType: "host", labelKey: "webview.context.copyHost", fallback: "复制 Host", scope: "all" },
+  { id: "copySummary", type: "copy", copyType: "summary", labelKey: "webview.context.copySummary", fallback: "复制请求摘要", scope: "all" },
+  { id: "copyRequestHeaders", type: "copy", copyType: "requestHeaders", labelKey: "webview.context.copyRequestHeaders", fallback: "复制请求头", scope: "all" },
+  { id: "copyResponseHeaders", type: "copy", copyType: "responseHeaders", labelKey: "webview.context.copyResponseHeaders", fallback: "复制响应头", scope: "all" },
+  { id: "copyCurl", type: "copy", copyType: "curl", labelKey: "webview.context.copyCurl", fallback: "复制为 cURL", scope: "single" },
+  { id: "copyRequestBody", type: "copy", copyType: "requestBody", labelKey: "webview.context.copyRequestBody", fallback: "复制请求体", scope: "single" },
+  { id: "copyResponseBody", type: "copy", copyType: "responseBody", labelKey: "webview.context.copyResponseBody", fallback: "复制响应体", scope: "single" },
+  { id: "divider-copy-save", type: "divider", scope: "single" },
+  { id: "saveRequestBody", type: "saveBody", side: "request", labelKey: "webview.context.saveRequestBody", fallback: "将请求体保存为文件", scope: "single" },
+  { id: "saveResponseBody", type: "saveBody", side: "response", labelKey: "webview.context.saveResponseBody", fallback: "将响应体保存为文件", scope: "single" },
+  { id: "divider-save-export", type: "divider", scope: "all" },
+  { id: "exportJson", type: "export", format: "json", labelKey: "webview.context.exportJson", fallback: "导出为 JSON", scope: "all" },
+  { id: "exportHar", type: "export", format: "har", labelKey: "webview.context.exportHar", fallback: "导出为 HAR", scope: "all" },
+];
+
+const DETAIL_SELECTION_SEARCH_MAX_LENGTH = 200;
+const DETAIL_CONTEXT_ACTIONS = {
+  request: [
+    { id: "copySelection", type: "copySelection", labelKey: "webview.context.copySelection", fallback: "复制" },
+    { id: "copyRequestHeaders", type: "copyFlow", copyType: "requestHeaders", labelKey: "webview.context.copyRequestHeaders", fallback: "复制请求头" },
+    { id: "copyRequestBody", type: "copyFlow", copyType: "requestBody", labelKey: "webview.context.copyRequestBody", fallback: "复制请求体" },
+    { id: "copyCurl", type: "copyFlow", copyType: "curl", labelKey: "webview.context.copyCurl", fallback: "复制为 cURL" },
+    { id: "divider-copy-search", type: "divider" },
+    { id: "searchSelection", type: "searchSelection", labelKey: "webview.context.searchSelection", fallback: "搜索选中内容" },
+    { id: "divider-search-save", type: "divider" },
+    { id: "saveRequestBody", type: "saveBody", side: "request", labelKey: "webview.context.saveRequestBody", fallback: "将请求体保存为文件" },
+  ],
+  response: [
+    { id: "copySelection", type: "copySelection", labelKey: "webview.context.copySelection", fallback: "复制" },
+    { id: "copyResponseHeaders", type: "copyFlow", copyType: "responseHeaders", labelKey: "webview.context.copyResponseHeaders", fallback: "复制响应头" },
+    { id: "copyResponseBody", type: "copyFlow", copyType: "responseBody", labelKey: "webview.context.copyResponseBody", fallback: "复制响应体" },
+    { id: "divider-copy-search", type: "divider" },
+    { id: "searchSelection", type: "searchSelection", labelKey: "webview.context.searchSelection", fallback: "搜索选中内容" },
+    { id: "divider-search-save", type: "divider" },
+    { id: "saveResponseBody", type: "saveBody", side: "response", labelKey: "webview.context.saveResponseBody", fallback: "将响应体保存为文件" },
+  ],
+};
+
+const IMAGE_CONTEXT_ACTIONS = [
+  { id: "copyImage", type: "copyImage", labelKey: "webview.context.copyImage", fallback: "复制图片" },
+  { id: "copyImageUrl", type: "copyImageUrl", labelKey: "webview.context.copyImageUrl", fallback: "复制图片 URL" },
+];
+
+function getSelectedVisibleFlowIds() {
+  return getSelectedVisibleFlows().map((flow) => flow.id);
+}
+
+function getContextFlowIds() {
+  const ids = getSelectedVisibleFlowIds();
+  if (ids.length > 0) return ids;
+  return contextTargetFlowId ? [contextTargetFlowId] : [];
+}
+
+function closeFlowContextMenu(options = {}) {
+  if (flowContextMenuEl) {
+    flowContextMenuEl.remove();
+    flowContextMenuEl = null;
+  }
+  const hadTarget = !!contextTargetFlowId;
+  contextTargetFlowId = null;
+  if (options.render !== false && hadTarget) {
+    renderFlowList();
+  }
+}
+
+function closeDetailContextMenu() {
+  if (detailContextMenuEl) {
+    detailContextMenuEl.remove();
+    detailContextMenuEl = null;
+  }
+  detailContextSide = null;
+  detailContextSelectionText = "";
+}
+
+function closeImageContextMenu() {
+  if (imageContextMenuEl) {
+    imageContextMenuEl.remove();
+    imageContextMenuEl = null;
+  }
+}
+
+function closeAllContextMenus(options = {}) {
+  closeFlowContextMenu(options);
+  closeDetailContextMenu();
+  closeImageContextMenu();
+}
+
+function getFlowContextActions(count) {
+  return FLOW_CONTEXT_ACTIONS.filter((action) => action.scope !== "single" || count === 1);
+}
+
+function positionFlowContextMenu(menu, x, y) {
+  const margin = 8;
+  menu.style.left = `${x}px`;
+  menu.style.top = `${y}px`;
+  const rect = menu.getBoundingClientRect();
+  const left = Math.max(margin, Math.min(x, window.innerWidth - rect.width - margin));
+  const top = Math.max(margin, Math.min(y, window.innerHeight - rect.height - margin));
+  menu.style.left = `${left}px`;
+  menu.style.top = `${top}px`;
+}
+
+function getDetailContextSide(target) {
+  if (!target) return null;
+  if (target.closest("#reqSectionScroll")) return "request";
+  if (target.closest("#resSectionScroll")) return "response";
+  return null;
+}
+
+function getImageRenderContextTarget(target) {
+  const render = target?.closest?.("#resBodyRender");
+  if (!render || render.style.display === "none") return null;
+  const img = target.closest("img.secmp-render-image");
+  if (!img) return null;
+  const ct = String(currentDetailFlow?.content_type || "").toLowerCase();
+  return ct.startsWith("image/") ? img : null;
+}
+
+function getDetailSection(side) {
+  return side === "request" ? $("reqSectionScroll") : $("resSectionScroll");
+}
+
+function getDetailSelectionText(side) {
+  const selection = window.getSelection ? window.getSelection() : null;
+  if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return "";
+  const section = getDetailSection(side);
+  if (!section) return "";
+  let touchesSection = false;
+  for (let i = 0; i < selection.rangeCount; i += 1) {
+    const range = selection.getRangeAt(i);
+    if (section.contains(range.commonAncestorContainer)) {
+      touchesSection = true;
+      break;
+    }
+  }
+  return touchesSection ? selection.toString() : "";
+}
+
+async function copyTextToClipboard(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch (_) {
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.style.position = "fixed";
+    textarea.style.left = "-9999px";
+    textarea.style.top = "0";
+    document.body.appendChild(textarea);
+    textarea.focus();
+    textarea.select();
+    try {
+      document.execCommand("copy");
+      return true;
+    } finally {
+      document.body.removeChild(textarea);
+    }
+  }
+}
+
+async function copyDetailSelection(side, selectedText = "") {
+  const text = selectedText || detailContextSelectionText || getDetailSelectionText(side);
+  if (!text) {
+    footerStatus.textContent = t("webview.detail.noSelection");
+    return;
+  }
+  await copyTextToClipboard(text);
+  footerStatus.textContent = t("webview.detail.selectionCopied");
+}
+
+async function searchDetailSelection(side, selectedText = "") {
+  const text = (selectedText || detailContextSelectionText || getDetailSelectionText(side)).trim();
+  if (!text) {
+    footerStatus.textContent = t("webview.detail.noSelection");
+    return;
+  }
+  if (text.length > DETAIL_SELECTION_SEARCH_MAX_LENGTH) {
+    footerStatus.textContent = t("webview.detail.selectionTooLong", { limit: DETAIL_SELECTION_SEARCH_MAX_LENGTH });
+    return;
+  }
+  setSearchRegexEnabled(false);
+  $("detailSearchInput").value = text;
+  $("detailSearchInput").focus();
+  await performSearch(text);
+  if (_searchMatches.length > 0) navigateSearch(true);
+}
+
+function base64ToBlob(base64, mimeType) {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return new Blob([bytes], { type: mimeType || "image/png" });
+}
+
+function notifyWarning(message) {
+  footerStatus.textContent = message;
+  vscode.postMessage({ command: "showWarningMessage", message });
+}
+
+function imageDataUrlToPngBlob(dataUrl) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const canvas = document.createElement("canvas");
+        canvas.width = img.naturalWidth || img.width;
+        canvas.height = img.naturalHeight || img.height;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) {
+          reject(new Error("canvas unavailable"));
+          return;
+        }
+        ctx.drawImage(img, 0, 0);
+        canvas.toBlob((blob) => {
+          if (blob) resolve(blob);
+          else reject(new Error("canvas conversion failed"));
+        }, "image/png");
+      } catch (err) {
+        reject(err);
+      }
+    };
+    img.onerror = () => reject(new Error("image decode failed"));
+    img.src = dataUrl;
+  });
+}
+
+async function copyRenderedImage() {
+  const base64 = currentDetailFlow?.res_body_base64 || "";
+  const mimeType = String(currentDetailFlow?.content_type || "image/png").toLowerCase();
+  const ClipboardItemCtor = window.ClipboardItem || globalThis.ClipboardItem;
+  if (!base64 || !mimeType.startsWith("image/") || !ClipboardItemCtor || !navigator.clipboard?.write) {
+    notifyWarning(t("webview.detail.copyImageUnsupported"));
+    return;
+  }
+  footerStatus.textContent = t("webview.detail.copyingImage");
+  try {
+    const dataUrl = `data:${mimeType};base64,${base64}`;
+    const pngBlob = await imageDataUrlToPngBlob(dataUrl).catch(() => base64ToBlob(base64, mimeType));
+    await Promise.race([
+      navigator.clipboard.write([
+        new ClipboardItemCtor({ [pngBlob.type || "image/png"]: pngBlob }),
+      ]),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("clipboard write timed out")), 2500)),
+    ]);
+    footerStatus.textContent = t("webview.detail.imageCopied");
+  } catch (err) {
+    notifyWarning(t("webview.detail.copyImageFailed", { message: err?.message || "unknown" }));
+  }
+}
+
+function showFlowContextMenu(x, y) {
+  if (flowContextMenuEl) {
+    flowContextMenuEl.remove();
+    flowContextMenuEl = null;
+  }
+  const flowIds = getContextFlowIds();
+  if (flowIds.length === 0) return;
+
+  const menu = document.createElement("div");
+  menu.className = "flow-context-menu";
+  menu.setAttribute("role", "menu");
+  menu.setAttribute("aria-label", t("webview.context.menuLabel", {}, "请求操作"));
+
+  for (const action of getFlowContextActions(flowIds.length)) {
+    if (action.type === "divider") {
+      const divider = document.createElement("div");
+      divider.className = "flow-context-menu-divider";
+      menu.appendChild(divider);
+      continue;
+    }
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "flow-context-menu-item";
+    button.setAttribute("role", "menuitem");
+    button.dataset.actionId = action.id;
+    button.textContent = t(action.labelKey, { count: flowIds.length }, action.fallback);
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const currentIds = getContextFlowIds();
+      closeFlowContextMenu();
+      if (action.type === "copy") {
+        vscode.postMessage({
+          command: "copyFlows",
+          flowIds: currentIds,
+          copyType: action.copyType,
+        });
+      } else if (action.type === "export") {
+        vscode.postMessage({
+          command: "exportFlows",
+          flowIds: currentIds,
+          format: action.format,
+        });
+      } else if (action.type === "saveBody") {
+        vscode.postMessage({
+          command: "saveFlowBody",
+          flowId: currentIds[0],
+          side: action.side,
+        });
+      }
+    });
+    menu.appendChild(button);
+  }
+
+  menu.addEventListener("contextmenu", (event) => event.preventDefault());
+  menu.addEventListener("click", (event) => event.stopPropagation());
+  document.body.appendChild(menu);
+  flowContextMenuEl = menu;
+  positionFlowContextMenu(menu, x, y);
+}
+
+function showDetailContextMenu(side, x, y) {
+  closeAllContextMenus({ render: false });
+  if (!currentDetailFlow?.id) return;
+  detailContextSide = side;
+  detailContextSelectionText = getDetailSelectionText(side);
+
+  const menu = document.createElement("div");
+  menu.className = "flow-context-menu detail-context-menu";
+  menu.setAttribute("role", "menu");
+  menu.setAttribute("aria-label", t("webview.context.detailMenuLabel", {}, "详情操作"));
+
+  for (const action of DETAIL_CONTEXT_ACTIONS[side] || []) {
+    if (action.type === "divider") {
+      const divider = document.createElement("div");
+      divider.className = "flow-context-menu-divider";
+      menu.appendChild(divider);
+      continue;
+    }
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "flow-context-menu-item";
+    button.setAttribute("role", "menuitem");
+    button.dataset.actionId = action.id;
+    button.textContent = t(action.labelKey, {}, action.fallback);
+    button.addEventListener("click", async (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const flowId = currentDetailFlow?.id;
+      const activeSide = detailContextSide || side;
+      const selectedText = detailContextSelectionText;
+      closeDetailContextMenu();
+      if (!flowId) return;
+      if (action.type === "copySelection") {
+        await copyDetailSelection(activeSide, selectedText);
+      } else if (action.type === "searchSelection") {
+        await searchDetailSelection(activeSide, selectedText);
+      } else if (action.type === "copyFlow") {
+        vscode.postMessage({
+          command: "copyFlows",
+          flowIds: [flowId],
+          copyType: action.copyType,
+        });
+      } else if (action.type === "saveBody") {
+        vscode.postMessage({
+          command: "saveFlowBody",
+          flowId,
+          side: action.side,
+        });
+      }
+    });
+    menu.appendChild(button);
+  }
+
+  menu.addEventListener("contextmenu", (event) => event.preventDefault());
+  menu.addEventListener("click", (event) => event.stopPropagation());
+  document.body.appendChild(menu);
+  detailContextMenuEl = menu;
+  positionFlowContextMenu(menu, x, y);
+}
+
+function showImageContextMenu(x, y) {
+  closeAllContextMenus({ render: false });
+  if (!currentDetailFlow?.id) return;
+
+  const menu = document.createElement("div");
+  menu.className = "flow-context-menu image-context-menu";
+  menu.setAttribute("role", "menu");
+  menu.setAttribute("aria-label", t("webview.context.imageMenuLabel", {}, "图片操作"));
+
+  for (const action of IMAGE_CONTEXT_ACTIONS) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "flow-context-menu-item";
+    button.setAttribute("role", "menuitem");
+    button.dataset.actionId = action.id;
+    button.textContent = t(action.labelKey, {}, action.fallback);
+    button.addEventListener("click", async (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      closeImageContextMenu();
+      if (action.type === "copyImage") {
+        await copyRenderedImage();
+      } else if (action.type === "copyImageUrl") {
+        await copyTextToClipboard(currentDetailFlow?.url || "");
+        footerStatus.textContent = t("webview.detail.imageUrlCopied");
+      }
+    });
+    menu.appendChild(button);
+  }
+
+  menu.addEventListener("contextmenu", (event) => event.preventDefault());
+  menu.addEventListener("click", (event) => event.stopPropagation());
+  document.body.appendChild(menu);
+  imageContextMenuEl = menu;
+  positionFlowContextMenu(menu, x, y);
+}
+
+function handleFlowRowContextMenu(flowId, event) {
+  if (!flowId) return;
+  event.preventDefault();
+  event.stopPropagation();
+  focusFlowList();
+  clearNativeSelection();
+
+  if (!selectedFlowIds.has(flowId)) {
+    selectSingleFlow(flowId);
+    selectionAnchorFlowId = flowId;
+  }
+  contextTargetFlowId = flowId;
+  setFocusedFlow(flowId, { requestDetail: true });
+  renderFlowList();
+  showFlowContextMenu(event.clientX, event.clientY);
+}
+
+flowTableBody.addEventListener("contextmenu", (event) => {
+  const row = event.target.closest("tr[data-id]");
+  if (!row || !flowTableBody.contains(row)) return;
+  handleFlowRowContextMenu(row.dataset.id, event);
+});
+
+document.addEventListener("click", (event) => {
+  if (flowContextMenuEl?.contains(event.target) ||
+      detailContextMenuEl?.contains(event.target) ||
+      imageContextMenuEl?.contains(event.target)) return;
+  if (flowContextMenuEl || detailContextMenuEl || imageContextMenuEl) closeAllContextMenus();
+});
+
+document.addEventListener("contextmenu", (event) => {
+  if (event.target.closest(".flow-context-menu")) return;
+  const row = event.target.closest("tr[data-id]");
+  if (row && flowTableBody.contains(row)) return;
+  const image = getImageRenderContextTarget(event.target);
+  if (image) return;
+  const side = getDetailContextSide(event.target);
+  if (side) return;
+  event.preventDefault();
+  closeAllContextMenus();
+}, true);
+
+document.addEventListener("contextmenu", (event) => {
+  const image = getImageRenderContextTarget(event.target);
+  if (image) {
+    event.preventDefault();
+    event.stopPropagation();
+    showImageContextMenu(event.clientX, event.clientY);
+    return;
+  }
+  const side = getDetailContextSide(event.target);
+  if (!side) return;
+  event.preventDefault();
+  event.stopPropagation();
+  showDetailContextMenu(side, event.clientX, event.clientY);
 });
 
 function selectSingleFlow(flowId) {
@@ -1626,7 +2204,13 @@ function autoFitContentColumns() {
 
 function _autoFitContentColumns() {
   const measureEl = document.createElement("span");
-  measureEl.style.cssText = "position:absolute;visibility:hidden;font-size:12px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;white-space:nowrap;pointer-events:none;";
+  const rootStyle = getComputedStyle(document.documentElement);
+  measureEl.style.position = "absolute";
+  measureEl.style.visibility = "hidden";
+  measureEl.style.fontSize = `${currentFontSize}px`;
+  measureEl.style.fontFamily = rootStyle.getPropertyValue("--font-ui") || "-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif";
+  measureEl.style.whiteSpace = "nowrap";
+  measureEl.style.pointerEvents = "none";
   document.body.appendChild(measureEl);
 
   let changed = false;
@@ -2036,6 +2620,8 @@ function updateBodyNotice(side, displayInfo) {
 }
 
 function renderDetail(flow, options = {}) {
+  closeDetailContextMenu();
+  closeImageContextMenu();
   const bodiesPending = !!options.bodiesPending;
   $("detailPlaceholder").style.display = "none";
   $("detailContent").style.display = "flex";
@@ -2231,6 +2817,7 @@ function renderRenderView(flow, body, base64) {
   if (ct.startsWith("image/")) {
     if (base64) {
       const img = document.createElement("img");
+      img.className = "secmp-render-image";
       img.src = `data:${ct};base64,${base64}`;
       img.style.cssText = "max-width:100%;display:block;";
       img.onerror = () => {
@@ -2901,12 +3488,49 @@ $("startProxyBtn").addEventListener("click", () => {
     showProxySetupStatus("error", t("webview.interfaces.needSelect"));
     return;
   }
-  const port = parseInt($("proxyPort").value) || 8080;
+  const port = getProxyPortInputValue();
+  proxyPhase = "starting";
+  updateProxyIndicator();
+  footerStatus.textContent = t("webview.proxy.starting", { port });
   vscode.postMessage({ command: "startProxy", port: port });
 });
 
 $("stopProxyBtn").addEventListener("click", () => {
+  proxyPhase = "stopping";
+  updateProxyIndicator();
+  footerStatus.textContent = t("webview.proxy.stopping");
   vscode.postMessage({ command: "stopProxy" });
+});
+
+$("editProxyPortBtn").addEventListener("click", () => {
+  proxyPortBeforeEdit = currentProxyPort || getProxyPortInputValue();
+  proxyPortEditing = true;
+  $("proxyPort").value = String(proxyPortBeforeEdit);
+  $("proxyPort").focus();
+  $("proxyPort").select();
+  updateProxyIndicator();
+});
+
+$("cancelProxyPortBtn").addEventListener("click", () => {
+  $("proxyPort").value = String(proxyPortBeforeEdit || currentProxyPort || 8080);
+  proxyPortEditing = false;
+  updateProxyIndicator();
+});
+
+$("applyProxyPortBtn").addEventListener("click", () => {
+  const nextPort = getProxyPortInputValue();
+  if (nextPort === currentProxyPort) {
+    proxyPortEditing = false;
+    $("proxyPort").value = String(currentProxyPort);
+    updateProxyIndicator();
+    return;
+  }
+  proxyPortEditing = false;
+  proxyPhase = "restarting";
+  $("proxyPort").value = String(nextPort);
+  updateProxyIndicator();
+  footerStatus.textContent = t("webview.proxy.restarting", { port: nextPort });
+  vscode.postMessage({ command: "restartProxy", port: nextPort });
 });
 
 $("setDeviceProxyBtn").addEventListener("click", () => {
@@ -2915,7 +3539,7 @@ $("setDeviceProxyBtn").addEventListener("click", () => {
     showProxySetupStatus("error", t("webview.interfaces.needSelect"));
     return;
   }
-  const port = parseInt($("proxyPort").value) || 8080;
+  const port = getProxyPortInputValue();
   vscode.postMessage({ command: "setProxy", port: port, ip: ip });
 });
 
@@ -3433,11 +4057,18 @@ function scrollFlowRowIntoView(flowId) {
   }
   const index = lastVisibleFlows.findIndex((flow) => flow.id === flowId);
   if (index === -1 || !flowTableWrapper) return;
-  flowTableWrapper.scrollTop = Math.max(0, index * FLOW_ROW_HEIGHT - FLOW_RENDER_BUFFER_ROWS * FLOW_ROW_HEIGHT);
+  updateFlowRowHeight();
+  flowTableWrapper.scrollTop = Math.max(0, index * flowRowHeight - FLOW_RENDER_BUFFER_ROWS * flowRowHeight);
   renderFlowList();
 }
 
 document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && (flowContextMenuEl || detailContextMenuEl || imageContextMenuEl)) {
+    e.preventDefault();
+    closeAllContextMenus();
+    return;
+  }
+
   // Ctrl/Cmd+F: focus filter
   if ((e.ctrlKey || e.metaKey) && e.key === "f") {
     e.preventDefault();
@@ -3547,6 +4178,7 @@ updateFilterUi();
 
 // Recalculate table width and wrapped line numbers when container resizes
 window.addEventListener("resize", () => {
+  closeAllContextMenus();
   updateTableWidth();
   updateAllLineNumbers();
   scheduleFlowListRender();
@@ -3554,9 +4186,18 @@ window.addEventListener("resize", () => {
 
 if (flowTableWrapper) {
   flowTableWrapper.addEventListener("scroll", () => {
+    closeAllContextMenus();
     scheduleFlowListRender(true);
   }, { passive: true });
 }
+
+[$("reqSectionScroll"), $("resSectionScroll")].forEach((scrollEl) => {
+  if (!scrollEl) return;
+  scrollEl.addEventListener("scroll", () => {
+    closeDetailContextMenu();
+    closeImageContextMenu();
+  }, { passive: true });
+});
 
 // Request initial status
 vscode.postMessage({ command: "getStatus" });

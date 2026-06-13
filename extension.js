@@ -21,12 +21,17 @@ let pollingTimer = null;
 let pollingInProgress = false;
 let idlePollCount = 0;
 let flowWebSocketReconnectTimer = null;
+let mitmwebHadFlows = false;
 let knownFlowIds = new Set();
 let ignoredFlowIdsAfterClear = new Set();
 let extensionContext = null;
 let activeSession = null;
+let activeSessionSyncTimer = null;
 let allowPanelDispose = false;
 let sidebarProvider = null;
+let activeProxyPort = null;
+let suppressNextProxyStoppedState = false;
+let suppressNextProxyStoppedStatus = false;
 
 const TOOLS_DIR = path.join(__dirname, "tools");
 const DEFAULT_RUNTIME_VERSION = "0.1.2";
@@ -36,8 +41,12 @@ const GITHUB_RELEASE_LATEST_URL = `${DEFAULT_RUNTIME_REPO}/releases/latest`;
 const WINDOWS_RUNTIME_API_VERSION = 1;
 const WINDOWS_RUNTIME_RETAIN_PREVIOUS_COUNT = 1;
 const DEFAULT_UPDATE_CHECK_INTERVAL_HOURS = 24;
+const DEFAULT_FONT_SIZE = 13;
+const MIN_FONT_SIZE = 12;
+const MAX_FONT_SIZE = 16;
 const UPDATE_LAST_CHECK_KEY = "secmp.lastUpdateCheckAt";
 const RECENT_SESSIONS_KEY = "secmp.recentSessions";
+const LAST_FILE_DIALOG_DIR_KEY = "secmp.lastFileDialogDir";
 const extensionPackage = loadExtensionPackage();
 const SUPPORTED_RUNTIME_PLATFORMS = new Set(["win32", "darwin"]);
 const SUPPORTED_LOCALES = new Set(["zh-CN", "en-US"]);
@@ -47,10 +56,14 @@ const FLOW_POLL_ACTIVE_MS = 500;
 const FLOW_POLL_IDLE_MS = 2000;
 const FLOW_POLL_IDLE_THRESHOLD = 3;
 const MITMWEB_REQUEST_TIMEOUT_MS = 5000;
+const SESSION_SYNC_DELAY_MS = 3000;
+const SESSION_FLUSH_DIRTY_BYTES = 2 * 1024 * 1024;
 const FILTER_BODY_FETCH_CONCURRENCY = 4;
 const BODY_AUTOFETCH_CONCURRENCY = 2;
 const BODY_AUTOFETCH_MAX_BYTES = 8 * 1024 * 1024;
 const BODY_DRAIN_CONCURRENCY = 6;
+const COPY_BODY_CONFIRM_BYTES = 1 * 1024 * 1024;
+const COPY_BODY_MAX_BYTES = BODY_AUTOFETCH_MAX_BYTES;
 const DEFAULT_RUNTIME_SOURCES = {
   "0.1.0:win32:x64": {
     url: "https://github.com/XuanBoWu/mitm-proxy-extension/releases/download/v0.1.0/secmp-runtime-win32-x64-0.1.0.zip",
@@ -90,6 +103,13 @@ function getConfiguredLocale() {
 function shouldOpenPanelAfterNewSession() {
   const config = vscode.workspace.getConfiguration("secmp");
   return config.get("openPanelAfterNewSession", true) !== false;
+}
+
+function getConfiguredFontSize() {
+  const config = vscode.workspace.getConfiguration("secmp");
+  const raw = Number(config.get("fontSize", DEFAULT_FONT_SIZE));
+  if (!Number.isFinite(raw)) return DEFAULT_FONT_SIZE;
+  return Math.min(MAX_FONT_SIZE, Math.max(MIN_FONT_SIZE, Math.round(raw)));
 }
 
 function loadL10nBundle(locale) {
@@ -525,9 +545,14 @@ async function promptForWindowsRuntimeArchive() {
     filters: {
       "Runtime Package": ["zip"],
     },
+    defaultUri: getDefaultFileDialogUri(),
   });
 
-  return selected?.[0]?.fsPath || null;
+  if (selected?.[0]?.fsPath) {
+    await rememberFileDialogDir(selected[0].fsPath);
+    return selected[0].fsPath;
+  }
+  return null;
 }
 
 function requestJson(url, redirectCount = 0) {
@@ -1398,8 +1423,27 @@ function ensureActiveSession() {
   return session;
 }
 
+function cancelActiveSessionSync() {
+  if (activeSessionSyncTimer) {
+    clearTimeout(activeSessionSyncTimer);
+    activeSessionSyncTimer = null;
+  }
+}
+
+function syncActiveSession() {
+  if (!activeSession) return;
+  cancelActiveSessionSync();
+  try {
+    activeSession.sync();
+    writeResumeMarker({ running: !!proxyProcess });
+  } catch (err) {
+    log(`Failed to sync SecMP session: ${err.message}`);
+  }
+}
+
 function flushActiveSession() {
   if (!activeSession) return;
+  cancelActiveSessionSync();
   try {
     activeSession.flush();
     writeResumeMarker({ running: !!proxyProcess });
@@ -1408,14 +1452,37 @@ function flushActiveSession() {
   }
 }
 
-function closeActiveSession() {
+function scheduleActiveSessionSync() {
   if (!activeSession) return;
+  if (activeSession.dirtyBytes >= SESSION_FLUSH_DIRTY_BYTES) {
+    flushActiveSession();
+    return;
+  }
+  if (activeSessionSyncTimer) return;
+  activeSessionSyncTimer = setTimeout(() => {
+    activeSessionSyncTimer = null;
+    syncActiveSession();
+  }, SESSION_SYNC_DELAY_MS);
+}
+
+function closeActiveSession(options = {}) {
+  if (!activeSession) return;
+  const session = activeSession;
+  const shouldDeleteTemporary = !!options.deleteTemporary && session.temporary;
   try {
-    activeSession.close();
+    session.close();
   } catch (err) {
     log(`Failed to close SecMP session: ${err.message}`);
   }
+  if (shouldDeleteTemporary) {
+    try {
+      if (fs.existsSync(session.filePath)) fs.unlinkSync(session.filePath);
+    } catch (err) {
+      log(`Failed to delete temporary SecMP session: ${err.message}`);
+    }
+  }
   activeSession = null;
+  cancelActiveSessionSync();
   clearResumeMarker();
   refreshSidebar();
 }
@@ -1428,6 +1495,10 @@ function refreshSidebar() {
 
 function writeResumeMarker(extra = {}) {
   if (!activeSession) return;
+  if (!activeSession.temporary) {
+    clearResumeMarker();
+    return;
+  }
   try {
     const markerPath = getResumeMarkerPath();
     fs.mkdirSync(path.dirname(markerPath), { recursive: true });
@@ -1460,6 +1531,13 @@ function getRecentSessions() {
     : [];
 }
 
+function resolveRecentSessionFilePath(input) {
+  if (typeof input === "string") return input;
+  if (input?.filePath) return input.filePath;
+  if (input?.resourceUri?.fsPath) return input.resourceUri.fsPath;
+  return "";
+}
+
 function rememberSession(session) {
   if (!session || session.temporary || !extensionContext?.globalState) return;
   const current = getRecentSessions().filter((item) => item.filePath !== session.filePath);
@@ -1471,12 +1549,14 @@ function rememberSession(session) {
   extensionContext.globalState.update(RECENT_SESSIONS_KEY, current.slice(0, 12));
 }
 
-async function ensureCanSwitchSession() {
-  if (proxyProcess) {
-    vscode.window.showWarningMessage(t("extension.session.stopBeforeLoad"));
-    return false;
-  }
-  return true;
+function removeRecentSession(filePath) {
+  if (!filePath || !extensionContext?.globalState) return false;
+  const current = extensionContext.globalState.get(RECENT_SESSIONS_KEY, []) || [];
+  if (!Array.isArray(current)) return false;
+  const next = current.filter((item) => item?.filePath !== filePath);
+  extensionContext.globalState.update(RECENT_SESSIONS_KEY, next);
+  refreshSidebar();
+  return next.length !== current.length;
 }
 
 async function checkInterruptedSession() {
@@ -1493,32 +1573,76 @@ async function checkInterruptedSession() {
     clearResumeMarker();
     return;
   }
+  if (!marker.temporary) {
+    clearResumeMarker();
+    return;
+  }
+  let interruptedSession = null;
+  try {
+    interruptedSession = CaptureSession.open(marker.filePath);
+  } catch (err) {
+    log(`Failed to open interrupted SecMP session: ${err.message}`);
+    clearResumeMarker();
+    return;
+  }
+  if (!interruptedSession.hasFlows()) {
+    try {
+      interruptedSession.file.close();
+      fs.unlinkSync(marker.filePath);
+    } catch (_) {}
+    clearResumeMarker();
+    return;
+  }
   const restore = t("extension.session.restoreSession");
-  const keep = t("extension.session.keepSession");
+  const saveAs = t("extension.session.saveInterruptedSession");
   const discard = t("extension.session.discardTempSession");
   const choice = await vscode.window.showWarningMessage(
     t("extension.session.interrupted", { name: marker.sessionName || "SecMP" }),
     restore,
-    keep,
+    saveAs,
     discard
   );
   if (choice === restore) {
     try {
-      activeSession = CaptureSession.open(marker.filePath);
+      activeSession = interruptedSession;
+      interruptedSession = null;
       setCapturedFlows(markSessionLoadedFlows(activeSession.getFlows({ includeBodies: false })));
       knownFlowIds.clear();
       for (const flow of capturedFlows) knownFlowIds.add(flow.id);
       refreshSidebar();
       vscode.window.showInformationMessage(t("extension.session.loaded", { count: capturedFlows.length }));
+      await createPanel();
+      await maybeAutoStartProxyForSession();
     } catch (err) {
       vscode.window.showErrorMessage(t("extension.session.parseFailed", { message: err.message }));
       clearResumeMarker();
     }
     return;
   }
+  if (choice === saveAs) {
+    activeSession = interruptedSession;
+    interruptedSession = null;
+    const saved = await saveActiveSessionAs();
+    if (saved) {
+      closeActiveSession({ deleteTemporary: false });
+    } else if (activeSession) {
+      try {
+        activeSession.file.close();
+      } catch (_) {}
+      activeSession = null;
+      refreshSidebar();
+    }
+    return;
+  }
   if (choice === discard && marker.temporary) {
     try {
+      interruptedSession.file.close();
       fs.unlinkSync(marker.filePath);
+    } catch (_) {}
+  }
+  if (interruptedSession) {
+    try {
+      interruptedSession.file.close();
     } catch (_) {}
   }
   clearResumeMarker();
@@ -1528,12 +1652,14 @@ async function saveActiveSessionAs() {
   if (!activeSession) return null;
   const result = await vscode.window.showSaveDialog({
     filters: { "SecMP Session": ["secmp"] },
-    defaultUri: vscode.Uri.file(`${activeSession.sessionName || "capture"}.secmp`),
+    defaultUri: getDefaultFileDialogUri(`${activeSession.sessionName || "capture"}.secmp`),
   });
   if (!result) return null;
+  await rememberFileDialogDir(result.fsPath);
   activeSession.saveAs(result.fsPath, path.basename(result.fsPath, ".secmp"));
   writeResumeMarker({ running: !!proxyProcess });
   rememberSession(activeSession);
+  if (panel) panel.title = getCapturePanelTitle();
   refreshSidebar();
   vscode.window.showInformationMessage(t("extension.session.saved", { path: result.fsPath }));
   return result.fsPath;
@@ -1544,9 +1670,7 @@ function recordSessionFlows(flows) {
   for (const flow of flows) {
     activeSession.putFlow(flow);
   }
-  if (activeSession.dirtyBytes >= 2 * 1024 * 1024) {
-    flushActiveSession();
-  }
+  scheduleActiveSessionSync();
 }
 
 function markSessionLoadedFlows(flows) {
@@ -1560,12 +1684,127 @@ function saveSessionUiState(state) {
   if (!activeSession) return;
   try {
     activeSession.setUiState(state || {});
-    if (activeSession.dirtyBytes >= 2 * 1024 * 1024) {
-      flushActiveSession();
-    }
+    scheduleActiveSessionSync();
   } catch (err) {
     log(`Failed to save session UI state: ${err.message}`);
   }
+}
+
+function recordSessionProxyState(running, options = {}) {
+  if (!activeSession) return;
+  const port = Number(options.port ?? activeProxyPort ?? activeSession.getProxyState?.()?.port ?? 0);
+  const state = {
+    running: !!running,
+    port: Number.isInteger(port) && port > 0 ? port : 0,
+    reason: options.reason || (running ? "proxyStarted" : "proxyStopped"),
+    updatedAt: new Date().toISOString(),
+  };
+  try {
+    activeSession.setProxyState(state);
+    scheduleActiveSessionSync();
+  } catch (err) {
+    log(`Failed to save SecMP proxy state: ${err.message}`);
+  }
+}
+
+function getSessionProxyAutoStartPort(session = activeSession) {
+  const state = session?.getProxyState?.();
+  if (!state?.running) return 0;
+  const port = Number(state.port);
+  if (!Number.isInteger(port) || port <= 0 || port > 65535) return 0;
+  return port;
+}
+
+function activeSessionHasFlows() {
+  return !!(activeSession?.hasFlows?.() || capturedFlows.length > 0);
+}
+
+async function stopProxyForSessionExit() {
+  const wasRunning = !!proxyProcess;
+  recordSessionProxyState(wasRunning, {
+    port: activeProxyPort,
+    reason: "sessionExit",
+  });
+  flushActiveSession();
+  if (wasRunning) {
+    await stopProxyEngine({
+      recordState: false,
+      preserveRecordedRunningState: true,
+      reason: "sessionExit",
+    });
+  }
+}
+
+async function closeActiveSessionForExit(options = {}) {
+  await stopProxyForSessionExit();
+  closeActiveSession({ deleteTemporary: !!options.deleteTemporary });
+  resetCapturedFlows();
+  knownFlowIds.clear();
+  ignoredFlowIdsAfterClear.clear();
+  mitmwebHadFlows = false;
+}
+
+async function confirmAndCloseActiveSession(options = {}) {
+  if (!activeSession) return true;
+  const restorePanelOnCancel = !!options.restorePanelOnCancel;
+  const hasFlows = activeSessionHasFlows();
+
+  if (activeSession.temporary) {
+    if (!hasFlows) {
+      await closeActiveSessionForExit({ deleteTemporary: true });
+      return true;
+    }
+
+    const saveAndExit = t("extension.session.closeSaveExit");
+    const discardAndExit = t("extension.session.closeDiscardExit");
+    const cancel = t("extension.session.closeCancel");
+    const choice = await vscode.window.showWarningMessage(
+      t("extension.session.closeTempWithFlows"),
+      { modal: true },
+      saveAndExit,
+      discardAndExit,
+      cancel
+    );
+    if (choice === saveAndExit) {
+      recordSessionProxyState(!!proxyProcess, {
+        port: activeProxyPort,
+        reason: "sessionExit",
+      });
+      const saved = await saveActiveSessionAs();
+      if (!saved) {
+        if (restorePanelOnCancel) await createPanel();
+        return false;
+      }
+      await closeActiveSessionForExit({ deleteTemporary: false });
+      return true;
+    }
+    if (choice === discardAndExit) {
+      await closeActiveSessionForExit({ deleteTemporary: true });
+      return true;
+    }
+    if (restorePanelOnCancel) await createPanel();
+    return false;
+  }
+
+  if (!hasFlows && !proxyProcess) {
+    await closeActiveSessionForExit({ deleteTemporary: false });
+    return true;
+  }
+
+  const exit = t("extension.session.closeExit");
+  const cancel = t("extension.session.closeCancel");
+  const choice = await vscode.window.showWarningMessage(
+    t("extension.session.closePersistentConfirm", { name: activeSession.sessionName || "SecMP" }),
+    { modal: true },
+    exit,
+    cancel
+  );
+  if (choice === exit) {
+    await closeActiveSessionForExit({ deleteTemporary: false });
+    return true;
+  }
+  if (restorePanelOnCancel) await createPanel();
+  return false;
 }
 
 function resetCapturedFlows() {
@@ -1886,9 +2125,13 @@ function handleWebSocketFlowEvent(msg) {
   if (cmd === "reset") {
     resetCapturedFlows();
     resetBodyFetchQueue();
-    if (activeSession) activeSession.resetFlows();
+    if (activeSession) {
+      activeSession.resetFlows();
+      scheduleActiveSessionSync();
+    }
     knownFlowIds.clear();
     ignoredFlowIdsAfterClear.clear();
+    mitmwebHadFlows = false;
     if (panel) {
       panel.webview.postMessage({ command: "flowsCleared" });
     }
@@ -1948,16 +2191,23 @@ async function pollFlows() {
     const flows = await mitmwebGetJson("/flows.json");
 
     // Detect if flows were cleared (e.g., via clearFlows command)
-    if (flows.length === 0 && capturedFlows.length > 0) {
+    if (flows.length === 0 && mitmwebHadFlows && capturedFlows.length > 0) {
       resetCapturedFlows();
       resetBodyFetchQueue();
-      if (activeSession) activeSession.resetFlows();
+      if (activeSession) {
+        activeSession.resetFlows();
+        scheduleActiveSessionSync();
+      }
       knownFlowIds.clear();
       ignoredFlowIdsAfterClear.clear();
+      mitmwebHadFlows = false;
       if (panel) {
         panel.webview.postMessage({ command: "flowsCleared" });
       }
       return;
+    }
+    if (flows.length > 0) {
+      mitmwebHadFlows = true;
     }
 
     // Check for new flows
@@ -2054,8 +2304,11 @@ function scheduleNextPoll() {
 function startFlowPolling() {
   stopFlowPolling();
   knownFlowIds.clear();
+  for (const flow of capturedFlows) {
+    if (flow?.id) knownFlowIds.add(flow.id);
+  }
   ignoredFlowIdsAfterClear.clear();
-  resetCapturedFlows();
+  mitmwebHadFlows = false;
   idlePollCount = 0;
   ensureActiveSession();
   pollFlows();
@@ -2194,7 +2447,9 @@ async function startProxyEngine(port) {
         clearTimeout(startupTimer);
         startupTimer = null;
       }
+      activeProxyPort = Number(port);
       startFlowPolling();
+      recordSessionProxyState(true, { port: activeProxyPort, reason: "proxyStarted" });
       resolve({ success: true, message: t("extension.proxy.started", { port }), webPort: wPort });
     }
 
@@ -2249,6 +2504,12 @@ async function startProxyEngine(port) {
       stopFlowPolling();
       webPort = null;
       authToken = null;
+      if (suppressNextProxyStoppedState) {
+        suppressNextProxyStoppedState = false;
+      } else {
+        recordSessionProxyState(false, { port: activeProxyPort || port, reason: "proxyExited" });
+      }
+      activeProxyPort = null;
       if (startupTimer) {
         clearTimeout(startupTimer);
         startupTimer = null;
@@ -2257,11 +2518,14 @@ async function startProxyEngine(port) {
         started = true;
         reject(new Error(t("extension.proxy.startupExited", { code })));
       }
-      if (panel) {
+      if (suppressNextProxyStoppedStatus) {
+        suppressNextProxyStoppedStatus = false;
+      } else if (panel) {
         panel.webview.postMessage({
           command: "proxyStatus",
           running: false,
           port: port,
+          phase: "stopped",
         });
       }
     });
@@ -2277,8 +2541,14 @@ async function startProxyEngine(port) {
   });
 }
 
-async function stopProxyEngine() {
+async function stopProxyEngine(options = {}) {
+  const recordStoppedState = options.recordState !== false;
+  const preserveRecordedRunningState = !!options.preserveRecordedRunningState;
+  const suppressStoppedStatus = !!options.suppressStoppedStatus;
   if (!proxyProcess) {
+    if (recordStoppedState) {
+      recordSessionProxyState(false, { reason: options.reason || "proxyStopped" });
+    }
     flushActiveSession();
     return { success: true, message: t("extension.proxy.notRunning") };
   }
@@ -2293,37 +2563,107 @@ async function stopProxyEngine() {
 
   return new Promise((resolve) => {
     if (!proxyProcess) {
+      if (recordStoppedState) {
+        recordSessionProxyState(false, { reason: options.reason || "proxyStopped" });
+      }
       flushActiveSession();
       resolve({ success: true, message: t("extension.proxy.notRunning") });
       return;
     }
 
+    const stoppingProcess = proxyProcess;
+    if (recordStoppedState) {
+      recordSessionProxyState(false, { port: activeProxyPort, reason: options.reason || "proxyStopped" });
+    }
+    if (recordStoppedState || preserveRecordedRunningState) {
+      suppressNextProxyStoppedState = true;
+    }
+    if (suppressStoppedStatus) {
+      suppressNextProxyStoppedStatus = true;
+    }
     stopFlowPolling();
     resetBodyFetchQueue();
     flushActiveSession();
 
-    proxyProcess.on("close", () => {
-      proxyProcess = null;
-      webPort = null;
-      authToken = null;
+    stoppingProcess.on("close", () => {
+      if (proxyProcess === stoppingProcess) {
+        proxyProcess = null;
+        webPort = null;
+        authToken = null;
+        activeProxyPort = null;
+      }
       flushActiveSession();
       resolve({ success: true, message: t("extension.proxy.stopped") });
     });
 
     if (process.platform === "win32") {
-      spawn("taskkill", ["/pid", String(proxyProcess.pid), "/f", "/t"]);
+      spawn("taskkill", ["/pid", String(stoppingProcess.pid), "/f", "/t"]);
     } else {
-      proxyProcess.kill("SIGTERM");
+      stoppingProcess.kill("SIGTERM");
     }
 
     setTimeout(() => {
-      if (proxyProcess) {
+      if (proxyProcess === stoppingProcess) {
         try {
-          proxyProcess.kill("SIGKILL");
+          stoppingProcess.kill("SIGKILL");
         } catch (_) {}
       }
     }, 3000);
   });
+}
+
+function postProxyStatus(status = {}) {
+  if (!panel) return;
+  panel.webview.postMessage({
+    command: "proxyStatus",
+    running: !!proxyProcess,
+    port: activeProxyPort,
+    phase: proxyProcess ? "running" : "stopped",
+    ...status,
+  });
+}
+
+async function restartProxyEngine(port) {
+  const nextPort = Number(port);
+  if (!Number.isInteger(nextPort) || nextPort <= 0 || nextPort > 65535) {
+    throw new Error(t("extension.input.mustBeNumber"));
+  }
+  const previousPort = activeProxyPort;
+  postProxyStatus({
+    running: true,
+    port: previousPort,
+    pendingPort: nextPort,
+    phase: "restarting",
+    message: t("extension.proxy.restarting", { port: nextPort }),
+  });
+  if (proxyProcess) {
+    await stopProxyEngine({
+      recordState: false,
+      preserveRecordedRunningState: true,
+      suppressStoppedStatus: true,
+      reason: "proxyRestart",
+    });
+  }
+  try {
+    const result = await startProxyEngine(nextPort);
+    postProxyStatus({
+      running: true,
+      port: nextPort,
+      phase: "running",
+      message: result.message,
+    });
+    return result;
+  } catch (err) {
+    recordSessionProxyState(false, { port: nextPort, reason: "proxyRestartFailed" });
+    postProxyStatus({
+      running: false,
+      port: previousPort || nextPort,
+      pendingPort: nextPort,
+      phase: "error",
+      message: err.message,
+    });
+    throw err;
+  }
 }
 
 // ===== Webview Panel =====
@@ -2340,6 +2680,7 @@ function getWebviewContent(webview) {
   html = html.replace("./app.js", scriptUri.toString());
   html = html.replace("./assets/header-icon.png", headerIconUri.toString());
   html = html.replaceAll("__EXTENSION_VERSION__", normalizeVersion(extensionPackage.version));
+  html = html.replaceAll("__SECMP_FONT_SIZE__", String(getConfiguredFontSize()));
   const l10n = getCurrentL10nPayload();
   html = html.replace("__SECMP_LOCALE__", l10n.locale);
   html = html.replace("__SECMP_MESSAGES_JSON__", JSON.stringify(l10n.messages).replace(/</g, "\\u003c"));
@@ -2377,6 +2718,8 @@ async function createPanel() {
         panel.webview.postMessage({
           command: "setStatus",
           proxyRunning: proxyProcess !== null,
+          proxyPort: activeProxyPort,
+          proxyPhase: proxyProcess ? "running" : "stopped",
           device: deviceInfo,
           flowCount: capturedFlows.length,
         });
@@ -2552,16 +2895,17 @@ async function createPanel() {
         const port = message.port || 8080;
         try {
           const result = await startProxyEngine(port);
-          panel.webview.postMessage({
-            command: "proxyStatus",
+          postProxyStatus({
             running: true,
             port: port,
+            phase: "running",
             message: result.message,
           });
         } catch (err) {
-          panel.webview.postMessage({
-            command: "proxyStatus",
+          postProxyStatus({
             running: false,
+            port,
+            phase: "error",
             message: err.message,
           });
         }
@@ -2571,11 +2915,22 @@ async function createPanel() {
 
       case "stopProxy": {
         const result = await stopProxyEngine();
-        panel.webview.postMessage({
-          command: "proxyStatus",
+        postProxyStatus({
           running: false,
+          phase: "stopped",
           message: result.message,
         });
+        await postEnvironmentStatus(context);
+        break;
+      }
+
+      case "restartProxy": {
+        const port = message.port || 8080;
+        try {
+          await restartProxyEngine(port);
+        } catch (_) {
+          // restartProxyEngine already posts the user-visible failure state.
+        }
         await postEnvironmentStatus(context);
         break;
       }
@@ -2660,8 +3015,12 @@ async function createPanel() {
         }
         resetCapturedFlows();
         resetBodyFetchQueue();
-        if (activeSession) activeSession.resetFlows();
+        if (activeSession) {
+          activeSession.resetFlows();
+          scheduleActiveSessionSync();
+        }
         knownFlowIds.clear();
+        mitmwebHadFlows = false;
         // Also clear flows in mitmproxy via REST API
         if (webPort && authToken) {
           try {
@@ -2680,6 +3039,24 @@ async function createPanel() {
 
       case "exportJson":
         await exportJson();
+        break;
+
+      case "copyFlows":
+        await handleCopyFlows(message.flowIds, message.copyType);
+        break;
+
+      case "exportFlows":
+        await handleExportFlows(message.flowIds, message.format);
+        break;
+
+      case "saveFlowBody":
+        await handleSaveFlowBody(message.flowId, message.side);
+        break;
+
+      case "showWarningMessage":
+        if (message.message) {
+          vscode.window.showWarningMessage(String(message.message));
+        }
         break;
 
       case "pushCert": {
@@ -2741,38 +3118,7 @@ async function createPanel() {
 }
 
 async function handlePanelClosedDuringCapture() {
-  flushActiveSession();
-  const saveAndStop = t("extension.session.closeSaveStop");
-  const stopOnly = t("extension.session.closeStopOnly");
-  const cancel = t("extension.session.closeCancel");
-  const choice = await vscode.window.showWarningMessage(
-    t("extension.session.closeWhileCapturing"),
-    { modal: true },
-    saveAndStop,
-    stopOnly,
-    cancel
-  );
-  if (choice === saveAndStop) {
-    if (activeSession?.temporary) {
-      const saved = await saveActiveSessionAs();
-      if (!saved) {
-        await createPanel();
-        return;
-      }
-    } else {
-      flushActiveSession();
-    }
-    await stopProxyEngine();
-    closeActiveSession();
-    return;
-  }
-  if (choice === stopOnly) {
-    flushActiveSession();
-    await stopProxyEngine();
-    closeActiveSession();
-    return;
-  }
-  await createPanel();
+  await confirmAndCloseActiveSession({ restorePanelOnCancel: true });
 }
 
 // ===== REST API helpers (with method support) =====
@@ -2911,6 +3257,7 @@ function applyFetchedBody(flow, side, buf, contentType) {
       contentType,
       contentKind: binary ? "binary" : "text",
     });
+    scheduleActiveSessionSync();
   }
   flow._bodyFetched = !!(flow._reqBodyFetched && flow._resBodyFetched);
 }
@@ -3272,27 +3619,469 @@ function showExportResult(count, filePath, failed) {
   }
 }
 
-async function exportHar() {
-  if (capturedFlows.length === 0) {
+function normalizeFlowIds(flowIds) {
+  const ids = Array.isArray(flowIds) ? flowIds : [];
+  const seen = new Set();
+  const normalized = [];
+  for (const id of ids) {
+    const value = String(id || "");
+    if (!value || seen.has(value)) continue;
+    seen.add(value);
+    normalized.push(value);
+  }
+  return normalized;
+}
+
+function resolveFlowsForIds(flowIds) {
+  const ids = normalizeFlowIds(flowIds);
+  if (ids.length === 0) {
+    return {
+      flows: capturedFlows.slice(),
+      missing: [],
+      selected: false,
+    };
+  }
+  const flows = [];
+  const missing = [];
+  for (const id of ids) {
+    const flow = capturedFlowById.get(id);
+    if (flow) {
+      flows.push(flow);
+    } else {
+      missing.push(id);
+    }
+  }
+  return { flows, missing, selected: true };
+}
+
+function getFlowOrdinal(flow) {
+  const idx = capturedFlowIndexById.get(flow?.id);
+  return Number.isInteger(idx) ? idx + 1 : Math.max(1, capturedFlows.indexOf(flow) + 1);
+}
+
+function sanitizeFilePart(value) {
+  const clean = String(value || "")
+    .trim()
+    .replace(/[^A-Za-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return clean.slice(0, 80) || "flow";
+}
+
+function getDefaultExportFileName(format, flows, selected) {
+  const ext = format === "har" ? "har" : "json";
+  if (!selected) return `capture.${ext}`;
+  if (flows.length === 1) {
+    const flow = flows[0];
+    const ordinal = String(getFlowOrdinal(flow)).padStart(6, "0");
+    return `secmp-flow-${ordinal}-${sanitizeFilePart(flow.host || "unknown")}.${ext}`;
+  }
+  return `secmp-flows-${flows.length}-items.${ext}`;
+}
+
+function getBodyContentType(flow, side) {
+  if (side === "request") {
+    return String(flow.req_headers?.["content-type"] || "");
+  }
+  return String(flow.content_type || flow.res_headers?.["content-type"] || "");
+}
+
+function getCompressionExtensionFromBuffer(buffer) {
+  if (!Buffer.isBuffer(buffer) || buffer.length < 4) return "";
+  if (buffer[0] === 0x50 && buffer[1] === 0x4b &&
+      (buffer[2] === 0x03 || buffer[2] === 0x05 || buffer[2] === 0x07) &&
+      (buffer[3] === 0x04 || buffer[3] === 0x06 || buffer[3] === 0x08)) return "zip";
+  if (buffer[0] === 0x1f && buffer[1] === 0x8b) return "gz";
+  if (buffer.length >= 6 &&
+      buffer[0] === 0x37 && buffer[1] === 0x7a && buffer[2] === 0xbc &&
+      buffer[3] === 0xaf && buffer[4] === 0x27 && buffer[5] === 0x1c) return "7z";
+  if (buffer.length >= 7 &&
+      buffer[0] === 0x52 && buffer[1] === 0x61 && buffer[2] === 0x72 &&
+      buffer[3] === 0x21 && buffer[4] === 0x1a && buffer[5] === 0x07) return "rar";
+  if (buffer[0] === 0x42 && buffer[1] === 0x5a && buffer[2] === 0x68) return "bz2";
+  if (buffer.length >= 6 &&
+      buffer[0] === 0xfd && buffer[1] === 0x37 && buffer[2] === 0x7a &&
+      buffer[3] === 0x58 && buffer[4] === 0x5a && buffer[5] === 0x00) return "xz";
+  if (buffer[0] === 0x28 && buffer[1] === 0xb5 && buffer[2] === 0x2f && buffer[3] === 0xfd) return "zst";
+  if (buffer.length >= 262 && buffer.subarray(257, 262).toString("ascii") === "ustar") return "tar";
+  return "";
+}
+
+function getBodyFileExtension(contentType, buffer = null) {
+  const sniffed = getCompressionExtensionFromBuffer(buffer);
+  const ct = String(contentType || "").toLowerCase().split(";")[0].trim();
+  if (!ct) return sniffed || "bin";
+  if (ct === "application/json" || ct.endsWith("+json")) return "json";
+  if (ct === "text/html") return "html";
+  if (ct === "text/plain") return "txt";
+  if (ct === "application/xml" || ct === "text/xml" || ct.endsWith("+xml")) return "xml";
+  if (ct === "application/javascript" || ct === "text/javascript") return "js";
+  if (ct === "image/png") return "png";
+  if (ct === "image/jpeg" || ct === "image/jpg") return "jpg";
+  if (ct === "image/gif") return "gif";
+  if (ct === "image/webp") return "webp";
+  if (ct === "application/pdf") return "pdf";
+  if (ct === "application/zip" || ct === "application/x-zip-compressed") return "zip";
+  if (ct === "application/gzip" || ct === "application/x-gzip") return "gz";
+  if (ct === "application/x-tar") return "tar";
+  if (ct === "application/x-bzip2") return "bz2";
+  if (ct === "application/x-7z-compressed") return "7z";
+  if (ct === "application/x-rar-compressed" || ct === "application/vnd.rar") return "rar";
+  if (ct === "application/x-xz") return "xz";
+  if (ct === "application/zstd" || ct === "application/x-zstd") return "zst";
+  if (ct === "application/x-brotli") return "br";
+  return sniffed || "bin";
+}
+
+function getDefaultBodyFileName(flow, side, contentType, buffer = null) {
+  const ordinal = String(getFlowOrdinal(flow)).padStart(6, "0");
+  const label = side === "request" ? "request" : "response";
+  const ext = getBodyFileExtension(contentType, buffer);
+  return `secmp-${label}-body-${ordinal}-${sanitizeFilePart(flow.host || "unknown")}.${ext}`;
+}
+
+function getDefaultFileDialogUri(fileName = "") {
+  const safeName = fileName ? path.basename(String(fileName)) : "";
+  const lastDir = extensionContext?.globalState?.get?.(LAST_FILE_DIALOG_DIR_KEY);
+  if (lastDir && fs.existsSync(lastDir)) {
+    try {
+      if (fs.statSync(lastDir).isDirectory()) {
+        return vscode.Uri.file(safeName ? path.join(lastDir, safeName) : lastDir);
+      }
+    } catch (_) {}
+  }
+  const workspaceFolder = vscode.workspace.workspaceFolders?.find((folder) => folder.uri.scheme === "file");
+  const baseDir = workspaceFolder?.uri.fsPath || os.homedir();
+  return vscode.Uri.file(safeName ? path.join(baseDir, safeName) : baseDir);
+}
+
+async function rememberFileDialogDir(filePath) {
+  const dir = path.dirname(String(filePath || ""));
+  if (!dir || dir === ".") return;
+  await extensionContext?.globalState?.update?.(LAST_FILE_DIALOG_DIR_KEY, dir);
+}
+
+function postFlowActionStatus(message, level = "info") {
+  if (panel) {
+    panel.webview.postMessage({
+      command: "flowActionStatus",
+      level,
+      message,
+    });
+  }
+}
+
+function formatHeaderValue(value) {
+  if (Array.isArray(value)) return value.map((item) => String(item)).join(", ");
+  return String(value == null ? "" : value);
+}
+
+function formatHeaderLines(headers) {
+  return Object.entries(headers || {})
+    .flatMap(([name, value]) => (
+      Array.isArray(value)
+        ? value.map((item) => `${name}: ${formatHeaderValue(item)}`)
+        : [`${name}: ${formatHeaderValue(value)}`]
+    ))
+    .join("\n");
+}
+
+function getFlowSummary(flow) {
+  const ordinal = getFlowOrdinal(flow);
+  const status = flow.error ? "ERR" : (flow.status_code || "...");
+  const mime = flow.content_type || "";
+  return [ordinal, flow.method || "GET", flow.url || "", status, mime].filter(Boolean).join(" ");
+}
+
+function formatFlowBlocks(flows, bodyBuilder) {
+  return flows.map((flow) => {
+    const body = bodyBuilder(flow);
+    const title = `# ${getFlowSummary(flow)}`;
+    return body ? `${title}\n${body}` : title;
+  }).join("\n\n");
+}
+
+function shellQuote(value) {
+  return `'${String(value == null ? "" : value).replace(/'/g, "'\\''")}'`;
+}
+
+function getRequestBodySize(flow) {
+  if (flow.req_body_base64) return Buffer.byteLength(flow.req_body_base64, "base64");
+  if (flow.req_body) return Buffer.byteLength(flow.req_body, "utf8");
+  return Number(flow.req_size) || 0;
+}
+
+function getResponseBodySize(flow) {
+  if (flow.res_body_base64) return Buffer.byteLength(flow.res_body_base64, "base64");
+  if (flow.res_body) return Buffer.byteLength(flow.res_body, "utf8");
+  return Number(flow.res_size) || 0;
+}
+
+function formatBytes(bytes) {
+  const n = Number(bytes) || 0;
+  if (n >= 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(n >= 10 * 1024 * 1024 ? 0 : 1)} MB`;
+  if (n >= 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${n} B`;
+}
+
+async function confirmLargeBodyCopy(bytes) {
+  if (bytes <= COPY_BODY_CONFIRM_BYTES) return true;
+  if (bytes > COPY_BODY_MAX_BYTES) {
+    vscode.window.showWarningMessage(t("extension.copy.bodyTooLarge", {
+      size: formatBytes(bytes),
+      limit: formatBytes(COPY_BODY_MAX_BYTES),
+    }));
+    postFlowActionStatus(t("extension.copy.bodyTooLarge", {
+      size: formatBytes(bytes),
+      limit: formatBytes(COPY_BODY_MAX_BYTES),
+    }), "warning");
+    return false;
+  }
+  const action = t("extension.copy.largeBodyContinue");
+  const choice = await vscode.window.showWarningMessage(
+    t("extension.copy.largeBodyConfirm", { size: formatBytes(bytes) }),
+    { modal: true },
+    action
+  );
+  return choice === action;
+}
+
+async function ensureCopyableBody(flow, side) {
+  const isRequest = side === "request";
+  const estimatedSize = isRequest ? getRequestBodySize(flow) : getResponseBodySize(flow);
+  if (estimatedSize > COPY_BODY_MAX_BYTES) {
+    vscode.window.showWarningMessage(t("extension.copy.bodyTooLarge", {
+      size: formatBytes(estimatedSize),
+      limit: formatBytes(COPY_BODY_MAX_BYTES),
+    }));
+    postFlowActionStatus(t("extension.copy.bodyTooLarge", {
+      size: formatBytes(estimatedSize),
+      limit: formatBytes(COPY_BODY_MAX_BYTES),
+    }), "warning");
+    return null;
+  }
+  if (!isRequest && !isResponseComplete(flow)) {
+    vscode.window.showWarningMessage(t("extension.copy.responsePending"));
+    postFlowActionStatus(t("extension.copy.responsePending"), "warning");
+    return null;
+  }
+
+  const result = await fetchFlowBodies(flow, {
+    request: isRequest,
+    response: !isRequest,
+  });
+  if (isRequest && !result.requestOk) {
+    const message = flow._reqBodyError || t("common.unknown");
+    vscode.window.showWarningMessage(t("extension.copy.bodyUnavailable", { message }));
+    postFlowActionStatus(t("extension.copy.bodyUnavailable", { message }), "warning");
+    return null;
+  }
+  if (!isRequest && !result.responseOk) {
+    const message = flow._resBodyError || t("common.unknown");
+    vscode.window.showWarningMessage(t("extension.copy.bodyUnavailable", { message }));
+    postFlowActionStatus(t("extension.copy.bodyUnavailable", { message }), "warning");
+    return null;
+  }
+
+  const base64 = isRequest ? flow.req_body_base64 : flow.res_body_base64;
+  if (base64) {
+    vscode.window.showWarningMessage(t("extension.copy.binaryBodyUnsupported"));
+    postFlowActionStatus(t("extension.copy.binaryBodyUnsupported"), "warning");
+    return null;
+  }
+  const text = isRequest ? (flow.req_body || "") : (flow.res_body || "");
+  const actualSize = Buffer.byteLength(text, "utf8");
+  if (!(await confirmLargeBodyCopy(actualSize))) return null;
+  return text;
+}
+
+async function getFlowBodyBufferForSave(flow, side) {
+  const isRequest = side === "request";
+  if (!isRequest && !isResponseComplete(flow)) {
+    return { ok: false, message: t("extension.bodySave.responsePending") };
+  }
+
+  if (activeSession && flow?.id) {
+    const state = activeSession.bodyState(flow.id, side);
+    if (state.state === "ready") {
+      return { ok: true, buffer: activeSession.getBodyBuffer(flow.id, side) };
+    }
+  }
+
+  const result = await fetchFlowBodies(flow, {
+    request: isRequest,
+    response: !isRequest,
+  });
+  if (isRequest && !result.requestOk) {
+    return {
+      ok: false,
+      message: t("extension.bodySave.unavailable", { message: flow._reqBodyError || t("common.unknown") }),
+    };
+  }
+  if (!isRequest && !result.responseOk) {
+    return {
+      ok: false,
+      message: t("extension.bodySave.unavailable", { message: flow._resBodyError || t("common.unknown") }),
+    };
+  }
+
+  if (activeSession && flow?.id) {
+    const state = activeSession.bodyState(flow.id, side);
+    if (state.state === "ready") {
+      return { ok: true, buffer: activeSession.getBodyBuffer(flow.id, side) };
+    }
+  }
+
+  const base64 = isRequest ? flow.req_body_base64 : flow.res_body_base64;
+  if (base64) return { ok: true, buffer: Buffer.from(base64, "base64") };
+  const text = isRequest ? (flow.req_body || "") : (flow.res_body || "");
+  return { ok: true, buffer: Buffer.from(text, "utf8") };
+}
+
+async function handleSaveFlowBody(flowId, side) {
+  const normalizedSide = side === "response" ? "response" : "request";
+  const flow = capturedFlowById.get(String(flowId || ""));
+  if (!flow) {
+    vscode.window.showWarningMessage(t("extension.bodySave.noFlow"));
+    return;
+  }
+
+  const bodyResult = await getFlowBodyBufferForSave(flow, normalizedSide);
+  if (!bodyResult.ok) {
+    vscode.window.showWarningMessage(bodyResult.message);
+    postFlowActionStatus(bodyResult.message, "warning");
+    return;
+  }
+
+  const contentType = getBodyContentType(flow, normalizedSide);
+  const ext = getBodyFileExtension(contentType, bodyResult.buffer);
+  const result = await vscode.window.showSaveDialog({
+    filters: {
+      "Body Files": [ext],
+      "All Files": ["*"],
+    },
+    defaultUri: getDefaultFileDialogUri(getDefaultBodyFileName(flow, normalizedSide, contentType, bodyResult.buffer)),
+  });
+  if (!result) return;
+
+  try {
+    fs.writeFileSync(result.fsPath, bodyResult.buffer);
+    await rememberFileDialogDir(result.fsPath);
+    const message = t("extension.bodySave.completed", { path: result.fsPath });
+    vscode.window.showInformationMessage(message);
+    postFlowActionStatus(message);
+  } catch (err) {
+    const message = t("extension.bodySave.failed", { message: err.message });
+    vscode.window.showErrorMessage(message);
+    postFlowActionStatus(message, "error");
+  }
+}
+
+async function buildCurlCommand(flow) {
+  if (getRequestBodySize(flow) > COPY_BODY_MAX_BYTES) {
+    const message = t("extension.copy.bodyTooLarge", {
+      size: formatBytes(getRequestBodySize(flow)),
+      limit: formatBytes(COPY_BODY_MAX_BYTES),
+    });
+    vscode.window.showWarningMessage(message);
+    postFlowActionStatus(message, "warning");
+    return null;
+  }
+  const hasBody = (Number(flow.req_size) || 0) > 0 || !!flow.req_body || !!flow.req_body_base64;
+  let body = "";
+  if (hasBody) {
+    body = await ensureCopyableBody(flow, "request");
+    if (body == null) return null;
+  }
+  const parts = [`curl -X ${shellQuote(flow.method || "GET")}`, shellQuote(flow.url || "")];
+  for (const [name, value] of Object.entries(flow.req_headers || {})) {
+    if (Array.isArray(value)) {
+      for (const item of value) parts.push("-H " + shellQuote(`${name}: ${formatHeaderValue(item)}`));
+    } else {
+      parts.push("-H " + shellQuote(`${name}: ${formatHeaderValue(value)}`));
+    }
+  }
+  if (hasBody) {
+    parts.push("--data-binary " + shellQuote(body));
+  }
+  return parts.join(" \\\n  ");
+}
+
+async function buildCopyText(flows, copyType) {
+  switch (copyType) {
+    case "url":
+      return flows.map((flow) => flow.url || "").join("\n");
+    case "host":
+      return flows.map((flow) => flow.host || "").join("\n");
+    case "summary":
+      return flows.map(getFlowSummary).join("\n");
+    case "requestHeaders":
+      return formatFlowBlocks(flows, (flow) => formatHeaderLines(flow.req_headers));
+    case "responseHeaders":
+      return formatFlowBlocks(flows, (flow) => formatHeaderLines(flow.res_headers));
+    case "requestBody":
+      return ensureCopyableBody(flows[0], "request");
+    case "responseBody":
+      return ensureCopyableBody(flows[0], "response");
+    case "curl":
+      return buildCurlCommand(flows[0]);
+    default:
+      return null;
+  }
+}
+
+async function handleCopyFlows(flowIds, copyType) {
+  const { flows, missing } = resolveFlowsForIds(flowIds);
+  if (flows.length === 0) {
+    vscode.window.showWarningMessage(t("extension.copy.noFlows"));
+    return;
+  }
+  if (["requestBody", "responseBody", "curl"].includes(copyType) && flows.length > 1) {
+    vscode.window.showWarningMessage(t("extension.copy.singleOnly"));
+    postFlowActionStatus(t("extension.copy.singleOnly"), "warning");
+    return;
+  }
+
+  const text = await buildCopyText(flows, copyType);
+  if (text == null) return;
+  await vscode.env.clipboard.writeText(text);
+  const message = missing.length > 0
+    ? t("extension.copy.completedWithMissing", { count: flows.length, missing: missing.length })
+    : t("extension.copy.completed", { count: flows.length });
+  vscode.window.showInformationMessage(message);
+  postFlowActionStatus(message);
+}
+
+async function handleExportFlows(flowIds, format) {
+  if (format === "har") {
+    await exportHar({ flowIds });
+  } else if (format === "json") {
+    await exportJson({ flowIds });
+  }
+}
+
+async function exportHar(options = {}) {
+  const { flows: flowsToExport, selected } = resolveFlowsForIds(options.flowIds);
+  if (flowsToExport.length === 0) {
     vscode.window.showWarningMessage(t("extension.export.noFlows"));
     return;
   }
 
   const result = await vscode.window.showSaveDialog({
     filters: { "HAR Files": ["har"] },
-    defaultUri: vscode.Uri.file("capture.har"),
+    defaultUri: getDefaultFileDialogUri(getDefaultExportFileName("har", flowsToExport, selected)),
   });
 
   if (!result) return;
+  await rememberFileDialogDir(result.fsPath);
 
   // Fetch bodies for all flows not yet loaded (parallel with bounded concurrency)
-  const fetchResult = await fetchAllFlowBodiesWithProgress(capturedFlows);
+  const fetchResult = await fetchAllFlowBodiesWithProgress(flowsToExport);
 
   const har = {
     log: {
       version: "1.2",
       creator: { name: "SecMP", version: extensionPackage.version },
-      entries: capturedFlows.map(f => {
+      entries: flowsToExport.map(f => {
         const entry = {
           startedDateTime: new Date(f.req_timestamp * 1000).toISOString(),
           time: f.duration_ms || 0,
@@ -3339,28 +4128,30 @@ async function exportHar() {
   };
 
   fs.writeFileSync(result.fsPath, JSON.stringify(har, null, 2));
-  showExportResult(capturedFlows.length, result.fsPath, fetchResult.failed);
+  showExportResult(flowsToExport.length, result.fsPath, fetchResult.failed);
 }
 
-async function exportJson() {
-  if (capturedFlows.length === 0) {
+async function exportJson(options = {}) {
+  const { flows: flowsToExport, selected } = resolveFlowsForIds(options.flowIds);
+  if (flowsToExport.length === 0) {
     vscode.window.showWarningMessage(t("extension.export.noFlows"));
     return;
   }
 
   const result = await vscode.window.showSaveDialog({
     filters: { "JSON Files": ["json"] },
-    defaultUri: vscode.Uri.file("capture.json"),
+    defaultUri: getDefaultFileDialogUri(getDefaultExportFileName("json", flowsToExport, selected)),
   });
 
   if (!result) return;
+  await rememberFileDialogDir(result.fsPath);
 
   // Fetch bodies for all flows not yet loaded (parallel with bounded concurrency)
-  const fetchResult = await fetchAllFlowBodiesWithProgress(capturedFlows);
+  const fetchResult = await fetchAllFlowBodiesWithProgress(flowsToExport);
 
-  const flowsWithSeq = capturedFlows.map((f, i) => ({ _num: i + 1, ...f }));
+  const flowsWithSeq = flowsToExport.map((f) => ({ _num: getFlowOrdinal(f), ...f }));
   fs.writeFileSync(result.fsPath, JSON.stringify(flowsWithSeq, null, 2));
-  showExportResult(capturedFlows.length, result.fsPath, fetchResult.failed);
+  showExportResult(flowsToExport.length, result.fsPath, fetchResult.failed);
 }
 
 async function saveSession() {
@@ -3372,9 +4163,10 @@ async function saveSession() {
     if (!sessionName) return;
     const result = await vscode.window.showSaveDialog({
       filters: { "SecMP Session": ["secmp"] },
-      defaultUri: vscode.Uri.file(`${sessionName}.secmp`),
+      defaultUri: getDefaultFileDialogUri(`${sessionName}.secmp`),
     });
     if (!result) return;
+    await rememberFileDialogDir(result.fsPath);
     activeSession = CaptureSession.createNamed(result.fsPath, sessionName, extensionPackage.version);
     flushActiveSession();
     rememberSession(activeSession);
@@ -3391,8 +4183,7 @@ async function saveSession() {
 }
 
 async function newTemporarySession() {
-  if (!(await ensureCanSwitchSession())) return;
-  if (activeSession) closeActiveSession();
+  if (activeSession && !(await confirmAndCloseActiveSession({ restorePanelOnCancel: !!panel }))) return;
   activeSession = CaptureSession.createTemporary(getSessionCacheDir(), extensionPackage.version);
   writeResumeMarker({ running: false });
   resetCapturedFlows();
@@ -3406,7 +4197,6 @@ async function newTemporarySession() {
 }
 
 async function newPersistentSession() {
-  if (!(await ensureCanSwitchSession())) return;
   const sessionName = await vscode.window.showInputBox({
     prompt: t("extension.session.namePrompt"),
     value: "SecMP Capture",
@@ -3414,10 +4204,11 @@ async function newPersistentSession() {
   if (!sessionName) return;
   const result = await vscode.window.showSaveDialog({
     filters: { "SecMP Session": ["secmp"] },
-    defaultUri: vscode.Uri.file(`${sessionName}.secmp`),
+    defaultUri: getDefaultFileDialogUri(`${sessionName}.secmp`),
   });
   if (!result) return;
-  if (activeSession) closeActiveSession();
+  await rememberFileDialogDir(result.fsPath);
+  if (activeSession && !(await confirmAndCloseActiveSession({ restorePanelOnCancel: !!panel }))) return;
   activeSession = CaptureSession.createNamed(result.fsPath, sessionName, extensionPackage.version);
   flushActiveSession();
   rememberSession(activeSession);
@@ -3435,9 +4226,11 @@ async function loadSession() {
   const [fileUri] = await vscode.window.showOpenDialog({
     filters: { "SecMP Session": ["secmp"] },
     canSelectMany: false,
+    defaultUri: getDefaultFileDialogUri(),
   });
 
   if (!fileUri) return;
+  await rememberFileDialogDir(fileUri.fsPath);
 
   try {
     await openSessionFile(fileUri.fsPath);
@@ -3447,8 +4240,7 @@ async function loadSession() {
 }
 
 async function openSessionFile(filePath) {
-  if (!(await ensureCanSwitchSession())) return;
-  if (activeSession) closeActiveSession();
+  if (activeSession && !(await confirmAndCloseActiveSession({ restorePanelOnCancel: !!panel }))) return;
   activeSession = CaptureSession.open(filePath);
   rememberSession(activeSession);
   const loadedFlows = markSessionLoadedFlows(activeSession.getFlows({ includeBodies: false }));
@@ -3470,6 +4262,30 @@ async function openSessionFile(filePath) {
   vscode.window.showInformationMessage(t("extension.session.loaded", { count: capturedFlows.length }));
   await createPanel();
   await vscode.commands.executeCommand("workbench.action.closeSidebar");
+  await maybeAutoStartProxyForSession();
+}
+
+async function maybeAutoStartProxyForSession() {
+  const port = getSessionProxyAutoStartPort(activeSession);
+  if (!port || proxyProcess) return;
+  try {
+    const result = await startProxyEngine(port);
+    postProxyStatus({
+      running: true,
+      port,
+      phase: "running",
+      message: result.message,
+    });
+  } catch (err) {
+    log(`Failed to auto-start proxy from session state: ${err.message}`);
+    postProxyStatus({
+      running: false,
+      port,
+      phase: "error",
+      message: err.message,
+    });
+    vscode.window.showWarningMessage(t("extension.session.proxyAutoStartFailed", { message: err.message }));
+  }
 }
 
 async function openCapturePanelForSession() {
@@ -3540,6 +4356,9 @@ class SecmpSidebarProvider {
     const item = new vscode.TreeItem(label, vscode.TreeItemCollapsibleState.None);
     item.description = path.dirname(entry.filePath);
     item.tooltip = entry.filePath;
+    item.contextValue = "recentSession";
+    item.filePath = entry.filePath;
+    item.resourceUri = vscode.Uri.file(entry.filePath);
     item.iconPath = new vscode.ThemeIcon("file");
     item.command = {
       command: "secmp.openRecentSession",
@@ -3555,7 +4374,6 @@ function activate(context) {
   outputChannel = vscode.window.createOutputChannel("SecMP");
   log("SecMP extension activated");
   initializeRuntimeStorage(context);
-  checkInterruptedSession();
   checkForExtensionUpdate(context, { manual: false });
   sidebarProvider = new SecmpSidebarProvider();
   const sidebarView = vscode.window.createTreeView("secmp.sidebar", {
@@ -3583,13 +4401,28 @@ function activate(context) {
     loadSession();
   });
 
-  const openRecentSessionCmd = vscode.commands.registerCommand("secmp.openRecentSession", async (filePath) => {
+  const openRecentSessionCmd = vscode.commands.registerCommand("secmp.openRecentSession", async (input) => {
+    const filePath = resolveRecentSessionFilePath(input);
     if (filePath) {
       try {
         await openSessionFile(filePath);
       } catch (err) {
         vscode.window.showErrorMessage(t("extension.session.parseFailed", { message: err.message }));
       }
+    }
+  });
+
+  const revealRecentSessionCmd = vscode.commands.registerCommand("secmp.revealRecentSession", async (input) => {
+    const filePath = resolveRecentSessionFilePath(input);
+    if (!filePath) return;
+    await vscode.commands.executeCommand("revealFileInOS", vscode.Uri.file(filePath));
+  });
+
+  const removeRecentSessionCmd = vscode.commands.registerCommand("secmp.removeRecentSession", (input) => {
+    const filePath = resolveRecentSessionFilePath(input);
+    if (!filePath) return;
+    if (removeRecentSession(filePath)) {
+      vscode.window.showInformationMessage(t("extension.session.removedFromHistory"));
     }
   });
 
@@ -3707,11 +4540,18 @@ function activate(context) {
         postEnvironmentStatus(context);
       }
     }
+    if (event.affectsConfiguration("secmp.fontSize") && panel) {
+      panel.webview.postMessage({
+        command: "fontSize",
+        fontSize: getConfiguredFontSize(),
+      });
+    }
   });
 
   context.subscriptions.push(
     showPanelCmd, startProxyCmd, stopProxyCmd, pushCertCmd,
     openCapturePanelCmd, newTemporarySessionCmd, newPersistentSessionCmd, openSessionCmd, openRecentSessionCmd,
+    revealRecentSessionCmd, removeRecentSessionCmd,
     setupProxyCmd, clearProxyCmd, cleanRuntimeCacheCmd, checkForUpdatesCmd, exportHarCmd, exportJsonCmd,
     languageConfigListener,
     sidebarView,
@@ -3719,10 +4559,15 @@ function activate(context) {
   );
 
   log("Commands registered");
+  checkInterruptedSession();
 }
 
 function deactivate() {
   stopFlowPolling();
+  recordSessionProxyState(!!proxyProcess, {
+    port: activeProxyPort,
+    reason: "extensionDeactivate",
+  });
   flushActiveSession();
   writeResumeMarker({ shutdownAt: new Date().toISOString(), proxyRunning: !!proxyProcess });
   try {

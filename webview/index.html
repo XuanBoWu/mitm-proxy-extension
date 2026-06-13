@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" style="--secmp-font-size: __SECMP_FONT_SIZE__px;">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -121,6 +121,11 @@
         <div class="input-row">
           <label data-i18n="webview.device.port">端口</label>
           <input type="number" id="proxyPort" value="8080" min="1024" max="65535" />
+          <button id="editProxyPortBtn" class="btn btn-sm btn-outline" style="display:none;" data-i18n="webview.device.editPort">修改</button>
+        </div>
+        <div id="proxyPortEditActions" class="inline-actions" style="display:none;">
+          <button id="applyProxyPortBtn" class="btn btn-sm btn-primary" data-i18n="webview.device.applyPort">应用</button>
+          <button id="cancelProxyPortBtn" class="btn btn-sm btn-outline" data-i18n="common.cancel">取消</button>
         </div>
         <div class="input-row">
           <label data-i18n="webview.device.interface">网卡</label>
@@ -367,7 +372,7 @@
   </footer>
 </div>
 
-<template id="secmpI18n" data-locale="__SECMP_LOCALE__">__SECMP_MESSAGES_JSON__</template>
+<template id="secmpI18n" data-locale="__SECMP_LOCALE__" data-font-size="__SECMP_FONT_SIZE__">__SECMP_MESSAGES_JSON__</template>
 <script src="./app.js"></script>
 </body>
 </html>

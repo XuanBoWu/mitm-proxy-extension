@@ -29,12 +29,25 @@ The Git tag includes the leading `v`. The package version and runtime version do
 
 `package.json` version identifies each testable VSIX build, even before a public release. Bump the patch version for each completed bug fix or feature stage. `secmp.runtimeVersion` is independent and only changes when the packaged runtime actually changes.
 
+Version numbers are tied to testable/releasable milestones, not to branch names:
+
+- Topic branch work does not need a version bump while it is still exploratory.
+- Merging a topic branch into `staging` for integration validation does not require a version bump.
+- Bump `package.json` and update `CHANGELOG.md` on `staging`, after validation is complete and before opening the PR from `staging` to `master`.
+- The `CHANGELOG.md` entry for that bump must summarize all changes included in the candidate, not only the final commit.
+- If `staging` needs another fix round after the PR-prep bump and that produces a new candidate build, bump the version again, usually as a patch.
+- When `staging` is merged into `master`, keep the version already validated on `staging`; do not bump again just because the target branch changes.
+- For a release, create the `v*` tag from the current `master` version. For example, `package.json` version `0.3.0` should be released with tag `v0.3.0`.
+
+Use `PATCH` for bug fixes, focused performance/stability fixes, small UI changes, and other small testable stages. Use `MINOR` for a new user-visible capability or a larger completed feature stage. Use `MAJOR` for incompatible configuration, runtime protocol, data format, or migration changes.
+
 ## Release Checklist
 
 Before creating a release:
 
 - Confirm the working tree contains only intended release changes.
 - Confirm the icon asset is selected and wired into `package.json`.
+- Confirm runtime icon assets are current when building runtime packages: `media/secmp.ico` for Windows and `media/secmp.icns` for macOS.
 - Confirm `README.md`, `README.zh-CN.md`, `LICENSE`, `CHANGELOG.md`, `SECURITY.md`, `RELEASE_NOTES.md`, and runtime documentation are up to date.
 - Confirm local packaged runtime build and extension runtime install smoke tests pass for the target platform.
 - Confirm GitHub Actions build, runtime smoke tests, and VSIX packaging pass.
@@ -46,31 +59,31 @@ Before creating a release:
 Build the Windows runtime:
 
 ```powershell
-npm run runtime:windows -- -RuntimeVersion 0.1.2 -OutputDir dist
+npm run runtime:windows -- -RuntimeVersion 0.3.0 -OutputDir dist
 ```
 
 Build the macOS runtime:
 
 ```bash
-npm run runtime:macos -- --runtime-version 0.1.2 --output-dir dist
+npm run runtime:macos -- --runtime-version 0.3.0 --output-dir dist
 ```
 
 Smoke test the runtime:
 
 ```powershell
-.\scripts\test-windows-runtime.ps1 -RuntimeZip .\dist\secmp-runtime-win32-x64-0.1.2.zip -RuntimeVersion 0.1.2
+.\scripts\test-windows-runtime.ps1 -RuntimeZip .\dist\secmp-runtime-win32-x64-0.3.0.zip -RuntimeVersion 0.3.0
 ```
 
 Smoke test extension runtime installation:
 
 ```powershell
-npm run runtime:windows:test-install -- --runtime-zip .\dist\secmp-runtime-win32-x64-0.1.2.zip --runtime-version 0.1.2
+npm run runtime:windows:test-install -- --runtime-zip .\dist\secmp-runtime-win32-x64-0.3.0.zip --runtime-version 0.3.0
 ```
 
 On macOS, use the same install smoke test with the macOS runtime zip:
 
 ```bash
-node scripts/test-extension-runtime-install.js --runtime-zip dist/secmp-runtime-darwin-arm64-0.1.2.zip --runtime-version 0.1.2
+node scripts/test-extension-runtime-install.js --runtime-zip dist/secmp-runtime-darwin-arm64-0.3.0.zip --runtime-version 0.3.0
 ```
 
 Package the VSIX:
@@ -106,7 +119,7 @@ For a manual release run, trigger the workflow with:
 
 ```text
 publish=true
-runtime_version=0.1.2
+runtime_version=0.3.0
 release_tag=v0.1.3
 ```
 
@@ -140,3 +153,5 @@ Patch release for a focused bug fix or feature stage.
 
 Runtime assets are included only when `secmp.runtimeVersion` changes.
 ```
+
+Runtime icon-only changes still produce new runtime binaries when they affect `media/secmp.ico` or `media/secmp.icns`; handle them as runtime package changes for release planning.

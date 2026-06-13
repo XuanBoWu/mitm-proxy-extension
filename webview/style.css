@@ -41,6 +41,14 @@
   --radius: 2px;
   --font-mono: 'Cascadia Code', 'JetBrains Mono', 'Fira Code', 'Consolas', 'Courier New', monospace;
   --font-ui: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  --secmp-font-size: 13px;
+  --flow-header-font-size: 12px;
+  --flow-font-size: 13px;
+  --flow-meta-font-size: 12px;
+  --flow-badge-font-size: 11px;
+  --flow-row-height: 28px;
+  --detail-body-font-size: 12px;
+  --detail-body-line-height: 1.45;
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -98,6 +106,7 @@ body {
 .indicator { font-size: 8px; }
 .indicator.running { color: var(--green); }
 .indicator.stopped { color: var(--red); }
+.indicator.pending { color: var(--yellow); }
 #proxyStatusText { color: var(--text-secondary); font-size: 11px; }
 
 .header-center {
@@ -120,6 +129,14 @@ body {
 }
 #filterInput:focus { border-color: var(--border-focus); }
 #filterInput::placeholder { color: var(--text-muted); }
+.inline-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+.input-row .btn {
+  flex: 0 0 auto;
+}
 .filter-panel {
   position: absolute;
   top: 28px;
@@ -506,6 +523,7 @@ dd { color: var(--text-primary); }
 .input-row label { font-size: 11px; color: var(--text-secondary); white-space: nowrap; }
 .input-row input {
   width: 100%;
+  min-width: 0;
   padding: 2px 6px;
   height: 24px;
   background: var(--input-bg);
@@ -619,12 +637,12 @@ dd { color: var(--text-primary); }
   position: relative;
   background: var(--bg-secondary);
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: var(--flow-header-font-size);
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.2px;
   padding: 4px 8px;
-  height: 26px;
+  height: var(--flow-row-height);
   text-align: left;
   border-bottom: 1px solid var(--border);
   cursor: grab;
@@ -653,7 +671,7 @@ dd { color: var(--text-primary); }
 #flowTable tbody tr {
   cursor: pointer;
   border-bottom: 1px solid transparent;
-  height: 26px;
+  height: var(--flow-row-height);
   user-select: none;
 }
 #flowTable tbody tr.virtual-spacer {
@@ -673,19 +691,65 @@ dd { color: var(--text-primary); }
 #flowTable tbody tr.focused {
   box-shadow: inset 2px 0 0 var(--accent);
 }
+#flowTable tbody tr.context-target {
+  box-shadow: inset 2px 0 0 var(--accent), inset 0 0 0 1px var(--accent);
+}
 
 #flowTable td {
   padding: 2px 8px;
-  font-size: 12px;
+  font-size: var(--flow-font-size);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   color: var(--text-secondary);
 }
 
+.flow-context-menu {
+  position: fixed;
+  z-index: 1000;
+  min-width: 180px;
+  max-width: 260px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-secondary);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.32);
+}
+
+.flow-context-menu-item {
+  display: block;
+  width: 100%;
+  min-height: 26px;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.flow-context-menu-item:hover,
+.flow-context-menu-item:focus {
+  outline: none;
+  background: var(--bg-hover);
+}
+
+.flow-context-menu-divider {
+  height: 1px;
+  margin: 4px 2px;
+  background: var(--border);
+}
+
 /* TLS version label */
 .tls-label {
-  font-size: 10px;
+  font-size: var(--flow-badge-font-size);
   font-weight: 600;
   padding: 0 4px;
   border-radius: var(--radius);
@@ -697,7 +761,7 @@ dd { color: var(--text-primary); }
 
 .method {
   font-weight: 600;
-  font-size: 11px;
+  font-size: var(--flow-meta-font-size);
   padding: 0 3px;
   border-radius: var(--radius);
   color: var(--text-primary);
@@ -719,9 +783,9 @@ dd { color: var(--text-primary); }
 .status.s0xx { color: var(--red); }
 .status.pending { color: var(--text-muted); }
 
-.time { font-family: var(--font-mono); font-size: 11px; }
+.time { font-family: var(--font-mono); font-size: var(--flow-meta-font-size); }
 .mime-tag {
-  font-size: 10px;
+  font-size: var(--flow-badge-font-size);
   background: var(--bg-surface);
   padding: 0 4px;
   border-radius: var(--radius);
@@ -729,7 +793,7 @@ dd { color: var(--text-primary); }
 }
 
 .proto-tag {
-  font-size: 10px;
+  font-size: var(--flow-badge-font-size);
   font-weight: 600;
   padding: 0 5px;
   border-radius: var(--radius);
@@ -946,9 +1010,9 @@ dd { color: var(--text-primary); }
   background: var(--bg-secondary);
   border-right: 1px solid var(--border);
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: var(--detail-body-font-size);
   font-family: var(--font-mono);
-  line-height: 1.45;
+  line-height: var(--detail-body-line-height);
   text-align: right;
   white-space: normal;
   user-select: none;
@@ -970,14 +1034,14 @@ dd { color: var(--text-primary); }
   padding: 8px;
   border: none;
   border-radius: 0;
-  font-size: 11px;
+  font-size: var(--detail-body-font-size);
   font-family: var(--font-mono);
   color: var(--text-primary);
   margin: 0;
   width: 100%;
   resize: none;
   outline: none;
-  line-height: 1.45;
+  line-height: var(--detail-body-line-height);
   tab-size: 2;
   white-space: pre-wrap;
   overflow-wrap: anywhere;

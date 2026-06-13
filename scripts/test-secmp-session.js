@@ -37,7 +37,17 @@ function main() {
     colOrder: ["num"],
     colWidths: { num: 44 },
   });
+  session.setProxyState({
+    running: true,
+    port: 8080,
+    reason: "sessionExit",
+    updatedAt: "2026-06-13T00:00:00.000Z",
+  });
+  const beforeSyncRecordCount = session.file.recordCount;
+  session.sync();
+  assert.strictEqual(session.file.recordCount, beforeSyncRecordCount);
   session.flush();
+  assert.strictEqual(session.file.offsets[session.file.offsets.length - 1].type, "indexSnapshot");
   session.file.close();
 
   const loaded = CaptureSession.open(filePath);
@@ -48,6 +58,8 @@ function main() {
   assert.strictEqual(loaded.searchBody("flow-1", "request", "needle"), true);
   assert.strictEqual(loaded.getUiState().filterText, "needle");
   assert.strictEqual(loaded.getUiState().sort.direction, "desc");
+  assert.strictEqual(loaded.getProxyState().running, true);
+  assert.strictEqual(loaded.getProxyState().port, 8080);
   const promotedPath = path.join(root, "promoted.secmp");
   loaded.saveAs(promotedPath, "Promoted");
   loaded.putFlow({
@@ -64,8 +76,19 @@ function main() {
   const promoted = CaptureSession.open(promotedPath);
   assert.strictEqual(promoted.temporary, false);
   assert.strictEqual(promoted.sessionName, "Promoted");
+  assert.strictEqual(promoted.getProxyState().running, true);
+  assert.strictEqual(promoted.getProxyState().port, 8080);
   assert.strictEqual(promoted.getFlows().some((flow) => flow.id === "flow-2"), true);
   promoted.file.close();
+
+  const tempSession = CaptureSession.createTemporary(root, "0.2.0-test");
+  const tempSourcePath = tempSession.filePath;
+  tempSession.putFlow({ id: "temp-flow", url: "https://example.test/temp" });
+  const tempPromotedPath = path.join(root, "temp-promoted.secmp");
+  tempSession.saveAs(tempPromotedPath, "Temp Promoted");
+  assert.strictEqual(fs.existsSync(tempSourcePath), false);
+  assert.strictEqual(fs.existsSync(tempPromotedPath), true);
+  tempSession.file.close();
 
   SecmpSessionFile.open(filePath, { readOnly: true, verifyOnly: true }).close();
 

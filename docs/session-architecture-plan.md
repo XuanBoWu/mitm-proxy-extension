@@ -85,9 +85,8 @@ npm run l10n:check
 
 ## Version State
 
-- `package.json` is currently bumped to `0.2.4`.
-- `secmp.runtimeVersion` remains `0.1.2`.
-- Runtime files were not changed.
+- This section records the session-architecture implementation checkpoint. For current release versions, use `package.json`.
+- SecMP 0.3.0 updates `secmp.runtimeVersion` to `0.3.0` so refreshed Windows/macOS runtime icon assets are shipped with matching runtime packages.
 
 ## Current Known Limitations
 

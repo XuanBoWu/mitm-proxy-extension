@@ -67,7 +67,7 @@
         },
         "secmp.runtimeVersion": {
           "type": "string",
-          "default": "0.1.2",
+          "default": "0.3.0",
           "description": "%secmp.config.runtimeVersion%"
         },
         "secmp.language": {
@@ -84,6 +84,25 @@
             "%secmp.config.language.enUS%"
           ],
           "description": "%secmp.config.language%"
+        },
+        "secmp.fontSize": {
+          "type": "number",
+          "default": 13,
+          "enum": [
+            12,
+            13,
+            14,
+            15,
+            16
+          ],
+          "enumDescriptions": [
+            "%secmp.config.fontSize.compact%",
+            "%secmp.config.fontSize.default%",
+            "%secmp.config.fontSize.comfortable%",
+            "%secmp.config.fontSize.large%",
+            "%secmp.config.fontSize.maximum%"
+          ],
+          "description": "%secmp.config.fontSize%"
         },
         "secmp.openPanelAfterNewSession": {
           "type": "boolean",
@@ -112,7 +131,7 @@
         },
         "secmp.windowsRuntimeVersion": {
           "type": "string",
-          "default": "0.1.2",
+          "default": "0.3.0",
           "description": "%secmp.config.windowsRuntimeVersion%"
         },
         "secmp.updateCheckEnabled": {
@@ -185,7 +204,38 @@
       {
         "command": "secmp.showPanel",
         "title": "%secmp.command.showPanel%"
+      },
+      {
+        "command": "secmp.openRecentSession",
+        "title": "%secmp.command.openRecentSession%"
+      },
+      {
+        "command": "secmp.revealRecentSession",
+        "title": "%secmp.command.revealRecentSession%"
+      },
+      {
+        "command": "secmp.removeRecentSession",
+        "title": "%secmp.command.removeRecentSession%"
       }
-    ]
+    ],
+    "menus": {
+      "view/item/context": [
+        {
+          "command": "secmp.openRecentSession",
+          "when": "view == secmp.sidebar && viewItem == recentSession",
+          "group": "navigation@1"
+        },
+        {
+          "command": "secmp.revealRecentSession",
+          "when": "view == secmp.sidebar && viewItem == recentSession",
+          "group": "navigation@2"
+        },
+        {
+          "command": "secmp.removeRecentSession",
+          "when": "view == secmp.sidebar && viewItem == recentSession",
+          "group": "inline@9"
+        }
+      ]
+    }
   }
 }

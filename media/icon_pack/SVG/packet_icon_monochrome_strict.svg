@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024" role="img" aria-label="Monochrome packet capture app icon">
+  <title>Monochrome Packet Capture App Icon</title>
+  <defs>
+    <style>
+      .ink { fill: #111111; }
+      .stroke { fill: none; stroke: #111111; stroke-width: 38; stroke-linecap: round; stroke-linejoin: round; }
+    </style>
+  </defs>
+
+  <!-- rounded app container -->
+  <path class="stroke" d="M196 37 H828 C916 37 987 108 987 196 V828 C987 916 916 987 828 987 H196 C108 987 37 916 37 828 V196 C37 108 108 37 196 37 Z"/>
+
+  <!-- left nodes -->
+  <circle class="ink" cx="247" cy="265" r="68"/>
+  <circle class="ink" cx="236" cy="512" r="68"/>
+  <circle class="ink" cx="247" cy="759" r="68"/>
+
+  <!-- connecting branches, same merged structure as the source icon -->
+  <path class="stroke" d="M315 265 H386 C435 265 461 290 478 332 L516 425 C535 472 568 512 637 512"/>
+  <path class="stroke" d="M304 512 H637"/>
+  <path class="stroke" d="M315 759 H386 C435 759 461 734 478 692 L516 599 C535 552 568 512 637 512"/>
+
+  <!-- left bracket -->
+  <path class="stroke" d="M632 390 H595 C568 390 547 411 547 438 V586 C547 613 568 634 595 634 H632"/>
+
+  <!-- right bracket -->
+  <path class="stroke" d="M838 390 H875 C902 390 923 411 923 438 V586 C923 613 902 634 875 634 H838"/>
+
+  <!-- central code capsule -->
+  <rect class="ink" x="638" y="442" width="236" height="140" rx="22" ry="22"/>
+
+  <!-- negative code lines cut out using background-colored shapes for single-color icon compatibility -->
+  <rect x="690" y="482" width="100" height="16" rx="8" ry="8" fill="#ffffff"/>
+  <rect x="690" y="527" width="135" height="16" rx="8" ry="8" fill="#ffffff"/>
+  <rect x="840" y="527" width="48" height="16" rx="8" ry="8" fill="#ffffff"/>
+</svg>

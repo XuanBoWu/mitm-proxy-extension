@@ -9,6 +9,12 @@
   "secmp.config.language.auto": "Follow VS Code",
   "secmp.config.language.zhCN": "Simplified Chinese",
   "secmp.config.language.enUS": "English",
+  "secmp.config.fontSize": "Base font size for the SecMP Webview, in px. 13 is the default, and 12 is close to the previous size.",
+  "secmp.config.fontSize.compact": "Compact, close to the previous size",
+  "secmp.config.fontSize.default": "Default, slightly larger than before",
+  "secmp.config.fontSize.comfortable": "Comfortable",
+  "secmp.config.fontSize.large": "Large",
+  "secmp.config.fontSize.maximum": "Maximum",
   "secmp.config.openPanelAfterNewSession": "Automatically open the capture panel after creating a temporary or persistent SecMP session.",
   "secmp.config.windowsRuntimePath": "Deprecated compatibility setting. Use secmp.runtimePath instead.",
   "secmp.config.windowsRuntimeArchivePath": "Deprecated compatibility setting. Use secmp.runtimeArchivePath instead.",
@@ -27,6 +33,9 @@
   "secmp.command.exportHar": "SecMP: Export as HAR",
   "secmp.command.exportJson": "SecMP: Export as JSON",
   "secmp.command.showPanel": "SecMP: Show Capture Panel",
+  "secmp.command.openRecentSession": "Open",
+  "secmp.command.revealRecentSession": "Reveal File",
+  "secmp.command.removeRecentSession": "Remove",
   "secmp.viewsContainer.title": "SecMP",
   "secmp.view.sidebar.name": "Sessions"
 }

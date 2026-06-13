@@ -4,7 +4,9 @@ All notable changes to SecMP are documented in this file.
 
 ## Unreleased
 
-## 0.3.0 - 2026-06-10
+- No unreleased changes.
+
+## 0.3.0 - 2026-06-14
 
 ### 修复 body 可信度（列表有 size 但详情显示 (empty)）
 
@@ -33,7 +35,21 @@ All notable changes to SecMP are documented in this file.
 
 - 导出前的 body 拉取改为带进度通知；HAR 导出补充请求 `postData`，二进制响应体以 base64（`encoding: "base64"`）写入；body 拉取失败时导出完成消息明确报告失败条数。
 
-- 保持 `secmp.runtimeVersion` 为 `0.1.2`：runtime 产物与 extension↔runtime 协议未变化（本次仅修改 extension 与 Webview）。
+### 界面与操作
+
+- 新增 `secmp.fontSize` 和 Webview 字号下拉菜单（12-16 px），请求列表、Request/Response 详情、虚拟列表行高、列宽测量和详情行号会随字号同步。
+- 新增请求列表右键菜单和详情区右键菜单，支持复制、导出、过滤、清理、会话和详情相关快捷动作。
+- 改进会话退出与历史动作，端口变更时自动重启代理，减少配置变化后的手动恢复步骤。
+
+### 图标与 runtime 包
+
+- 更新 SecMP 扩展图标、Webview 顶栏图标、Activity Bar 图标、Windows `.ico` 和 macOS `.icns`，并将完整图标源包保存在 `media/icon_pack/`。
+- macOS runtime 构建现在和 Windows 一样会把平台图标嵌入 PyInstaller entrypoint。
+- 将 `secmp.runtimeVersion` 更新为 `0.3.0`，用于随 0.3.0 正式版重发带新图标的 Windows/macOS runtime 包；runtime 内部逻辑和 extension↔runtime 协议未变化。
+
+### 发布流程
+
+- 补充 topic → `staging` → `master` 版本 bump 规则、runtime 图标变更规则和发布检查说明。
 
 ## 0.2.11 - 2026-06-09
 

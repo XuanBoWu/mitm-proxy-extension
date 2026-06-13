@@ -226,6 +226,7 @@ class CaptureSession {
     this.flowOrder = [];
     this.bodyByKey = new Map();
     this.uiState = null;
+    this.proxyState = null;
     this.dirtyBytes = 0;
     this.resumeMarkerPath = options.resumeMarkerPath || null;
   }
@@ -296,6 +297,8 @@ class CaptureSession {
       this.temporary = !!meta.temporary;
     } else if (type === "uiState") {
       this.uiState = meta.state || null;
+    } else if (type === "proxyState") {
+      this.proxyState = meta.state || null;
     }
   }
 
@@ -373,6 +376,10 @@ class CaptureSession {
     return this.flowOrder.map((id) => this.getFlow(id, options)).filter(Boolean);
   }
 
+  hasFlows() {
+    return this.flowOrder.length > 0;
+  }
+
   bodyState(flowId, side) {
     const body = this.bodyByKey.get(keyFor(flowId, side));
     if (!body) return { state: "missing", size: 0, contentKind: "unknown" };
@@ -395,6 +402,20 @@ class CaptureSession {
     return this.uiState || null;
   }
 
+  setProxyState(state) {
+    this.proxyState = state || null;
+    this.file.appendRecord("proxyState", { state: this.proxyState });
+    this.dirtyBytes += JSON.stringify(this.proxyState || {}).length;
+  }
+
+  getProxyState() {
+    return this.proxyState || null;
+  }
+
+  sync() {
+    this.file.flush();
+  }
+
   flush() {
     this.file.appendIndexSnapshot({
       flowCount: this.flowOrder.length,
@@ -413,9 +434,16 @@ class CaptureSession {
 
   saveAs(targetPath, sessionName) {
     this.flush();
+    const sourcePath = this.filePath;
+    const deleteSource = this.temporary && path.resolve(sourcePath) !== path.resolve(targetPath);
     fs.mkdirSync(path.dirname(targetPath), { recursive: true });
     fs.copyFileSync(this.filePath, targetPath);
     this.file.close();
+    if (deleteSource) {
+      try {
+        fs.unlinkSync(sourcePath);
+      } catch (_) {}
+    }
     const promoted = SecmpSessionFile.open(targetPath, { readOnly: false });
     promoted.appendRecord("sessionSavedAs", {
       sessionName: sessionName || this.sessionName,
