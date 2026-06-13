@@ -29,6 +29,10 @@ let selectedFlowIds = new Set();
 let selectionAnchorFlowId = null;
 let contextTargetFlowId = null;
 let flowContextMenuEl = null;
+let detailContextMenuEl = null;
+let detailContextSide = null;
+let detailContextSelectionText = "";
+let imageContextMenuEl = null;
 let proxyRunning = false;
 let proxyPhase = "stopped";
 let currentProxyPort = 8080;
@@ -1312,9 +1316,40 @@ const FLOW_CONTEXT_ACTIONS = [
   { id: "copyCurl", type: "copy", copyType: "curl", labelKey: "webview.context.copyCurl", fallback: "复制为 cURL", scope: "single" },
   { id: "copyRequestBody", type: "copy", copyType: "requestBody", labelKey: "webview.context.copyRequestBody", fallback: "复制请求体", scope: "single" },
   { id: "copyResponseBody", type: "copy", copyType: "responseBody", labelKey: "webview.context.copyResponseBody", fallback: "复制响应体", scope: "single" },
-  { id: "divider-copy-export", type: "divider", scope: "all" },
+  { id: "divider-copy-save", type: "divider", scope: "single" },
+  { id: "saveRequestBody", type: "saveBody", side: "request", labelKey: "webview.context.saveRequestBody", fallback: "将请求体保存为文件", scope: "single" },
+  { id: "saveResponseBody", type: "saveBody", side: "response", labelKey: "webview.context.saveResponseBody", fallback: "将响应体保存为文件", scope: "single" },
+  { id: "divider-save-export", type: "divider", scope: "all" },
   { id: "exportJson", type: "export", format: "json", labelKey: "webview.context.exportJson", fallback: "导出为 JSON", scope: "all" },
   { id: "exportHar", type: "export", format: "har", labelKey: "webview.context.exportHar", fallback: "导出为 HAR", scope: "all" },
+];
+
+const DETAIL_SELECTION_SEARCH_MAX_LENGTH = 200;
+const DETAIL_CONTEXT_ACTIONS = {
+  request: [
+    { id: "copySelection", type: "copySelection", labelKey: "webview.context.copySelection", fallback: "复制" },
+    { id: "copyRequestHeaders", type: "copyFlow", copyType: "requestHeaders", labelKey: "webview.context.copyRequestHeaders", fallback: "复制请求头" },
+    { id: "copyRequestBody", type: "copyFlow", copyType: "requestBody", labelKey: "webview.context.copyRequestBody", fallback: "复制请求体" },
+    { id: "copyCurl", type: "copyFlow", copyType: "curl", labelKey: "webview.context.copyCurl", fallback: "复制为 cURL" },
+    { id: "divider-copy-search", type: "divider" },
+    { id: "searchSelection", type: "searchSelection", labelKey: "webview.context.searchSelection", fallback: "搜索选中内容" },
+    { id: "divider-search-save", type: "divider" },
+    { id: "saveRequestBody", type: "saveBody", side: "request", labelKey: "webview.context.saveRequestBody", fallback: "将请求体保存为文件" },
+  ],
+  response: [
+    { id: "copySelection", type: "copySelection", labelKey: "webview.context.copySelection", fallback: "复制" },
+    { id: "copyResponseHeaders", type: "copyFlow", copyType: "responseHeaders", labelKey: "webview.context.copyResponseHeaders", fallback: "复制响应头" },
+    { id: "copyResponseBody", type: "copyFlow", copyType: "responseBody", labelKey: "webview.context.copyResponseBody", fallback: "复制响应体" },
+    { id: "divider-copy-search", type: "divider" },
+    { id: "searchSelection", type: "searchSelection", labelKey: "webview.context.searchSelection", fallback: "搜索选中内容" },
+    { id: "divider-search-save", type: "divider" },
+    { id: "saveResponseBody", type: "saveBody", side: "response", labelKey: "webview.context.saveResponseBody", fallback: "将响应体保存为文件" },
+  ],
+};
+
+const IMAGE_CONTEXT_ACTIONS = [
+  { id: "copyImage", type: "copyImage", labelKey: "webview.context.copyImage", fallback: "复制图片" },
+  { id: "copyImageUrl", type: "copyImageUrl", labelKey: "webview.context.copyImageUrl", fallback: "复制图片 URL" },
 ];
 
 function getSelectedVisibleFlowIds() {
@@ -1339,6 +1374,28 @@ function closeFlowContextMenu(options = {}) {
   }
 }
 
+function closeDetailContextMenu() {
+  if (detailContextMenuEl) {
+    detailContextMenuEl.remove();
+    detailContextMenuEl = null;
+  }
+  detailContextSide = null;
+  detailContextSelectionText = "";
+}
+
+function closeImageContextMenu() {
+  if (imageContextMenuEl) {
+    imageContextMenuEl.remove();
+    imageContextMenuEl = null;
+  }
+}
+
+function closeAllContextMenus(options = {}) {
+  closeFlowContextMenu(options);
+  closeDetailContextMenu();
+  closeImageContextMenu();
+}
+
 function getFlowContextActions(count) {
   return FLOW_CONTEXT_ACTIONS.filter((action) => action.scope !== "single" || count === 1);
 }
@@ -1352,6 +1409,156 @@ function positionFlowContextMenu(menu, x, y) {
   const top = Math.max(margin, Math.min(y, window.innerHeight - rect.height - margin));
   menu.style.left = `${left}px`;
   menu.style.top = `${top}px`;
+}
+
+function getDetailContextSide(target) {
+  if (!target) return null;
+  if (target.closest("#reqSectionScroll")) return "request";
+  if (target.closest("#resSectionScroll")) return "response";
+  return null;
+}
+
+function getImageRenderContextTarget(target) {
+  const render = target?.closest?.("#resBodyRender");
+  if (!render || render.style.display === "none") return null;
+  const img = target.closest("img.secmp-render-image");
+  if (!img) return null;
+  const ct = String(currentDetailFlow?.content_type || "").toLowerCase();
+  return ct.startsWith("image/") ? img : null;
+}
+
+function getDetailSection(side) {
+  return side === "request" ? $("reqSectionScroll") : $("resSectionScroll");
+}
+
+function getDetailSelectionText(side) {
+  const selection = window.getSelection ? window.getSelection() : null;
+  if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return "";
+  const section = getDetailSection(side);
+  if (!section) return "";
+  let touchesSection = false;
+  for (let i = 0; i < selection.rangeCount; i += 1) {
+    const range = selection.getRangeAt(i);
+    if (section.contains(range.commonAncestorContainer)) {
+      touchesSection = true;
+      break;
+    }
+  }
+  return touchesSection ? selection.toString() : "";
+}
+
+async function copyTextToClipboard(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch (_) {
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.style.position = "fixed";
+    textarea.style.left = "-9999px";
+    textarea.style.top = "0";
+    document.body.appendChild(textarea);
+    textarea.focus();
+    textarea.select();
+    try {
+      document.execCommand("copy");
+      return true;
+    } finally {
+      document.body.removeChild(textarea);
+    }
+  }
+}
+
+async function copyDetailSelection(side, selectedText = "") {
+  const text = selectedText || detailContextSelectionText || getDetailSelectionText(side);
+  if (!text) {
+    footerStatus.textContent = t("webview.detail.noSelection");
+    return;
+  }
+  await copyTextToClipboard(text);
+  footerStatus.textContent = t("webview.detail.selectionCopied");
+}
+
+async function searchDetailSelection(side, selectedText = "") {
+  const text = (selectedText || detailContextSelectionText || getDetailSelectionText(side)).trim();
+  if (!text) {
+    footerStatus.textContent = t("webview.detail.noSelection");
+    return;
+  }
+  if (text.length > DETAIL_SELECTION_SEARCH_MAX_LENGTH) {
+    footerStatus.textContent = t("webview.detail.selectionTooLong", { limit: DETAIL_SELECTION_SEARCH_MAX_LENGTH });
+    return;
+  }
+  setSearchRegexEnabled(false);
+  $("detailSearchInput").value = text;
+  $("detailSearchInput").focus();
+  await performSearch(text);
+  if (_searchMatches.length > 0) navigateSearch(true);
+}
+
+function base64ToBlob(base64, mimeType) {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return new Blob([bytes], { type: mimeType || "image/png" });
+}
+
+function notifyWarning(message) {
+  footerStatus.textContent = message;
+  vscode.postMessage({ command: "showWarningMessage", message });
+}
+
+function imageDataUrlToPngBlob(dataUrl) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const canvas = document.createElement("canvas");
+        canvas.width = img.naturalWidth || img.width;
+        canvas.height = img.naturalHeight || img.height;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) {
+          reject(new Error("canvas unavailable"));
+          return;
+        }
+        ctx.drawImage(img, 0, 0);
+        canvas.toBlob((blob) => {
+          if (blob) resolve(blob);
+          else reject(new Error("canvas conversion failed"));
+        }, "image/png");
+      } catch (err) {
+        reject(err);
+      }
+    };
+    img.onerror = () => reject(new Error("image decode failed"));
+    img.src = dataUrl;
+  });
+}
+
+async function copyRenderedImage() {
+  const base64 = currentDetailFlow?.res_body_base64 || "";
+  const mimeType = String(currentDetailFlow?.content_type || "image/png").toLowerCase();
+  const ClipboardItemCtor = window.ClipboardItem || globalThis.ClipboardItem;
+  if (!base64 || !mimeType.startsWith("image/") || !ClipboardItemCtor || !navigator.clipboard?.write) {
+    notifyWarning(t("webview.detail.copyImageUnsupported"));
+    return;
+  }
+  footerStatus.textContent = t("webview.detail.copyingImage");
+  try {
+    const dataUrl = `data:${mimeType};base64,${base64}`;
+    const pngBlob = await imageDataUrlToPngBlob(dataUrl).catch(() => base64ToBlob(base64, mimeType));
+    await Promise.race([
+      navigator.clipboard.write([
+        new ClipboardItemCtor({ [pngBlob.type || "image/png"]: pngBlob }),
+      ]),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("clipboard write timed out")), 2500)),
+    ]);
+    footerStatus.textContent = t("webview.detail.imageCopied");
+  } catch (err) {
+    notifyWarning(t("webview.detail.copyImageFailed", { message: err?.message || "unknown" }));
+  }
 }
 
 function showFlowContextMenu(x, y) {
@@ -1397,6 +1604,12 @@ function showFlowContextMenu(x, y) {
           flowIds: currentIds,
           format: action.format,
         });
+      } else if (action.type === "saveBody") {
+        vscode.postMessage({
+          command: "saveFlowBody",
+          flowId: currentIds[0],
+          side: action.side,
+        });
       }
     });
     menu.appendChild(button);
@@ -1406,6 +1619,103 @@ function showFlowContextMenu(x, y) {
   menu.addEventListener("click", (event) => event.stopPropagation());
   document.body.appendChild(menu);
   flowContextMenuEl = menu;
+  positionFlowContextMenu(menu, x, y);
+}
+
+function showDetailContextMenu(side, x, y) {
+  closeAllContextMenus({ render: false });
+  if (!currentDetailFlow?.id) return;
+  detailContextSide = side;
+  detailContextSelectionText = getDetailSelectionText(side);
+
+  const menu = document.createElement("div");
+  menu.className = "flow-context-menu detail-context-menu";
+  menu.setAttribute("role", "menu");
+  menu.setAttribute("aria-label", t("webview.context.detailMenuLabel", {}, "详情操作"));
+
+  for (const action of DETAIL_CONTEXT_ACTIONS[side] || []) {
+    if (action.type === "divider") {
+      const divider = document.createElement("div");
+      divider.className = "flow-context-menu-divider";
+      menu.appendChild(divider);
+      continue;
+    }
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "flow-context-menu-item";
+    button.setAttribute("role", "menuitem");
+    button.dataset.actionId = action.id;
+    button.textContent = t(action.labelKey, {}, action.fallback);
+    button.addEventListener("click", async (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const flowId = currentDetailFlow?.id;
+      const activeSide = detailContextSide || side;
+      const selectedText = detailContextSelectionText;
+      closeDetailContextMenu();
+      if (!flowId) return;
+      if (action.type === "copySelection") {
+        await copyDetailSelection(activeSide, selectedText);
+      } else if (action.type === "searchSelection") {
+        await searchDetailSelection(activeSide, selectedText);
+      } else if (action.type === "copyFlow") {
+        vscode.postMessage({
+          command: "copyFlows",
+          flowIds: [flowId],
+          copyType: action.copyType,
+        });
+      } else if (action.type === "saveBody") {
+        vscode.postMessage({
+          command: "saveFlowBody",
+          flowId,
+          side: action.side,
+        });
+      }
+    });
+    menu.appendChild(button);
+  }
+
+  menu.addEventListener("contextmenu", (event) => event.preventDefault());
+  menu.addEventListener("click", (event) => event.stopPropagation());
+  document.body.appendChild(menu);
+  detailContextMenuEl = menu;
+  positionFlowContextMenu(menu, x, y);
+}
+
+function showImageContextMenu(x, y) {
+  closeAllContextMenus({ render: false });
+  if (!currentDetailFlow?.id) return;
+
+  const menu = document.createElement("div");
+  menu.className = "flow-context-menu image-context-menu";
+  menu.setAttribute("role", "menu");
+  menu.setAttribute("aria-label", t("webview.context.imageMenuLabel", {}, "图片操作"));
+
+  for (const action of IMAGE_CONTEXT_ACTIONS) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "flow-context-menu-item";
+    button.setAttribute("role", "menuitem");
+    button.dataset.actionId = action.id;
+    button.textContent = t(action.labelKey, {}, action.fallback);
+    button.addEventListener("click", async (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      closeImageContextMenu();
+      if (action.type === "copyImage") {
+        await copyRenderedImage();
+      } else if (action.type === "copyImageUrl") {
+        await copyTextToClipboard(currentDetailFlow?.url || "");
+        footerStatus.textContent = t("webview.detail.imageUrlCopied");
+      }
+    });
+    menu.appendChild(button);
+  }
+
+  menu.addEventListener("contextmenu", (event) => event.preventDefault());
+  menu.addEventListener("click", (event) => event.stopPropagation());
+  document.body.appendChild(menu);
+  imageContextMenuEl = menu;
   positionFlowContextMenu(menu, x, y);
 }
 
@@ -1433,18 +1743,38 @@ flowTableBody.addEventListener("contextmenu", (event) => {
 });
 
 document.addEventListener("click", (event) => {
-  if (!flowContextMenuEl) return;
-  if (flowContextMenuEl.contains(event.target)) return;
-  closeFlowContextMenu();
+  if (flowContextMenuEl?.contains(event.target) ||
+      detailContextMenuEl?.contains(event.target) ||
+      imageContextMenuEl?.contains(event.target)) return;
+  if (flowContextMenuEl || detailContextMenuEl || imageContextMenuEl) closeAllContextMenus();
 });
 
 document.addEventListener("contextmenu", (event) => {
   if (event.target.closest(".flow-context-menu")) return;
   const row = event.target.closest("tr[data-id]");
   if (row && flowTableBody.contains(row)) return;
+  const image = getImageRenderContextTarget(event.target);
+  if (image) return;
+  const side = getDetailContextSide(event.target);
+  if (side) return;
   event.preventDefault();
-  closeFlowContextMenu();
+  closeAllContextMenus();
 }, true);
+
+document.addEventListener("contextmenu", (event) => {
+  const image = getImageRenderContextTarget(event.target);
+  if (image) {
+    event.preventDefault();
+    event.stopPropagation();
+    showImageContextMenu(event.clientX, event.clientY);
+    return;
+  }
+  const side = getDetailContextSide(event.target);
+  if (!side) return;
+  event.preventDefault();
+  event.stopPropagation();
+  showDetailContextMenu(side, event.clientX, event.clientY);
+});
 
 function selectSingleFlow(flowId) {
   selectedFlowIds = new Set([flowId]);
@@ -2290,6 +2620,8 @@ function updateBodyNotice(side, displayInfo) {
 }
 
 function renderDetail(flow, options = {}) {
+  closeDetailContextMenu();
+  closeImageContextMenu();
   const bodiesPending = !!options.bodiesPending;
   $("detailPlaceholder").style.display = "none";
   $("detailContent").style.display = "flex";
@@ -2485,6 +2817,7 @@ function renderRenderView(flow, body, base64) {
   if (ct.startsWith("image/")) {
     if (base64) {
       const img = document.createElement("img");
+      img.className = "secmp-render-image";
       img.src = `data:${ct};base64,${base64}`;
       img.style.cssText = "max-width:100%;display:block;";
       img.onerror = () => {
@@ -3730,9 +4063,9 @@ function scrollFlowRowIntoView(flowId) {
 }
 
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && flowContextMenuEl) {
+  if (e.key === "Escape" && (flowContextMenuEl || detailContextMenuEl || imageContextMenuEl)) {
     e.preventDefault();
-    closeFlowContextMenu();
+    closeAllContextMenus();
     return;
   }
 
@@ -3845,7 +4178,7 @@ updateFilterUi();
 
 // Recalculate table width and wrapped line numbers when container resizes
 window.addEventListener("resize", () => {
-  closeFlowContextMenu();
+  closeAllContextMenus();
   updateTableWidth();
   updateAllLineNumbers();
   scheduleFlowListRender();
@@ -3853,10 +4186,18 @@ window.addEventListener("resize", () => {
 
 if (flowTableWrapper) {
   flowTableWrapper.addEventListener("scroll", () => {
-    closeFlowContextMenu();
+    closeAllContextMenus();
     scheduleFlowListRender(true);
   }, { passive: true });
 }
+
+[$("reqSectionScroll"), $("resSectionScroll")].forEach((scrollEl) => {
+  if (!scrollEl) return;
+  scrollEl.addEventListener("scroll", () => {
+    closeDetailContextMenu();
+    closeImageContextMenu();
+  }, { passive: true });
+});
 
 // Request initial status
 vscode.postMessage({ command: "getStatus" });
