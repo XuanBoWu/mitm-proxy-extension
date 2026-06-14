@@ -6,6 +6,15 @@ All notable changes to SecMP are documented in this file.
 
 - No unreleased changes.
 
+## 0.3.1 - 2026-06-15
+
+### 采集网络绑定
+
+- 启动代理时将 Webview 选择的采集网络同时用于代理监听地址和 mitmproxy 后向出口，runtime 通过 `--connect-addr` 在 `server_connect` 阶段绑定连接目标服务器时使用的本地源地址。
+- 请求列表 IP 列 tooltip 增加服务端 IP、后向出口、代理监听地址和 `mitmproxy server_conn.peername` 来源说明，方便判断 IP 归属地数据对应的出口条件。
+- 请求列表右键菜单新增“复制 IP”，位于“复制 Host”下方并支持多选。
+- 将 `secmp.runtimeVersion` 更新为 `0.3.1`，用于重发支持采集网络绑定参数的 Windows/macOS runtime 包。
+
 ## 0.3.0 - 2026-06-14
 
 ### 修复 body 可信度（列表有 size 但详情显示 (empty)）

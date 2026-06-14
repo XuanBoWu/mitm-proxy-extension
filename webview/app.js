@@ -387,6 +387,7 @@ window.addEventListener("message", (event) => {
       proxyRunning = msg.proxyRunning;
       proxyPhase = msg.proxyPhase || (msg.proxyRunning ? "running" : "stopped");
       applyIpLocationConfig(msg.ipLocationEnabled);
+      syncCaptureNetworkSelection(msg.captureNetwork);
       if (Number.isFinite(Number(msg.proxyPort)) && Number(msg.proxyPort) > 0) {
         currentProxyPort = Number(msg.proxyPort);
         $("proxyPort").value = String(currentProxyPort);
@@ -415,6 +416,7 @@ window.addEventListener("message", (event) => {
     case "proxyStatus":
       proxyRunning = msg.running;
       proxyPhase = msg.phase || (msg.running ? "running" : "stopped");
+      syncCaptureNetworkSelection(msg.captureNetwork);
       if (Number.isFinite(Number(msg.port)) && Number(msg.port) > 0) {
         currentProxyPort = Number(msg.port);
         if (!proxyPortEditing || proxyPhase === "running") {
@@ -555,6 +557,8 @@ function updateProxyPortControls() {
   $("stopProxyBtn").style.display = proxyRunning ? "block" : "none";
   setProxyControlsDisabled(transitioning);
   $("proxyPort").disabled = transitioning || (proxyRunning && !proxyPortEditing);
+  $("interfaceSelect").disabled = transitioning || proxyRunning;
+  $("refreshInterfaceBtn").disabled = transitioning || proxyRunning;
 }
 
 function updateProxyIndicator() {
@@ -1386,6 +1390,7 @@ flowTableBody.addEventListener("click", (event) => {
 const FLOW_CONTEXT_ACTIONS = [
   { id: "copyUrl", type: "copy", copyType: "url", labelKey: "webview.context.copyUrl", fallback: "复制 URL", scope: "all" },
   { id: "copyHost", type: "copy", copyType: "host", labelKey: "webview.context.copyHost", fallback: "复制 Host", scope: "all" },
+  { id: "copyIp", type: "copy", copyType: "ip", labelKey: "webview.context.copyIp", fallback: "复制 IP", scope: "all" },
   { id: "copySummary", type: "copy", copyType: "summary", labelKey: "webview.context.copySummary", fallback: "复制请求摘要", scope: "all" },
   { id: "copyRequestHeaders", type: "copy", copyType: "requestHeaders", labelKey: "webview.context.copyRequestHeaders", fallback: "复制请求头", scope: "all" },
   { id: "copyResponseHeaders", type: "copy", copyType: "responseHeaders", labelKey: "webview.context.copyResponseHeaders", fallback: "复制响应头", scope: "all" },
@@ -2028,6 +2033,24 @@ function getIpLocationTitle(flow) {
   return location.error || location.label || "";
 }
 
+function getServerIpTitle(flow) {
+  const serverIp = flow.server_ip || "-";
+  const networkLabel = flow.capture_network_name
+    ? `${flow.capture_network_name} - ${flow.capture_network_ip || "-"}`
+    : (flow.capture_network_ip || "-");
+  const listenHost = flow.proxy_listen_host || flow.capture_network_ip || "-";
+  const listenPort = flow.proxy_listen_port || flow.capture_network_port || "";
+  const listenLabel = listenPort ? `${listenHost}:${listenPort}` : listenHost;
+  const outbound = flow.proxy_connect_addr || flow.capture_network_ip || "-";
+  return [
+    `${t("webview.ipTooltip.serverIp")}: ${serverIp}`,
+    `${t("webview.ipTooltip.outbound")}: ${networkLabel} (${outbound})`,
+    `${t("webview.ipTooltip.listen")}: ${listenLabel}`,
+    `${t("webview.ipTooltip.source")}: mitmproxy server_conn.peername`,
+    `${t("webview.ipTooltip.note")}`,
+  ].join("\n");
+}
+
 function renderCell(col, flow, rowNum) {
   switch (col) {
     case "num":
@@ -2059,7 +2082,7 @@ function renderCell(col, flow, rowNum) {
     case "mime":
       return `<td class="col-mime"><span class="mime-tag" title="${escapeHtml(flow.content_type || '')}">${mimeShort(flow)}</span></td>`;
     case "ip":
-      return `<td class="col-ip" title="${escapeHtml(flow.server_ip)}">${escapeHtml(flow.server_ip || '-')}</td>`;
+      return `<td class="col-ip" title="${escapeHtml(getServerIpTitle(flow))}">${escapeHtml(flow.server_ip || '-')}</td>`;
     case "ipLocation":
       return `<td class="col-ipLocation" title="${escapeHtml(getIpLocationTitle(flow))}">${escapeHtml(getIpLocationLabel(flow))}</td>`;
     case "port":
@@ -3583,8 +3606,8 @@ $("pushCertBtn").addEventListener("click", () => {
 });
 
 $("startProxyBtn").addEventListener("click", () => {
-  const ip = getSelectedInterface();
-  if (availableInterfaces.length > 1 && !ip) {
+  const network = getSelectedInterface();
+  if (availableInterfaces.length > 1 && !network) {
     showProxySetupStatus("error", t("webview.interfaces.needSelect"));
     return;
   }
@@ -3592,7 +3615,7 @@ $("startProxyBtn").addEventListener("click", () => {
   proxyPhase = "starting";
   updateProxyIndicator();
   footerStatus.textContent = t("webview.proxy.starting", { port });
-  vscode.postMessage({ command: "startProxy", port: port });
+  vscode.postMessage({ command: "startProxy", port: port, network });
 });
 
 $("stopProxyBtn").addEventListener("click", () => {
@@ -3618,6 +3641,11 @@ $("cancelProxyPortBtn").addEventListener("click", () => {
 });
 
 $("applyProxyPortBtn").addEventListener("click", () => {
+  const network = getSelectedInterface();
+  if (availableInterfaces.length > 1 && !network) {
+    showProxySetupStatus("error", t("webview.interfaces.needSelect"));
+    return;
+  }
   const nextPort = getProxyPortInputValue();
   if (nextPort === currentProxyPort) {
     proxyPortEditing = false;
@@ -3630,17 +3658,17 @@ $("applyProxyPortBtn").addEventListener("click", () => {
   $("proxyPort").value = String(nextPort);
   updateProxyIndicator();
   footerStatus.textContent = t("webview.proxy.restarting", { port: nextPort });
-  vscode.postMessage({ command: "restartProxy", port: nextPort });
+  vscode.postMessage({ command: "restartProxy", port: nextPort, network });
 });
 
 $("setDeviceProxyBtn").addEventListener("click", () => {
-  const ip = getSelectedInterface();
-  if (availableInterfaces.length > 1 && !ip) {
+  const network = getSelectedInterface();
+  if (availableInterfaces.length > 1 && !network) {
     showProxySetupStatus("error", t("webview.interfaces.needSelect"));
     return;
   }
   const port = getProxyPortInputValue();
-  vscode.postMessage({ command: "setProxy", port: port, ip: ip });
+  vscode.postMessage({ command: "setProxy", port: port, ip: network?.ip || "" });
 });
 
 $("refreshInterfaceBtn").addEventListener("click", () => {
@@ -3761,14 +3789,26 @@ function updateInterfaceSelect(interfaces) {
 }
 
 function getSelectedInterface() {
-  if (availableInterfaces.length === 1) return availableInterfaces[0].ip;
+  if (availableInterfaces.length === 1) return availableInterfaces[0];
   const sel = $("interfaceSelect");
   const val = sel ? sel.value : "";
   if (val) {
     selectedInterface = val;
     localStorage.setItem("secmp-selected-interface", val);
+    return availableInterfaces.find(iface => iface.ip === val) || { name: "", ip: val };
   }
-  return val || "";
+  return null;
+}
+
+function syncCaptureNetworkSelection(network) {
+  const ip = String(network?.ip || "").trim();
+  if (!ip) return;
+  selectedInterface = ip;
+  localStorage.setItem("secmp-selected-interface", ip);
+  const sel = $("interfaceSelect");
+  if (sel && [...sel.options].some(option => option.value === ip)) {
+    sel.value = ip;
+  }
 }
 
 function needsFilterContent() {

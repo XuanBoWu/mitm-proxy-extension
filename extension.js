@@ -38,6 +38,7 @@ let ipLocationQueue = new Set();
 let ipLocationTimer = null;
 let ipLocationInFlight = false;
 let ipLocationGeneration = 0;
+let activeCaptureNetwork = null;
 
 const TOOLS_DIR = path.join(__dirname, "tools");
 const DEFAULT_RUNTIME_VERSION = "0.1.2";
@@ -1722,6 +1723,9 @@ function recordSessionProxyState(running, options = {}) {
     reason: options.reason || (running ? "proxyStarted" : "proxyStopped"),
     updatedAt: new Date().toISOString(),
   };
+  if (options.captureNetwork || activeCaptureNetwork) {
+    state.captureNetwork = options.captureNetwork || activeCaptureNetwork;
+  }
   try {
     activeSession.setProxyState(state);
     scheduleActiveSessionSync();
@@ -1736,6 +1740,11 @@ function getSessionProxyAutoStartPort(session = activeSession) {
   const port = Number(state.port);
   if (!Number.isInteger(port) || port <= 0 || port > 65535) return 0;
   return port;
+}
+
+function getSessionProxyAutoStartNetwork(session = activeSession) {
+  const state = session?.getProxyState?.();
+  return state?.captureNetwork || null;
 }
 
 function activeSessionHasFlows() {
@@ -2281,6 +2290,12 @@ function transformFlow(f) {
     tls_sni: srv.sni || "",
     tls_alpn: srv.alpn || "",
     server_ip: srv.peername ? srv.peername[0] : "",
+    capture_network_name: activeCaptureNetwork?.name || "",
+    capture_network_ip: activeCaptureNetwork?.ip || "",
+    capture_network_port: activeCaptureNetwork?.port || activeProxyPort || 0,
+    proxy_listen_host: activeCaptureNetwork?.listenHost || "",
+    proxy_listen_port: activeCaptureNetwork?.port || activeProxyPort || 0,
+    proxy_connect_addr: activeCaptureNetwork?.connectAddr || "",
     client_ip: cli.peername ? cli.peername[0] : "",
     content_type: contentType,
     req_size: req.contentLength || 0,
@@ -2703,6 +2718,55 @@ async function getLocalIp() {
   return "127.0.0.1";
 }
 
+function getNetworkInterfaces() {
+  const interfaces = [];
+  const nets = os.networkInterfaces();
+  for (const [name, addrs] of Object.entries(nets)) {
+    for (const addr of addrs) {
+      if (addr.family === "IPv4" && !addr.internal) {
+        interfaces.push({
+          name,
+          ip: addr.address,
+          netmask: addr.netmask || "",
+          mac: addr.mac || "",
+        });
+        break;
+      }
+    }
+  }
+  return interfaces;
+}
+
+function normalizeCaptureNetwork(network, port) {
+  const available = getNetworkInterfaces();
+  const requestedIp = String(network?.ip || network?.interfaceIp || "").trim();
+  const selected = requestedIp
+    ? available.find((iface) => iface.ip === requestedIp)
+    : available[0];
+
+  if (!selected) {
+    return {
+      name: "",
+      ip: "",
+      listenHost: "0.0.0.0",
+      connectAddr: "",
+      port,
+      startedAt: new Date().toISOString(),
+    };
+  }
+
+  return {
+    name: selected.name,
+    ip: selected.ip,
+    netmask: selected.netmask || "",
+    mac: selected.mac || "",
+    listenHost: selected.ip,
+    connectAddr: selected.ip,
+    port,
+    startedAt: new Date().toISOString(),
+  };
+}
+
 async function setDeviceProxy(proxyHost, proxyPort) {
   return new Promise((resolve) => {
     const cmd = `adb shell settings put global http_proxy ${proxyHost}:${proxyPort}`;
@@ -2730,25 +2794,41 @@ async function clearDeviceProxy() {
 
 // ===== Proxy Engine Management =====
 
-async function startProxyEngine(port) {
+async function startProxyEngine(options = {}) {
+  const port = Number(typeof options === "object" ? options.port : options);
   if (proxyProcess) {
     return { success: true, message: t("extension.proxy.alreadyRunning") };
   }
+  if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+    throw new Error(t("extension.input.mustBeNumber"));
+  }
 
   const engine = await getProxyEngineCommand();
+  const captureNetwork = normalizeCaptureNetwork(
+    typeof options === "object" ? options.network : null,
+    port
+  );
 
   return new Promise((resolve, reject) => {
-    log(`Starting proxy engine on port ${port}...`);
+    log(`Starting proxy engine on ${captureNetwork.listenHost}:${port}...`);
 
     // Use a random high port for web UI to avoid conflicts
     const wPort = Math.floor(Math.random() * 1000) + 18080;
 
-    proxyProcess = spawn(engine.command, [
+    const spawnArgs = [
       ...engine.args,
+      "--host", captureNetwork.listenHost,
       "--port", String(port),
       "--web-port", String(wPort),
       "--confdir", certDir,
-    ], {
+    ];
+    if (captureNetwork.connectAddr) {
+      spawnArgs.push("--connect-addr", captureNetwork.connectAddr);
+    }
+
+    activeCaptureNetwork = captureNetwork;
+
+    proxyProcess = spawn(engine.command, spawnArgs, {
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
     });
@@ -2772,7 +2852,11 @@ async function startProxyEngine(port) {
       }
       activeProxyPort = Number(port);
       startFlowPolling();
-      recordSessionProxyState(true, { port: activeProxyPort, reason: "proxyStarted" });
+      recordSessionProxyState(true, {
+        port: activeProxyPort,
+        reason: "proxyStarted",
+        captureNetwork: activeCaptureNetwork,
+      });
       resolve({ success: true, message: t("extension.proxy.started", { port }), webPort: wPort });
     }
 
@@ -2811,6 +2895,7 @@ async function startProxyEngine(port) {
     proxyProcess.on("error", (err) => {
       log(`Proxy engine error: ${err.message}`);
       proxyProcess = null;
+      activeCaptureNetwork = null;
       stopFlowPolling();
       if (startupTimer) {
         clearTimeout(startupTimer);
@@ -2823,14 +2908,20 @@ async function startProxyEngine(port) {
 
     proxyProcess.on("close", (code) => {
       log(`Proxy engine exited with code ${code}`);
+      const stoppedCaptureNetwork = activeCaptureNetwork;
       proxyProcess = null;
       stopFlowPolling();
       webPort = null;
       authToken = null;
+      activeCaptureNetwork = null;
       if (suppressNextProxyStoppedState) {
         suppressNextProxyStoppedState = false;
       } else {
-        recordSessionProxyState(false, { port: activeProxyPort || port, reason: "proxyExited" });
+        recordSessionProxyState(false, {
+          port: activeProxyPort || port,
+          reason: "proxyExited",
+          captureNetwork: stoppedCaptureNetwork,
+        });
       }
       activeProxyPort = null;
       if (startupTimer) {
@@ -2914,6 +3005,7 @@ async function stopProxyEngine(options = {}) {
         webPort = null;
         authToken = null;
         activeProxyPort = null;
+        activeCaptureNetwork = null;
       }
       flushActiveSession();
       resolve({ success: true, message: t("extension.proxy.stopped") });
@@ -2941,17 +3033,19 @@ function postProxyStatus(status = {}) {
     command: "proxyStatus",
     running: !!proxyProcess,
     port: activeProxyPort,
+    captureNetwork: activeCaptureNetwork,
     phase: proxyProcess ? "running" : "stopped",
     ...status,
   });
 }
 
-async function restartProxyEngine(port) {
+async function restartProxyEngine(port, network = null) {
   const nextPort = Number(port);
   if (!Number.isInteger(nextPort) || nextPort <= 0 || nextPort > 65535) {
     throw new Error(t("extension.input.mustBeNumber"));
   }
   const previousPort = activeProxyPort;
+  const previousNetwork = activeCaptureNetwork;
   postProxyStatus({
     running: true,
     port: previousPort,
@@ -2968,7 +3062,10 @@ async function restartProxyEngine(port) {
     });
   }
   try {
-    const result = await startProxyEngine(nextPort);
+    const result = await startProxyEngine({
+      port: nextPort,
+      network: network || previousNetwork,
+    });
     postProxyStatus({
       running: true,
       port: nextPort,
@@ -2977,7 +3074,11 @@ async function restartProxyEngine(port) {
     });
     return result;
   } catch (err) {
-    recordSessionProxyState(false, { port: nextPort, reason: "proxyRestartFailed" });
+    recordSessionProxyState(false, {
+      port: nextPort,
+      reason: "proxyRestartFailed",
+      captureNetwork: network || previousNetwork,
+    });
     postProxyStatus({
       running: false,
       port: previousPort || nextPort,
@@ -3046,6 +3147,7 @@ async function createPanel() {
           device: deviceInfo,
           flowCount: capturedFlows.length,
           ipLocationEnabled: isIpLocationEnabled(),
+          captureNetwork: activeCaptureNetwork,
         });
         if (capturedFlows.length > 0) {
           panel.webview.postMessage({
@@ -3221,10 +3323,14 @@ async function createPanel() {
       case "startProxy": {
         const port = message.port || 8080;
         try {
-          const result = await startProxyEngine(port);
+          const result = await startProxyEngine({
+            port,
+            network: message.network,
+          });
           postProxyStatus({
             running: true,
             port: port,
+            captureNetwork: activeCaptureNetwork,
             phase: "running",
             message: result.message,
           });
@@ -3254,7 +3360,7 @@ async function createPanel() {
       case "restartProxy": {
         const port = message.port || 8080;
         try {
-          await restartProxyEngine(port);
+          await restartProxyEngine(port, message.network);
         } catch (_) {
           // restartProxyEngine already posts the user-visible failure state.
         }
@@ -3263,19 +3369,9 @@ async function createPanel() {
       }
 
       case "getInterfaces": {
-        const interfaces = [];
-        const nets = os.networkInterfaces();
-        for (const [name, addrs] of Object.entries(nets)) {
-          for (const addr of addrs) {
-            if (addr.family === "IPv4" && !addr.internal) {
-              interfaces.push({ name, ip: addr.address });
-              break;
-            }
-          }
-        }
         panel.webview.postMessage({
           command: "interfacesList",
-          interfaces,
+          interfaces: getNetworkInterfaces(),
         });
         break;
       }
@@ -4340,6 +4436,8 @@ async function buildCopyText(flows, copyType) {
       return flows.map((flow) => flow.url || "").join("\n");
     case "host":
       return flows.map((flow) => flow.host || "").join("\n");
+    case "ip":
+      return flows.map((flow) => flow.server_ip || "").join("\n");
     case "summary":
       return flows.map(getFlowSummary).join("\n");
     case "requestHeaders":
@@ -4602,7 +4700,10 @@ async function maybeAutoStartProxyForSession() {
   const port = getSessionProxyAutoStartPort(activeSession);
   if (!port || proxyProcess) return;
   try {
-    const result = await startProxyEngine(port);
+    const result = await startProxyEngine({
+      port,
+      network: getSessionProxyAutoStartNetwork(activeSession),
+    });
     postProxyStatus({
       running: true,
       port,
@@ -4769,7 +4870,7 @@ function activate(context) {
     if (!port) return;
 
     try {
-      const result = await startProxyEngine(parseInt(port));
+      const result = await startProxyEngine({ port: parseInt(port) });
       vscode.window.showInformationMessage(result.message);
     } catch (err) {
       vscode.window.showErrorMessage(err.message);
