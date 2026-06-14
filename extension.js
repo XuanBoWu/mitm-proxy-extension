@@ -6,6 +6,7 @@ const os = require("os");
 const http = require("http");
 const https = require("https");
 const crypto = require("crypto");
+const net = require("net");
 const { CaptureSession } = require("./secmp_session");
 
 let proxyProcess = null;
@@ -32,6 +33,11 @@ let sidebarProvider = null;
 let activeProxyPort = null;
 let suppressNextProxyStoppedState = false;
 let suppressNextProxyStoppedStatus = false;
+let ipLocationCache = new Map();
+let ipLocationQueue = new Set();
+let ipLocationTimer = null;
+let ipLocationInFlight = false;
+let ipLocationGeneration = 0;
 
 const TOOLS_DIR = path.join(__dirname, "tools");
 const DEFAULT_RUNTIME_VERSION = "0.1.2";
@@ -64,6 +70,9 @@ const BODY_AUTOFETCH_MAX_BYTES = 8 * 1024 * 1024;
 const BODY_DRAIN_CONCURRENCY = 6;
 const COPY_BODY_CONFIRM_BYTES = 1 * 1024 * 1024;
 const COPY_BODY_MAX_BYTES = BODY_AUTOFETCH_MAX_BYTES;
+const IP_LOCATION_BATCH_SIZE = 100;
+const IP_LOCATION_DEBOUNCE_MS = 600;
+const IP_LOCATION_REQUEST_TIMEOUT_MS = 10000;
 const DEFAULT_RUNTIME_SOURCES = {
   "0.1.0:win32:x64": {
     url: "https://github.com/XuanBoWu/mitm-proxy-extension/releases/download/v0.1.0/secmp-runtime-win32-x64-0.1.0.zip",
@@ -183,6 +192,20 @@ function getUpdateConfig() {
       ? intervalHours
       : DEFAULT_UPDATE_CHECK_INTERVAL_HOURS,
   };
+}
+
+function getIpLocationConfig() {
+  const config = vscode.workspace.getConfiguration("secmp");
+  const endpoint = String(config.get("ipLocation.endpoint", "") || config.get("ipLocationEndpoint", "") || "").trim();
+  return {
+    enabled: Boolean(config.get("ipLocation.enabled", config.get("ipLocationEnabled", false))),
+    endpoint,
+  };
+}
+
+function isIpLocationEnabled() {
+  const config = getIpLocationConfig();
+  return !!(config.enabled && config.endpoint);
 }
 
 function isPackagedRuntimePlatform() {
@@ -1882,7 +1905,301 @@ function toListFlow(flow) {
   delete copy.req_body_base64;
   delete copy.res_body;
   delete copy.res_body_base64;
+  delete copy.ip_location;
+  delete copy.ip_location_detail;
   return copy;
+}
+
+function stripRuntimeOnlyFlowFields(flow) {
+  const copy = { ...flow };
+  delete copy.ip_location;
+  delete copy.ip_location_detail;
+  return copy;
+}
+
+// ===== IP location lookup (runtime-only, never persisted) =====
+
+function normalizeIpForLocation(value) {
+  let ip = String(value || "").trim();
+  if (!ip || ip.toLowerCase() === "unknown") return "";
+  if (ip.startsWith("[") && ip.endsWith("]")) ip = ip.slice(1, -1);
+  if (ip.startsWith("::ffff:")) ip = ip.slice(7);
+  return ip;
+}
+
+function isLocalOrSpecialIp(ip) {
+  const normalized = normalizeIpForLocation(ip).toLowerCase();
+  const family = net.isIP(normalized);
+  if (!family) return true;
+
+  if (family === 4) {
+    const parts = normalized.split(".").map((part) => Number(part));
+    if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) {
+      return true;
+    }
+    const [a, b, c, d] = parts;
+    return (
+      a === 10 ||
+      a === 127 ||
+      (a === 172 && b >= 16 && b <= 31) ||
+      (a === 192 && b === 168) ||
+      (a === 169 && b === 254) ||
+      (a >= 224 && a <= 239) ||
+      (a === 255 && b === 255 && c === 255 && d === 255)
+    );
+  }
+
+  return (
+    normalized === "::1" ||
+    normalized.startsWith("fe80:") ||
+    normalized.startsWith("fc") ||
+    normalized.startsWith("fd") ||
+    normalized.startsWith("ff")
+  );
+}
+
+function makeIpLocationResult(state, country = "", registeredCountry = "", error = "") {
+  let label = "";
+  if (state === "ready") {
+    label = country || registeredCountry || "-";
+  } else if (state === "local") {
+    label = "Local";
+    country = country || "Local";
+    registeredCountry = registeredCountry || "Local";
+  } else if (state === "loading") {
+    label = t("extension.ipLocation.loading");
+  } else if (state === "failed") {
+    label = t("extension.ipLocation.failed");
+  }
+  return {
+    state,
+    country,
+    registeredCountry,
+    label,
+    error: error || "",
+  };
+}
+
+function getIpLocationPayloadForIp(ip, result = ipLocationCache.get(ip)) {
+  if (!result) return null;
+  return {
+    ip,
+    state: result.state,
+    label: result.label || "",
+    country: result.country || "",
+    registeredCountry: result.registeredCountry || "",
+    error: result.error || "",
+  };
+}
+
+function postIpLocationConfig() {
+  if (!panel) return;
+  panel.webview.postMessage({
+    command: "ipLocationConfig",
+    enabled: isIpLocationEnabled(),
+  });
+}
+
+function postIpLocationReset() {
+  if (!panel) return;
+  panel.webview.postMessage({ command: "ipLocationReset" });
+}
+
+function postIpLocationUpdates(ips) {
+  if (!panel || !isIpLocationEnabled()) return;
+  const locations = [...new Set(ips)]
+    .map((ip) => getIpLocationPayloadForIp(ip))
+    .filter(Boolean);
+  if (locations.length === 0) return;
+  panel.webview.postMessage({
+    command: "ipLocationUpdate",
+    locations,
+  });
+}
+
+function postCachedIpLocations() {
+  if (!panel || !isIpLocationEnabled() || ipLocationCache.size === 0) return;
+  postIpLocationUpdates([...ipLocationCache.keys()]);
+}
+
+function resetIpLocationRuntimeState(options = {}) {
+  if (ipLocationTimer) {
+    clearTimeout(ipLocationTimer);
+    ipLocationTimer = null;
+  }
+  ipLocationQueue.clear();
+  ipLocationCache.clear();
+  ipLocationGeneration += 1;
+  if (options.notify) {
+    postIpLocationReset();
+    postIpLocationConfig();
+  }
+}
+
+function scheduleIpLocationForFlows(flows) {
+  if (!isIpLocationEnabled()) return;
+  const updatedIps = [];
+  for (const flow of flows || []) {
+    const ip = normalizeIpForLocation(flow?.server_ip);
+    if (!ip || ipLocationCache.has(ip)) continue;
+    if (isLocalOrSpecialIp(ip)) {
+      ipLocationCache.set(ip, makeIpLocationResult("local"));
+      updatedIps.push(ip);
+      continue;
+    }
+    ipLocationCache.set(ip, makeIpLocationResult("loading"));
+    ipLocationQueue.add(ip);
+    updatedIps.push(ip);
+  }
+  if (updatedIps.length > 0) {
+    postIpLocationUpdates(updatedIps);
+  }
+  if (ipLocationQueue.size > 0 && !ipLocationTimer) {
+    ipLocationTimer = setTimeout(() => {
+      ipLocationTimer = null;
+      processIpLocationQueue();
+    }, IP_LOCATION_DEBOUNCE_MS);
+  }
+}
+
+function parseIpLocationResponse(body, requestedIps) {
+  if (!body || typeof body !== "object" || !Array.isArray(body.ips)) {
+    throw new Error(t("extension.ipLocation.test.invalidResponse"));
+  }
+  const results = new Map();
+  for (const item of body.ips) {
+    if (!item || typeof item !== "object") continue;
+    for (const [ip, value] of Object.entries(item)) {
+      if (!value || typeof value !== "object") continue;
+      results.set(ip, {
+        country: String(value.country || ""),
+        registeredCountry: String(value.registered_country || ""),
+      });
+    }
+  }
+  return requestedIps.map((ip) => ({
+    ip,
+    ...(results.get(ip) || {}),
+  }));
+}
+
+function requestJson(urlString, body, timeoutMs = IP_LOCATION_REQUEST_TIMEOUT_MS) {
+  return new Promise((resolve, reject) => {
+    let parsed;
+    try {
+      parsed = new URL(urlString);
+    } catch (_) {
+      reject(new Error(t("extension.ipLocation.invalidEndpoint")));
+      return;
+    }
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      reject(new Error(t("extension.ipLocation.invalidEndpoint")));
+      return;
+    }
+
+    const payload = Buffer.from(JSON.stringify(body), "utf8");
+    const transport = parsed.protocol === "https:" ? https : http;
+    const req = transport.request(parsed, {
+      method: "POST",
+      timeout: timeoutMs,
+      headers: {
+        "Content-Type": "application/json",
+        "Content-Length": payload.length,
+      },
+    }, (res) => {
+      const chunks = [];
+      res.on("data", (chunk) => chunks.push(chunk));
+      res.on("end", () => {
+        const text = Buffer.concat(chunks).toString("utf8");
+        if (res.statusCode !== 200) {
+          reject(new Error(t("extension.ipLocation.httpFailed", { status: res.statusCode || 0 })));
+          return;
+        }
+        try {
+          resolve(JSON.parse(text));
+        } catch (_) {
+          reject(new Error(t("extension.ipLocation.test.invalidResponse")));
+        }
+      });
+      res.on("error", reject);
+    });
+    req.on("timeout", () => {
+      req.destroy(new Error(t("extension.ipLocation.timeout")));
+    });
+    req.on("error", reject);
+    req.write(payload);
+    req.end();
+  });
+}
+
+async function queryIpLocationBatch(endpoint, ips) {
+  const body = await requestJson(endpoint, { ips });
+  return parseIpLocationResponse(body, ips);
+}
+
+async function processIpLocationQueue() {
+  if (ipLocationInFlight || !isIpLocationEnabled()) return;
+  const config = getIpLocationConfig();
+  const generation = ipLocationGeneration;
+  ipLocationInFlight = true;
+  try {
+    while (ipLocationQueue.size > 0 && isIpLocationEnabled() && generation === ipLocationGeneration) {
+      const batch = [...ipLocationQueue].slice(0, IP_LOCATION_BATCH_SIZE);
+      for (const ip of batch) ipLocationQueue.delete(ip);
+      try {
+        const results = await queryIpLocationBatch(config.endpoint, batch);
+        if (generation !== ipLocationGeneration || !isIpLocationEnabled()) break;
+        const updatedIps = [];
+        for (const item of results) {
+          if (!item.country && !item.registeredCountry) {
+            ipLocationCache.set(item.ip, makeIpLocationResult("failed"));
+          } else {
+            ipLocationCache.set(
+              item.ip,
+              makeIpLocationResult("ready", item.country, item.registeredCountry)
+            );
+          }
+          updatedIps.push(item.ip);
+        }
+        postIpLocationUpdates(updatedIps);
+      } catch (err) {
+        if (generation !== ipLocationGeneration || !isIpLocationEnabled()) break;
+        const updatedIps = [];
+        for (const ip of batch) {
+          ipLocationCache.set(ip, makeIpLocationResult("failed", "", "", err.message));
+          updatedIps.push(ip);
+        }
+        postIpLocationUpdates(updatedIps);
+      }
+    }
+  } finally {
+    ipLocationInFlight = false;
+    if (ipLocationQueue.size > 0 && isIpLocationEnabled()) {
+      processIpLocationQueue();
+    }
+  }
+}
+
+async function testIpLocationEndpoint() {
+  const config = getIpLocationConfig();
+  if (!config.endpoint) {
+    vscode.window.showWarningMessage(t("extension.ipLocation.test.noEndpoint"));
+    return;
+  }
+  try {
+    const testIp = "8.8.8.8";
+    const results = await queryIpLocationBatch(config.endpoint, [testIp]);
+    const result = results[0] || {};
+    if (!result.country && !result.registeredCountry) {
+      throw new Error(t("extension.ipLocation.test.invalidResponse"));
+    }
+    vscode.window.showInformationMessage(t("extension.ipLocation.test.success", {
+      country: result.country || "-",
+      registeredCountry: result.registeredCountry || "-",
+    }));
+  } catch (err) {
+    vscode.window.showErrorMessage(t("extension.ipLocation.test.failed", { message: err.message }));
+  }
 }
 
 // ===== Flow transformation =====
@@ -2125,6 +2442,7 @@ function handleWebSocketFlowEvent(msg) {
   if (cmd === "reset") {
     resetCapturedFlows();
     resetBodyFetchQueue();
+    resetIpLocationRuntimeState({ notify: true });
     if (activeSession) {
       activeSession.resetFlows();
       scheduleActiveSessionSync();
@@ -2150,6 +2468,7 @@ function handleWebSocketFlowEvent(msg) {
     addCapturedFlow(transformed);
     recordSessionFlows([transformed]);
     enqueueBodyAutoFetch(transformed);
+    scheduleIpLocationForFlows([transformed]);
     if (panel) {
       panel.webview.postMessage({
         command: "addFlows",
@@ -2169,6 +2488,7 @@ function handleWebSocketFlowEvent(msg) {
     if (replaceCapturedFlow(data.id, transformed)) {
       recordSessionFlows([transformed]);
       enqueueBodyAutoFetch(transformed);
+      scheduleIpLocationForFlows([transformed]);
       if (panel) {
         panel.webview.postMessage({
           command: "updateFlows",
@@ -2194,6 +2514,7 @@ async function pollFlows() {
     if (flows.length === 0 && mitmwebHadFlows && capturedFlows.length > 0) {
       resetCapturedFlows();
       resetBodyFetchQueue();
+      resetIpLocationRuntimeState({ notify: true });
       if (activeSession) {
         activeSession.resetFlows();
         scheduleActiveSessionSync();
@@ -2228,6 +2549,7 @@ async function pollFlows() {
       transformedFlows.forEach(addCapturedFlow);
       recordSessionFlows(transformedFlows);
       transformedFlows.forEach(enqueueBodyAutoFetch);
+      scheduleIpLocationForFlows(transformedFlows);
       panel.webview.postMessage({
         command: "addFlows",
         flows: transformedFlows.map(toListFlow),
@@ -2253,6 +2575,7 @@ async function pollFlows() {
         if (replaceCapturedFlow(f.id, transformed)) {
           recordSessionFlows([transformed]);
           enqueueBodyAutoFetch(transformed);
+          scheduleIpLocationForFlows([transformed]);
           updatedFlows.push(transformed);
         }
       }
@@ -2722,6 +3045,7 @@ async function createPanel() {
           proxyPhase: proxyProcess ? "running" : "stopped",
           device: deviceInfo,
           flowCount: capturedFlows.length,
+          ipLocationEnabled: isIpLocationEnabled(),
         });
         if (capturedFlows.length > 0) {
           panel.webview.postMessage({
@@ -2729,7 +3053,10 @@ async function createPanel() {
             flows: capturedFlows.map(toListFlow),
             uiState: activeSession?.getUiState?.() || null,
           });
+          scheduleIpLocationForFlows(capturedFlows);
+          postCachedIpLocations();
         }
+        postIpLocationConfig();
         await postEnvironmentStatus(context);
         break;
 
@@ -3015,6 +3342,7 @@ async function createPanel() {
         }
         resetCapturedFlows();
         resetBodyFetchQueue();
+        resetIpLocationRuntimeState({ notify: true });
         if (activeSession) {
           activeSession.resetFlows();
           scheduleActiveSessionSync();
@@ -4149,7 +4477,7 @@ async function exportJson(options = {}) {
   // Fetch bodies for all flows not yet loaded (parallel with bounded concurrency)
   const fetchResult = await fetchAllFlowBodiesWithProgress(flowsToExport);
 
-  const flowsWithSeq = flowsToExport.map((f) => ({ _num: getFlowOrdinal(f), ...f }));
+  const flowsWithSeq = flowsToExport.map((f) => ({ _num: getFlowOrdinal(f), ...stripRuntimeOnlyFlowFields(f) }));
   fs.writeFileSync(result.fsPath, JSON.stringify(flowsWithSeq, null, 2));
   showExportResult(flowsToExport.length, result.fsPath, fetchResult.failed);
 }
@@ -4187,6 +4515,7 @@ async function newTemporarySession() {
   activeSession = CaptureSession.createTemporary(getSessionCacheDir(), extensionPackage.version);
   writeResumeMarker({ running: false });
   resetCapturedFlows();
+  resetIpLocationRuntimeState({ notify: true });
   knownFlowIds.clear();
   refreshSidebar();
   vscode.window.showInformationMessage(t("extension.session.tempCreated"));
@@ -4213,6 +4542,7 @@ async function newPersistentSession() {
   flushActiveSession();
   rememberSession(activeSession);
   resetCapturedFlows();
+  resetIpLocationRuntimeState({ notify: true });
   knownFlowIds.clear();
   refreshSidebar();
   vscode.window.showInformationMessage(t("extension.session.saved", { path: result.fsPath }));
@@ -4245,6 +4575,7 @@ async function openSessionFile(filePath) {
   rememberSession(activeSession);
   const loadedFlows = markSessionLoadedFlows(activeSession.getFlows({ includeBodies: false }));
   setCapturedFlows(loadedFlows);
+  resetIpLocationRuntimeState({ notify: true });
 
   knownFlowIds.clear();
   for (const f of capturedFlows) {
@@ -4254,9 +4585,11 @@ async function openSessionFile(filePath) {
   if (panel) {
     panel.webview.postMessage({
       command: "sessionLoaded",
-      flows: capturedFlows,
+      flows: capturedFlows.map(toListFlow),
       uiState: activeSession.getUiState(),
     });
+    scheduleIpLocationForFlows(capturedFlows);
+    postCachedIpLocations();
   }
   refreshSidebar();
   vscode.window.showInformationMessage(t("extension.session.loaded", { count: capturedFlows.length }));
@@ -4530,6 +4863,10 @@ function activate(context) {
     await checkForExtensionUpdate(context, { manual: true });
   });
 
+  const testIpLocationEndpointCmd = vscode.commands.registerCommand("secmp.testIpLocationEndpoint", async () => {
+    await testIpLocationEndpoint();
+  });
+
   const exportHarCmd = vscode.commands.registerCommand("secmp.exportHar", () => exportHar());
   const exportJsonCmd = vscode.commands.registerCommand("secmp.exportJson", () => exportJson());
   const languageConfigListener = vscode.workspace.onDidChangeConfiguration((event) => {
@@ -4546,13 +4883,19 @@ function activate(context) {
         fontSize: getConfiguredFontSize(),
       });
     }
+    if (event.affectsConfiguration("secmp.ipLocation") ||
+        event.affectsConfiguration("secmp.ipLocationEnabled") ||
+        event.affectsConfiguration("secmp.ipLocationEndpoint")) {
+      resetIpLocationRuntimeState({ notify: true });
+      scheduleIpLocationForFlows(capturedFlows);
+    }
   });
 
   context.subscriptions.push(
     showPanelCmd, startProxyCmd, stopProxyCmd, pushCertCmd,
     openCapturePanelCmd, newTemporarySessionCmd, newPersistentSessionCmd, openSessionCmd, openRecentSessionCmd,
     revealRecentSessionCmd, removeRecentSessionCmd,
-    setupProxyCmd, clearProxyCmd, cleanRuntimeCacheCmd, checkForUpdatesCmd, exportHarCmd, exportJsonCmd,
+    setupProxyCmd, clearProxyCmd, cleanRuntimeCacheCmd, checkForUpdatesCmd, testIpLocationEndpointCmd, exportHarCmd, exportJsonCmd,
     languageConfigListener,
     sidebarView,
     outputChannel

@@ -139,6 +139,8 @@ let filterBodyMatchedIds = new Set();
 let filterBodyUnsearchedIds = new Set();
 let filterRefreshTimer = null;
 let lastFilterFooterStatus = "";
+let ipLocationEnabled = false;
+let ipLocationByIp = new Map();
 
 // Search state
 let _searchTerm = "";
@@ -157,7 +159,7 @@ let wrapState = { req: true, res: true };
 let detailViewState = { req: "formatted", res: "formatted" };
 
 // Column definitions — sizing: "content" = auto-fit to content, "fixed" = clip at preset width
-const COLUMNS = [
+const BASE_COLUMNS = [
   { id: "num",    title: "#",       width: 40,  sizing: "content", minWidth: 32  },
   { id: "tls",    title: "TLS",     width: 68,  sizing: "content", minWidth: 50  },
   { id: "proto",  title: t("webview.table.protocol", {}, "Protocol"), width: 68,  sizing: "content", minWidth: 52  },
@@ -171,10 +173,65 @@ const COLUMNS = [
   { id: "ip",     title: "IP",      width: 130, sizing: "content", minWidth: 90  },
   { id: "port",   title: t("webview.table.port", {}, "Port"),         width: 52,  sizing: "content", minWidth: 38  },
 ];
+const IP_LOCATION_COLUMN = {
+  id: "ipLocation",
+  title: t("webview.table.ipLocation", {}, "Location"),
+  width: 110,
+  sizing: "content",
+  minWidth: 78,
+};
+let COLUMNS = buildActiveColumns();
 
 // Column order / width persistence keyed by column id
 let colWidths = {};  // { colId: number (px) }
 let colOrder = [];   // ["num", "tls", ...]
+
+function buildActiveColumns() {
+  if (!ipLocationEnabled) return [...BASE_COLUMNS];
+  const columns = [];
+  for (const column of BASE_COLUMNS) {
+    columns.push(column);
+    if (column.id === "ip") columns.push(IP_LOCATION_COLUMN);
+  }
+  return columns;
+}
+
+function reconcileColumnOrder(order, columns = COLUMNS) {
+  const ids = columns.map((col) => col.id);
+  const idSet = new Set(ids);
+  const next = Array.isArray(order)
+    ? order.filter((id) => idSet.has(id))
+    : [];
+  for (const id of ids) {
+    if (next.includes(id)) continue;
+    if (id === "ipLocation") {
+      const ipIndex = next.indexOf("ip");
+      next.splice(ipIndex >= 0 ? ipIndex + 1 : next.length, 0, id);
+    } else {
+      next.push(id);
+    }
+  }
+  return next;
+}
+
+function applyIpLocationConfig(enabled) {
+  const nextEnabled = !!enabled;
+  if (ipLocationEnabled === nextEnabled && COLUMNS.length > 0) return;
+  ipLocationEnabled = nextEnabled;
+  COLUMNS = buildActiveColumns();
+  colOrder = reconcileColumnOrder(colOrder, COLUMNS);
+  for (const col of COLUMNS) {
+    if (!colWidths[col.id]) colWidths[col.id] = col.width;
+  }
+  if (sortState.colId && !COLUMNS.some((col) => col.id === sortState.colId)) {
+    sortState = { colId: null, direction: null };
+  }
+  lastRenderWindow = null;
+  buildColgroup();
+  rebuildTableHeader();
+  invalidateFilterCache();
+  scheduleFlowListRender();
+}
 
 // DOM refs
 const $ = (id) => document.getElementById(id);
@@ -329,6 +386,7 @@ window.addEventListener("message", (event) => {
     case "setStatus":
       proxyRunning = msg.proxyRunning;
       proxyPhase = msg.proxyPhase || (msg.proxyRunning ? "running" : "stopped");
+      applyIpLocationConfig(msg.ipLocationEnabled);
       if (Number.isFinite(Number(msg.proxyPort)) && Number(msg.proxyPort) > 0) {
         currentProxyPort = Number(msg.proxyPort);
         $("proxyPort").value = String(currentProxyPort);
@@ -337,6 +395,22 @@ window.addEventListener("message", (event) => {
       if (msg.flowCount != null) {
         scheduleFlowListRender();
       }
+      break;
+    case "ipLocationConfig":
+      applyIpLocationConfig(msg.enabled);
+      break;
+    case "ipLocationReset":
+      ipLocationByIp = new Map();
+      if (sortState.colId === "ipLocation") invalidateFilterCache();
+      scheduleFlowListRender();
+      break;
+    case "ipLocationUpdate":
+      for (const location of msg.locations || []) {
+        if (!location?.ip) continue;
+        ipLocationByIp.set(location.ip, location);
+      }
+      if (sortState.colId === "ipLocation") invalidateFilterCache();
+      scheduleFlowListRender();
       break;
     case "proxyStatus":
       proxyRunning = msg.running;
@@ -374,6 +448,7 @@ window.addEventListener("message", (event) => {
       break;
     case "flowsCleared":
       flows = [];
+      ipLocationByIp = new Map();
       rebuildFlowIndex();
       nextSeq = 1;
       invalidateFilterCache();
@@ -387,6 +462,7 @@ window.addEventListener("message", (event) => {
       break;
     case "sessionLoaded":
       flows = msg.flows;
+      ipLocationByIp = new Map();
       flows.forEach((f, i) => { if (f._seq == null) f._seq = i + 1; });
       rebuildFlowIndex();
       nextSeq = flows.reduce((max, flow) => Math.max(max, Number(flow._seq) || 0), 0) + 1;
@@ -1932,6 +2008,26 @@ function getProtocolBucket(flow) {
     : "https";
 }
 
+function getIpLocationForFlow(flow) {
+  const ip = String(flow.server_ip || "").trim();
+  return ip ? ipLocationByIp.get(ip) || null : null;
+}
+
+function getIpLocationLabel(flow) {
+  return getIpLocationForFlow(flow)?.label || "-";
+}
+
+function getIpLocationTitle(flow) {
+  const location = getIpLocationForFlow(flow);
+  if (!location) return "";
+  const country = location.country || location.label || "-";
+  const registeredCountry = location.registeredCountry || "-";
+  if (location.state === "ready") {
+    return `${t("webview.table.ipLocation", {}, "Location")}: ${country} / ${registeredCountry}`;
+  }
+  return location.error || location.label || "";
+}
+
 function renderCell(col, flow, rowNum) {
   switch (col) {
     case "num":
@@ -1964,6 +2060,8 @@ function renderCell(col, flow, rowNum) {
       return `<td class="col-mime"><span class="mime-tag" title="${escapeHtml(flow.content_type || '')}">${mimeShort(flow)}</span></td>`;
     case "ip":
       return `<td class="col-ip" title="${escapeHtml(flow.server_ip)}">${escapeHtml(flow.server_ip || '-')}</td>`;
+    case "ipLocation":
+      return `<td class="col-ipLocation" title="${escapeHtml(getIpLocationTitle(flow))}">${escapeHtml(getIpLocationLabel(flow))}</td>`;
     case "port":
       return `<td class="col-port">${flow.port || '-'}</td>`;
     default:
@@ -1997,6 +2095,8 @@ function getCellText(col, flow, rowNum) {
       return flow.content_type || "";
     case "ip":
       return flow.server_ip || "";
+    case "ipLocation":
+      return getIpLocationLabel(flow);
     case "port":
       return flow.port || "";
     default:
@@ -2121,6 +2221,7 @@ function getSortValue(flow, colId) {
     case "size":   return flow.res_size || 0;
     case "mime":   return (flow.content_type || "").toLowerCase();
     case "ip":     return flow.server_ip || "";
+    case "ipLocation": return getIpLocationLabel(flow).toLowerCase();
     case "port":   return flow.port || 0;
     default:       return "";
   }
@@ -2133,9 +2234,8 @@ function getColumnOrder() {
     const saved = localStorage.getItem("secmp-column-order");
     if (saved) {
       const order = JSON.parse(saved);
-      const ids = COLUMNS.map(c => c.id);
-      if (Array.isArray(order) && ids.every(id => order.includes(id)) && order.length === ids.length) {
-        return order;
+      if (Array.isArray(order)) {
+        return reconcileColumnOrder(order, COLUMNS);
       }
     }
   } catch (_) {}
@@ -3866,11 +3966,8 @@ function applySessionUiState(state) {
     };
   }
   if (Array.isArray(state.colOrder)) {
-    const ids = COLUMNS.map((col) => col.id);
-    if (ids.every((id) => state.colOrder.includes(id)) && state.colOrder.length === ids.length) {
-      colOrder = [...state.colOrder];
-      saveColumnOrder(colOrder);
-    }
+    colOrder = reconcileColumnOrder(state.colOrder, COLUMNS);
+    saveColumnOrder(colOrder);
   }
   if (state.colWidths && typeof state.colWidths === "object") {
     colWidths = { ...colWidths, ...state.colWidths };

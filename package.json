@@ -109,6 +109,18 @@
           "default": true,
           "description": "%secmp.config.openPanelAfterNewSession%"
         },
+        "secmp.ipLocation.enabled": {
+          "type": "boolean",
+          "default": false,
+          "order": 70,
+          "description": "%secmp.config.ipLocation.enabled%"
+        },
+        "secmp.ipLocation.endpoint": {
+          "type": "string",
+          "default": "",
+          "order": 71,
+          "markdownDescription": "%secmp.config.ipLocation.endpoint.markdown%"
+        },
         "secmp.windowsRuntimePath": {
           "type": "string",
           "default": "",
@@ -192,6 +204,10 @@
       {
         "command": "secmp.checkForUpdates",
         "title": "%secmp.command.checkForUpdates%"
+      },
+      {
+        "command": "secmp.testIpLocationEndpoint",
+        "title": "%secmp.command.testIpLocationEndpoint%"
       },
       {
         "command": "secmp.exportHar",
