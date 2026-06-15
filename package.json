@@ -109,6 +109,40 @@
           "default": true,
           "description": "%secmp.config.openPanelAfterNewSession%"
         },
+        "secmp.mcp.enabled": {
+          "type": "boolean",
+          "default": false,
+          "order": 60,
+          "description": "%secmp.config.mcp.enabled%"
+        },
+        "secmp.mcp.port": {
+          "type": "number",
+          "default": 39777,
+          "minimum": 0,
+          "maximum": 65535,
+          "order": 61,
+          "description": "%secmp.config.mcp.port%"
+        },
+        "secmp.mcp.stateFile": {
+          "type": "string",
+          "default": "",
+          "order": 62,
+          "description": "%secmp.config.mcp.stateFile%"
+        },
+        "secmp.mcp.redactByDefault": {
+          "type": "boolean",
+          "default": true,
+          "order": 63,
+          "description": "%secmp.config.mcp.redactByDefault%"
+        },
+        "secmp.mcp.maxBodyBytes": {
+          "type": "number",
+          "default": 65536,
+          "minimum": 0,
+          "maximum": 2097152,
+          "order": 64,
+          "description": "%secmp.config.mcp.maxBodyBytes%"
+        },
         "secmp.certPushWaitMinutes": {
           "type": "number",
           "default": 1,

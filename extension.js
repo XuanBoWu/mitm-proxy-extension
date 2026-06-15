@@ -8,6 +8,7 @@ const https = require("https");
 const crypto = require("crypto");
 const net = require("net");
 const { CaptureSession } = require("./secmp_session");
+const { createSecmpMcpBridge } = require("./mcp_bridge");
 
 let proxyProcess = null;
 let outputChannel = null;
@@ -47,6 +48,8 @@ let autoPushCompletedBootKeys = new Set();
 let autoPushAttemptedOnlineKey = null;
 let certPushTask = null;
 let certManagerDeviceArgsSupported = null;
+let mcpBridge = null;
+let mcpBridgeToken = "";
 
 const TOOLS_DIR = path.join(__dirname, "tools");
 const DEFAULT_RUNTIME_VERSION = "0.1.2";
@@ -87,6 +90,12 @@ const IP_LOCATION_DEBOUNCE_MS = 600;
 const IP_LOCATION_REQUEST_TIMEOUT_MS = 10000;
 const ADB_MONITOR_IDLE_MS = 2000;
 const ADB_MONITOR_ACTIVE_MS = 1000;
+const MCP_DEFAULT_PORT = 39777;
+const MCP_DEFAULT_MAX_BODY_BYTES = 64 * 1024;
+const MCP_MAX_BODY_BYTES = 2 * 1024 * 1024;
+const MCP_DEFAULT_WAIT_TIMEOUT_MS = 10000;
+const MCP_MAX_WAIT_TIMEOUT_MS = 60000;
+const MCP_BODY_SNIPPET_CHARS = 240;
 const ANDROID_SYSTEM_CACERTS_DIR = "/system/etc/security/cacerts";
 const ANDROID_APEX_CONSCRYPT_CACERTS_DIR = "/apex/com.android.conscrypt/cacerts";
 const ANDROID_CERT_WORK_DIR = "/data/local/tmp/";
@@ -4950,6 +4959,821 @@ async function fetchAllFlowBodies(flows, concurrency = FILTER_BODY_FETCH_CONCURR
   return { failed, total };
 }
 
+// ===== MCP bridge service =====
+
+function getMcpConfig() {
+  const config = vscode.workspace.getConfiguration("secmp");
+  const rawPort = Number(config.get("mcp.port", MCP_DEFAULT_PORT));
+  const rawMaxBodyBytes = Number(config.get("mcp.maxBodyBytes", MCP_DEFAULT_MAX_BODY_BYTES));
+  return {
+    enabled: Boolean(config.get("mcp.enabled", false)),
+    port: Number.isInteger(rawPort) && rawPort >= 0 && rawPort <= 65535 ? rawPort : MCP_DEFAULT_PORT,
+    stateFile: String(config.get("mcp.stateFile", "") || "").trim() ||
+      path.join(os.homedir(), ".secmp", "mcp-bridge.json"),
+    redactByDefault: config.get("mcp.redactByDefault", true) !== false,
+    maxBodyBytes: clampNumber(rawMaxBodyBytes, 0, MCP_MAX_BODY_BYTES, MCP_DEFAULT_MAX_BODY_BYTES),
+  };
+}
+
+function clampNumber(value, min, max, fallback) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return fallback;
+  return Math.min(max, Math.max(min, Math.round(num)));
+}
+
+function parseBoolean(value, fallback = false) {
+  if (typeof value === "boolean") return value;
+  if (value == null || value === "") return fallback;
+  const normalized = String(value).trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(normalized)) return true;
+  if (["0", "false", "no", "off"].includes(normalized)) return false;
+  return fallback;
+}
+
+function parseStatusFilter(value) {
+  if (Array.isArray(value)) {
+    return value.map(Number).filter(Number.isFinite);
+  }
+  if (value == null || value === "") return [];
+  return String(value).split(",").map((item) => Number(item.trim())).filter(Number.isFinite);
+}
+
+function getFlowStartedAtMs(flow) {
+  return flow?.req_timestamp ? Math.round(flow.req_timestamp * 1000) : 0;
+}
+
+function flowMatchesMcpFilter(flow, filter = {}) {
+  if (!flow) return false;
+  const method = String(filter.method || "").trim().toUpperCase();
+  if (method && String(flow.method || "").toUpperCase() !== method) return false;
+  const host = String(filter.host || "").trim().toLowerCase();
+  if (host && String(flow.host || "").toLowerCase() !== host) return false;
+  const hostContains = String(filter.hostContains || "").trim().toLowerCase();
+  if (hostContains && !String(flow.host || "").toLowerCase().includes(hostContains)) return false;
+  const pathContains = String(filter.pathContains || "").trim().toLowerCase();
+  if (pathContains && !String(flow.path || "").toLowerCase().includes(pathContains)) return false;
+  const urlContains = String(filter.urlContains || filter.url || "").trim().toLowerCase();
+  if (urlContains && !String(flow.url || "").toLowerCase().includes(urlContains)) return false;
+  const contentTypeContains = String(filter.contentTypeContains || filter.contentType || "").trim().toLowerCase();
+  if (contentTypeContains && !String(flow.content_type || "").toLowerCase().includes(contentTypeContains)) return false;
+  const statuses = parseStatusFilter(filter.status);
+  if (statuses.length > 0 && !statuses.includes(Number(flow.status_code) || 0)) return false;
+  const sinceMs = Number(filter.sinceMs) || 0;
+  if (sinceMs > 0) {
+    const startedAt = getFlowStartedAtMs(flow);
+    if (!startedAt || startedAt < Date.now() - sinceMs) return false;
+  }
+  if (parseBoolean(filter.requireResponse, false) && !isResponseComplete(flow)) return false;
+  return true;
+}
+
+function getMcpFlowSummary(flow) {
+  return {
+    id: flow.id,
+    ordinal: getFlowOrdinal(flow),
+    type: flow.type || "http",
+    method: flow.method || "GET",
+    scheme: flow.scheme || "",
+    url: flow.url || "",
+    host: flow.host || "",
+    port: flow.port || 0,
+    path: flow.path || "",
+    status: flow.status_code || 0,
+    error: flow.error || "",
+    contentType: flow.content_type || "",
+    requestSize: flow.req_size || 0,
+    responseSize: flow.res_size || 0,
+    requestBodyState: flow._reqBodyState || (flow._reqBodyFetched ? "ready" : "missing"),
+    responseBodyState: flow._resBodyState || (flow._resBodyFetched ? "ready" : (isResponseComplete(flow) ? "missing" : "pending")),
+    startedAt: flow.req_timestamp ? new Date(flow.req_timestamp * 1000).toISOString() : "",
+    responseStartedAt: flow.res_timestamp ? new Date(flow.res_timestamp * 1000).toISOString() : "",
+    responseEndedAt: flow.res_timestamp_end ? new Date(flow.res_timestamp_end * 1000).toISOString() : "",
+    durationMs: flow.duration_ms || 0,
+    tls: {
+      version: flow.tls_version || "",
+      cipher: flow.tls_cipher || "",
+      sni: flow.tls_sni || "",
+      alpn: flow.tls_alpn || "",
+    },
+    serverIp: flow.server_ip || "",
+    ipLocation: getMcpIpLocation(flow),
+    clientIp: flow.client_ip || "",
+  };
+}
+
+function redactHeaderValue(name, value) {
+  if (/authorization|proxy-authorization|cookie|set-cookie|token|secret|api[-_]?key/i.test(String(name || ""))) {
+    return "[REDACTED]";
+  }
+  if (Array.isArray(value)) return value.map((item) => redactHeaderValue(name, item));
+  return value;
+}
+
+function redactHeaders(headers, redact) {
+  if (!redact) return { ...(headers || {}) };
+  const out = {};
+  for (const [name, value] of Object.entries(headers || {})) {
+    out[name] = redactHeaderValue(name, value);
+  }
+  return out;
+}
+
+function redactObject(value) {
+  if (Array.isArray(value)) return value.map(redactObject);
+  if (!value || typeof value !== "object") return value;
+  const out = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (/password|passwd|pwd|token|secret|authorization|cookie|session|credential|api[-_]?key/i.test(key)) {
+      out[key] = "[REDACTED]";
+    } else {
+      out[key] = redactObject(item);
+    }
+  }
+  return out;
+}
+
+function redactTextBody(text, contentType) {
+  const raw = String(text || "");
+  const trimmed = raw.trim();
+  if (!trimmed) return raw;
+  const ct = String(contentType || "").toLowerCase();
+  if (ct.includes("json") || trimmed.startsWith("{") || trimmed.startsWith("[")) {
+    try {
+      return JSON.stringify(redactObject(JSON.parse(raw)), null, 2);
+    } catch (_) {}
+  }
+  if (ct.includes("x-www-form-urlencoded")) {
+    try {
+      const params = new URLSearchParams(raw);
+      for (const key of [...params.keys()]) {
+        if (/password|passwd|pwd|token|secret|authorization|cookie|session|credential|api[-_]?key/i.test(key)) {
+          params.set(key, "[REDACTED]");
+        }
+      }
+      return params.toString();
+    } catch (_) {}
+  }
+  return raw
+    .replace(/((?:access_|refresh_)?token|password|passwd|pwd|secret|api[-_]?key)(["']?\s*[:=]\s*["']?)[^"',&\s}]+/gi, "$1$2[REDACTED]")
+    .replace(/(authorization|cookie)(\s*[:=]\s*)[^\r\n&]+/gi, "$1$2[REDACTED]");
+}
+
+function bufferFromFlowBody(flow, side) {
+  const isRequest = side === "request";
+  const base64 = isRequest ? flow.req_body_base64 : flow.res_body_base64;
+  const text = isRequest ? flow.req_body : flow.res_body;
+  if (base64) return { buffer: Buffer.from(base64, "base64"), binary: true };
+  return { buffer: Buffer.from(String(text || ""), "utf8"), binary: false };
+}
+
+function getMcpBodyPayload(flow, side, options = {}) {
+  const isRequest = side === "request";
+  const fetched = isRequest ? flow._reqBodyFetched : flow._resBodyFetched;
+  const state = isRequest
+    ? (flow._reqBodyState || (fetched ? "ready" : "missing"))
+    : (flow._resBodyState || (fetched ? "ready" : (isResponseComplete(flow) ? "missing" : "pending")));
+  const error = isRequest ? (flow._reqBodyError || "") : (flow._resBodyError || "");
+  const contentType = isRequest ? String(flow.req_headers?.["content-type"] || "") : String(flow.content_type || flow.res_headers?.["content-type"] || "");
+  const declaredSize = isRequest ? (flow.req_size || 0) : (flow.res_size || 0);
+  if (!fetched) {
+    return { state, error, contentType, size: declaredSize };
+  }
+  const { buffer, binary } = bufferFromFlowBody(flow, side);
+  const maxBodyBytes = clampNumber(options.maxBodyBytes, 0, MCP_MAX_BODY_BYTES, getMcpConfig().maxBodyBytes);
+  const truncated = maxBodyBytes >= 0 && buffer.length > maxBodyBytes;
+  const slice = truncated ? buffer.subarray(0, maxBodyBytes) : buffer;
+  const payload = {
+    state: "ready",
+    contentType,
+    size: buffer.length,
+    truncated,
+    sha256: crypto.createHash("sha256").update(buffer).digest("hex"),
+  };
+  if (binary) {
+    payload.encoding = "base64";
+    payload.base64 = slice.toString("base64");
+  } else {
+    payload.encoding = "utf8";
+    const text = slice.toString("utf8");
+    payload.text = options.redact ? redactTextBody(text, contentType) : text;
+  }
+  return payload;
+}
+
+async function serializeMcpFlow(flow, options = {}) {
+  const config = getMcpConfig();
+  const includeRequestBody = parseBoolean(options.includeRequestBody, false) || parseBoolean(options.includeBodies, false);
+  const includeResponseBody = parseBoolean(options.includeResponseBody, false) || parseBoolean(options.includeBodies, false);
+  const redact = parseBoolean(options.redact, config.redactByDefault);
+  if (includeRequestBody || includeResponseBody) {
+    await fetchFlowBodies(flow, {
+      request: includeRequestBody,
+      response: includeResponseBody,
+    });
+  }
+  const out = {
+    ...getMcpFlowSummary(flow),
+    request: {
+      headers: redactHeaders(flow.req_headers, redact),
+    },
+    response: {
+      headers: redactHeaders(flow.res_headers, redact),
+    },
+  };
+  if (includeRequestBody) {
+    out.request.body = getMcpBodyPayload(flow, "request", { ...options, redact });
+  }
+  if (includeResponseBody) {
+    out.response.body = getMcpBodyPayload(flow, "response", { ...options, redact });
+  }
+  return out;
+}
+
+function findMcpFlows(filter = {}) {
+  return capturedFlows.filter((flow) => flowMatchesMcpFilter(flow, filter));
+}
+
+function stringMatches(text, matcher) {
+  const value = String(text || "");
+  if (!matcher.term) return false;
+  if (matcher.regex) {
+    try {
+      return new RegExp(matcher.term, "i").test(value);
+    } catch (_) {
+      return false;
+    }
+  }
+  return value.toLowerCase().includes(String(matcher.term).toLowerCase());
+}
+
+function headersToSearchText(headers) {
+  return Object.entries(headers || {})
+    .map(([name, value]) => `${name}: ${formatHeaderValue(value)}`)
+    .join("\n");
+}
+
+function flowBodySearchText(flow, side) {
+  const base64 = side === "request" ? flow.req_body_base64 : flow.res_body_base64;
+  const text = side === "request" ? flow.req_body : flow.res_body;
+  if (text) return text;
+  if (!base64) return "";
+  try {
+    return Buffer.from(base64, "base64").toString("latin1");
+  } catch (_) {
+    return "";
+  }
+}
+
+function getMcpIpLocation(flow) {
+  const ip = normalizeIpForLocation(flow?.server_ip);
+  const enabled = isIpLocationEnabled();
+  if (!ip) {
+    return {
+      enabled,
+      state: "missing",
+      label: "",
+      country: "",
+      registeredCountry: "",
+      error: "",
+    };
+  }
+
+  const persisted = getPersistedIpLocationPayloadForFlow(flow);
+  if (persisted) {
+    return {
+      enabled,
+      state: persisted.state || "ready",
+      label: persisted.label || "",
+      country: persisted.country || "",
+      registeredCountry: persisted.registeredCountry || "",
+      error: persisted.error || "",
+    };
+  }
+
+  const cached = getIpLocationPayloadForIp(ip);
+  if (cached) {
+    return {
+      enabled,
+      state: cached.state || "unknown",
+      label: cached.label || "",
+      country: cached.country || "",
+      registeredCountry: cached.registeredCountry || "",
+      error: cached.error || "",
+    };
+  }
+
+  if (!enabled) {
+    return {
+      enabled: false,
+      state: "disabled",
+      label: "",
+      country: "",
+      registeredCountry: "",
+      error: "secmp.ipLocation.enabled is false or secmp.ipLocation.endpoint is empty",
+    };
+  }
+
+  return {
+    enabled: true,
+    state: "unknown",
+    label: "",
+    country: "",
+    registeredCountry: "",
+    error: "",
+  };
+}
+
+function getTopCounts(values, limit) {
+  const counts = new Map();
+  for (const value of values) {
+    const key = String(value || "").trim() || "(empty)";
+    counts.set(key, (counts.get(key) || 0) + 1);
+  }
+  return [...counts.entries()]
+    .map(([value, count]) => ({ value, count }))
+    .sort((a, b) => b.count - a.count || a.value.localeCompare(b.value))
+    .slice(0, limit);
+}
+
+function getHostStats(flows, options = {}) {
+  const hostContains = String(options.hostContains || "").trim().toLowerCase();
+  const hosts = new Map();
+  for (const flow of flows) {
+    const host = String(flow.host || "").trim();
+    if (!host) continue;
+    if (hostContains && !host.toLowerCase().includes(hostContains)) continue;
+    const existing = hosts.get(host) || {
+      host,
+      count: 0,
+      methods: {},
+      statuses: {},
+      ipLocationStates: {},
+      countries: {},
+      registeredCountries: {},
+      firstSeenAt: "",
+      lastSeenAt: "",
+    };
+    existing.count += 1;
+    const method = flow.method || "GET";
+    const status = String(flow.status_code || 0);
+    existing.methods[method] = (existing.methods[method] || 0) + 1;
+    existing.statuses[status] = (existing.statuses[status] || 0) + 1;
+    const location = getMcpIpLocation(flow);
+    const locationState = location.state || "unknown";
+    existing.ipLocationStates[locationState] = (existing.ipLocationStates[locationState] || 0) + 1;
+    if (location.country) {
+      existing.countries[location.country] = (existing.countries[location.country] || 0) + 1;
+    }
+    if (location.registeredCountry) {
+      existing.registeredCountries[location.registeredCountry] = (existing.registeredCountries[location.registeredCountry] || 0) + 1;
+    }
+    const startedAt = flow.req_timestamp ? new Date(flow.req_timestamp * 1000).toISOString() : "";
+    if (startedAt && (!existing.firstSeenAt || startedAt < existing.firstSeenAt)) existing.firstSeenAt = startedAt;
+    if (startedAt && (!existing.lastSeenAt || startedAt > existing.lastSeenAt)) existing.lastSeenAt = startedAt;
+    hosts.set(host, existing);
+  }
+  return [...hosts.values()];
+}
+
+function buildMcpStats(flows, top = 10) {
+  const hostStats = getHostStats(flows);
+  const locations = flows.map(getMcpIpLocation);
+  const topHosts = hostStats
+    .map((item) => ({ host: item.host, count: item.count }))
+    .sort((a, b) => b.count - a.count || a.host.localeCompare(b.host))
+    .slice(0, top);
+  return {
+    flowCount: flows.length,
+    uniqueHosts: hostStats.length,
+    responseComplete: flows.filter(isResponseComplete).length,
+    errors: flows.filter((flow) => !!flow.error).length,
+    topHosts,
+    methods: getTopCounts(flows.map((flow) => flow.method || "GET"), top),
+    statuses: getTopCounts(flows.map((flow) => String(flow.status_code || 0)), top),
+    contentTypes: getTopCounts(flows.map((flow) => flow.content_type || "(empty)"), top),
+    ipLocationStates: getTopCounts(locations.map((location) => location.state || "unknown"), top),
+    countries: getTopCounts(locations.map((location) => location.country).filter(Boolean), top),
+    registeredCountries: getTopCounts(locations.map((location) => location.registeredCountry).filter(Boolean), top),
+  };
+}
+
+function makeBodySnippet(text, matcher, redact, contentType) {
+  const value = String(text || "");
+  if (!value || !matcher.term) return "";
+  let index = -1;
+  let matchLength = String(matcher.term).length;
+  if (matcher.regex) {
+    try {
+      const match = new RegExp(matcher.term, "i").exec(value);
+      if (match) {
+        index = match.index;
+        matchLength = match[0].length;
+      }
+    } catch (_) {}
+  } else {
+    index = value.toLowerCase().indexOf(String(matcher.term).toLowerCase());
+  }
+  if (index < 0) return "";
+  const half = Math.floor(MCP_BODY_SNIPPET_CHARS / 2);
+  const start = Math.max(0, index - half);
+  const end = Math.min(value.length, index + matchLength + half);
+  const prefix = start > 0 ? "..." : "";
+  const suffix = end < value.length ? "..." : "";
+  const snippet = `${prefix}${value.slice(start, end)}${suffix}`;
+  return redact ? redactTextBody(snippet, contentType) : snippet;
+}
+
+function buildMcpHints(flow, options = {}) {
+  const includeRequestBody = parseBoolean(options.includeRequestBody, false) || parseBoolean(options.includeBodies, false);
+  const includeResponseBody = parseBoolean(options.includeResponseBody, false) || parseBoolean(options.includeBodies, false);
+  const hints = [];
+  if (!includeRequestBody && (flow.req_size || 0) > 0) {
+    hints.push("request body is available but not included; call secmp_get_flow with includeRequestBody=true");
+  }
+  if (!includeResponseBody && ((flow.res_size || 0) > 0 || flow._resBodyFetched)) {
+    hints.push("response body is available but not included; call secmp_get_flow with includeResponseBody=true");
+  }
+  return hints;
+}
+
+async function mcpStatus() {
+  const config = getMcpConfig();
+  const ipLocationConfig = getIpLocationConfig();
+  const stats = buildMcpStats(capturedFlows, 5);
+  return {
+    proxyRunning: !!proxyProcess,
+    proxyPort: activeProxyPort || 0,
+    webPort: webPort || 0,
+    flowFeedStatus,
+    websocketLive: !!flowWebSocketActive,
+    deviceConnected: !!deviceInfo?.connected,
+    device: deviceInfo || null,
+    flowCount: capturedFlows.length,
+    session: activeSession ? {
+      id: activeSession.sessionId,
+      name: activeSession.sessionName,
+      temporary: activeSession.temporary,
+      filePath: activeSession.filePath,
+    } : null,
+    bodyFetchBacklog: bodyFetchQueue.length + bodyFetchActive,
+    summary: {
+      uniqueHosts: stats.uniqueHosts,
+      topHosts: stats.topHosts,
+      methods: stats.methods,
+      statuses: stats.statuses,
+      ipLocationStates: stats.ipLocationStates,
+      countries: stats.countries,
+      registeredCountries: stats.registeredCountries,
+    },
+    ipLocation: {
+      enabled: isIpLocationEnabled(),
+      configured: !!(ipLocationConfig.enabled && ipLocationConfig.endpoint),
+      endpointConfigured: !!ipLocationConfig.endpoint,
+    },
+    mcp: {
+      enabled: config.enabled,
+      port: mcpBridge?.port || 0,
+      stateFile: config.stateFile,
+      redactByDefault: config.redactByDefault,
+      maxBodyBytes: config.maxBodyBytes,
+    },
+  };
+}
+
+async function mcpListFlows(filter = {}) {
+  const limit = clampNumber(filter.limit, 1, 200, 50);
+  const offset = clampNumber(filter.offset, 0, Number.MAX_SAFE_INTEGER, 0);
+  const matchedFlows = findMcpFlows(filter);
+  const order = String(filter.order || "desc").toLowerCase() === "asc" ? "asc" : "desc";
+  const ordered = order === "asc" ? matchedFlows : matchedFlows.slice().reverse();
+  const flows = ordered.slice(offset, offset + limit).map(getMcpFlowSummary);
+  return {
+    total: capturedFlows.length,
+    matched: matchedFlows.length,
+    offset,
+    limit,
+    order,
+    returned: flows.length,
+    hasMore: offset + flows.length < matchedFlows.length,
+    flows,
+  };
+}
+
+async function mcpGetFlow(id, options = {}) {
+  const flow = capturedFlowById.get(String(id || ""));
+  if (!flow) {
+    const err = new Error("Flow not found");
+    err.statusCode = 404;
+    throw err;
+  }
+  const result = { flow: await serializeMcpFlow(flow, options) };
+  const hints = buildMcpHints(flow, options);
+  if (hints.length > 0) result.hints = hints;
+  return result;
+}
+
+async function mcpSearchFlows(input = {}) {
+  const term = String(input.term || "");
+  const scopes = Array.isArray(input.scopes) && input.scopes.length > 0
+    ? input.scopes
+    : ["url", "requestHeaders", "responseHeaders"];
+  const limit = clampNumber(input.limit, 1, 200, 50);
+  const matcher = { term, regex: !!input.regex };
+  const matched = [];
+  const unsearched = [];
+  const redact = parseBoolean(input.redact, getMcpConfig().redactByDefault);
+  for (const flow of findMcpFlows(input)) {
+    if (matched.length >= limit) break;
+    let ok = false;
+    const matchedScopes = [];
+    const snippets = [];
+    if (scopes.includes("url") && stringMatches(flow.url, matcher)) {
+      ok = true;
+      matchedScopes.push("url");
+    }
+    if (scopes.includes("requestHeaders") && stringMatches(headersToSearchText(flow.req_headers), matcher)) {
+      ok = true;
+      matchedScopes.push("requestHeaders");
+    }
+    if (scopes.includes("responseHeaders") && stringMatches(headersToSearchText(flow.res_headers), matcher)) {
+      ok = true;
+      matchedScopes.push("responseHeaders");
+    }
+    const wantReqBody = scopes.includes("requestBody");
+    const wantResBody = scopes.includes("responseBody");
+    if (wantReqBody || wantResBody) {
+      const result = await fetchFlowBodies(flow, { request: wantReqBody, response: wantResBody });
+      if (wantReqBody && flow._reqBodyFetched) {
+        const text = flowBodySearchText(flow, "request");
+        if (stringMatches(text, matcher)) {
+          ok = true;
+          matchedScopes.push("requestBody");
+          snippets.push({
+            scope: "requestBody",
+            text: makeBodySnippet(text, matcher, redact, flow.req_headers?.["content-type"]),
+          });
+        }
+      } else if (wantReqBody && !result.requestOk && (flow.req_size || 0) > 0) {
+        unsearched.push(flow.id);
+      }
+      if (wantResBody && flow._resBodyFetched) {
+        const text = flowBodySearchText(flow, "response");
+        if (stringMatches(text, matcher)) {
+          ok = true;
+          matchedScopes.push("responseBody");
+          snippets.push({
+            scope: "responseBody",
+            text: makeBodySnippet(text, matcher, redact, flow.content_type || flow.res_headers?.["content-type"]),
+          });
+        }
+      } else if (wantResBody && !result.responseOk && ((flow.res_size || 0) > 0 || !isResponseComplete(flow))) {
+        unsearched.push(flow.id);
+      }
+    }
+    if (ok) {
+      matched.push({
+        ...getMcpFlowSummary(flow),
+        matchedScopes: [...new Set(matchedScopes)],
+        snippets,
+      });
+    }
+  }
+  return { term, matchedCount: matched.length, unsearchedIds: [...new Set(unsearched)], flows: matched };
+}
+
+async function mcpListHosts(options = {}) {
+  const limit = clampNumber(options.limit, 1, 200, 50);
+  const sortBy = String(options.sortBy || "count").toLowerCase();
+  const flows = findMcpFlows({ sinceMs: options.sinceMs });
+  const allHosts = getHostStats(flows, options);
+  const hosts = allHosts
+    .sort((a, b) => (
+      sortBy === "name"
+        ? a.host.localeCompare(b.host)
+        : b.count - a.count || a.host.localeCompare(b.host)
+    ))
+    .slice(0, limit);
+  return {
+    totalFlows: capturedFlows.length,
+    matchedFlows: flows.length,
+    uniqueHosts: allHosts.length,
+    hosts,
+  };
+}
+
+async function mcpStats(options = {}) {
+  const top = clampNumber(options.top, 1, 50, 10);
+  const flows = findMcpFlows({ sinceMs: options.sinceMs });
+  return {
+    totalFlows: capturedFlows.length,
+    matchedFlows: flows.length,
+    ...buildMcpStats(flows, top),
+  };
+}
+
+async function mcpWaitForFlow(filter = {}) {
+  const timeoutMs = clampNumber(filter.timeoutMs, 1, MCP_MAX_WAIT_TIMEOUT_MS, MCP_DEFAULT_WAIT_TIMEOUT_MS);
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() <= deadline) {
+    const matches = findMcpFlows(filter);
+    const flow = matches.length > 0 ? matches[matches.length - 1] : null;
+    if (flow) {
+      return { matched: true, flow: getMcpFlowSummary(flow) };
+    }
+    await delay(100);
+  }
+  return { matched: false, timeoutMs };
+}
+
+function tryParseBodyValue(text, contentType) {
+  const raw = String(text || "");
+  const trimmed = raw.trim();
+  if (!trimmed) return "";
+  const ct = String(contentType || "").toLowerCase();
+  if (ct.includes("json") || trimmed.startsWith("{") || trimmed.startsWith("[")) {
+    try { return JSON.parse(raw); } catch (_) {}
+  }
+  if (ct.includes("x-www-form-urlencoded")) {
+    try {
+      const out = {};
+      const params = new URLSearchParams(raw);
+      for (const [key, value] of params.entries()) out[key] = value;
+      return out;
+    } catch (_) {}
+  }
+  return raw;
+}
+
+function buildAssertionContext(flow) {
+  const reqBody = flow.req_body_base64 ? "" : (flow.req_body || "");
+  const resBody = flow.res_body_base64 ? "" : (flow.res_body || "");
+  return {
+    id: flow.id,
+    url: flow.url,
+    method: flow.method,
+    host: flow.host,
+    scheme: flow.scheme,
+    serverIp: flow.server_ip || "",
+    ipLocation: getMcpIpLocation(flow),
+    status: flow.status_code || 0,
+    status_code: flow.status_code || 0,
+    durationMs: flow.duration_ms || 0,
+    request: {
+      headers: flow.req_headers || {},
+      bodyText: reqBody,
+      body: tryParseBodyValue(reqBody, flow.req_headers?.["content-type"]),
+    },
+    response: {
+      headers: flow.res_headers || {},
+      bodyText: resBody,
+      body: tryParseBodyValue(resBody, flow.content_type || flow.res_headers?.["content-type"]),
+    },
+  };
+}
+
+function getPathValue(source, pathExpr) {
+  const parts = String(pathExpr || "").split(".").filter(Boolean);
+  let current = source;
+  for (const part of parts) {
+    if (current == null) return undefined;
+    const key = Object.prototype.hasOwnProperty.call(current, part)
+      ? part
+      : Object.keys(current).find((name) => name.toLowerCase() === part.toLowerCase());
+    current = key == null ? undefined : current[key];
+  }
+  return current;
+}
+
+function evaluateAssertion(actual, assertion) {
+  const op = String(assertion.op || "");
+  const expected = assertion.value;
+  if (op === "exists") return actual !== undefined && actual !== null && actual !== "";
+  if (op === "notExists") return actual === undefined || actual === null || actual === "";
+  if (op === "eq") return actual === expected;
+  if (op === "ne") return actual !== expected;
+  if (op === "contains") return String(actual ?? "").includes(String(expected ?? ""));
+  if (op === "notContains") return !String(actual ?? "").includes(String(expected ?? ""));
+  if (op === "startsWith") return String(actual ?? "").startsWith(String(expected ?? ""));
+  if (op === "endsWith") return String(actual ?? "").endsWith(String(expected ?? ""));
+  if (op === "matches") {
+    try { return new RegExp(String(expected), "i").test(String(actual ?? "")); } catch (_) { return false; }
+  }
+  if (op === "lt") return Number(actual) < Number(expected);
+  if (op === "lte") return Number(actual) <= Number(expected);
+  if (op === "gt") return Number(actual) > Number(expected);
+  if (op === "gte") return Number(actual) >= Number(expected);
+  if (op === "hasFlag") return String(actual ?? "").toLowerCase().includes(String(expected ?? "").toLowerCase());
+  return false;
+}
+
+function assertionNeedsBody(assertions, side) {
+  const prefix = side === "request" ? "request.body" : "response.body";
+  return (assertions || []).some((assertion) => String(assertion.path || "").startsWith(prefix));
+}
+
+async function mcpAssertFlow(input = {}) {
+  const assertions = Array.isArray(input.assertions) ? input.assertions : [];
+  if (assertions.length === 0) {
+    const err = new Error("assertions must contain at least one assertion");
+    err.statusCode = 400;
+    throw err;
+  }
+  const wait = await mcpWaitForFlow({ ...(input.match || {}), timeoutMs: input.timeoutMs });
+  if (!wait.matched) {
+    return { passed: false, matched: false, failures: [{ message: "No matching flow captured before timeout" }] };
+  }
+  const flow = capturedFlowById.get(wait.flow.id);
+  const includeRequestBody = parseBoolean(input.includeRequestBody, false) || assertionNeedsBody(assertions, "request");
+  const includeResponseBody = parseBoolean(input.includeResponseBody, false) || assertionNeedsBody(assertions, "response");
+  if (includeRequestBody || includeResponseBody) {
+    await fetchFlowBodies(flow, { request: includeRequestBody, response: includeResponseBody });
+  }
+  const context = buildAssertionContext(flow);
+  const failures = [];
+  for (const assertion of assertions) {
+    const actual = getPathValue(context, assertion.path);
+    if (!evaluateAssertion(actual, assertion)) {
+      failures.push({
+        path: assertion.path,
+        op: assertion.op,
+        expected: assertion.value,
+        actual,
+      });
+    }
+  }
+  return {
+    passed: failures.length === 0,
+    matched: true,
+    matchedFlowId: flow.id,
+    flow: await serializeMcpFlow(flow, {
+      includeRequestBody,
+      includeResponseBody,
+      maxBodyBytes: input.maxBodyBytes,
+      redact: input.redact,
+    }),
+    failures,
+  };
+}
+
+async function mcpExportEvidence(input = {}) {
+  const ids = normalizeFlowIds(input.flowIds);
+  const flows = ids.length > 0
+    ? ids.map((id) => capturedFlowById.get(id)).filter(Boolean)
+    : capturedFlows.slice(-100);
+  const serialized = [];
+  for (const flow of flows) {
+    serialized.push(await serializeMcpFlow(flow, {
+      includeBodies: input.includeBodies,
+      maxBodyBytes: input.maxBodyBytes,
+      redact: input.redact,
+    }));
+  }
+  return {
+    exportedAt: new Date().toISOString(),
+    total: serialized.length,
+    flows: serialized,
+  };
+}
+
+function createMcpService() {
+  return {
+    status: mcpStatus,
+    stats: mcpStats,
+    listHosts: mcpListHosts,
+    listFlows: mcpListFlows,
+    getFlow: mcpGetFlow,
+    searchFlows: mcpSearchFlows,
+    waitForFlow: mcpWaitForFlow,
+    assertFlow: mcpAssertFlow,
+    exportEvidence: mcpExportEvidence,
+  };
+}
+
+async function syncMcpBridge() {
+  const config = getMcpConfig();
+  if (!config.enabled) {
+    if (mcpBridge) {
+      await mcpBridge.stop();
+      mcpBridge = null;
+    }
+    return;
+  }
+  if (!mcpBridgeToken) {
+    mcpBridgeToken = crypto.randomBytes(24).toString("hex");
+  }
+  if (!mcpBridge) {
+    mcpBridge = createSecmpMcpBridge({
+      service: createMcpService(),
+      log,
+    });
+  }
+  await mcpBridge.start({
+    port: config.port,
+    token: mcpBridgeToken,
+    stateFile: config.stateFile,
+  });
+}
+
 async function fetchAllFlowBodiesWithProgress(flows) {
   return vscode.window.withProgress({
     location: vscode.ProgressLocation.Notification,
@@ -5910,6 +6734,15 @@ function activate(context) {
       resetIpLocationRuntimeState({ notify: true });
       scheduleIpLocationForFlows(capturedFlows);
     }
+    if (event.affectsConfiguration("secmp.mcp")) {
+      (async () => {
+        if (mcpBridge) {
+          await mcpBridge.stop();
+          mcpBridge = null;
+        }
+        await syncMcpBridge();
+      })().catch((err) => log(`[mcp] failed to apply configuration: ${err.message}`));
+    }
   });
 
   context.subscriptions.push(
@@ -5926,11 +6759,16 @@ function activate(context) {
   if (isAutoPushCertEnabled()) {
     startAdbMonitor();
   }
+  syncMcpBridge().catch((err) => log(`[mcp] failed to start bridge: ${err.message}`));
   checkInterruptedSession();
 }
 
-function deactivate() {
+async function deactivate() {
   stopFlowPolling();
+  if (mcpBridge) {
+    await mcpBridge.stop();
+    mcpBridge = null;
+  }
   stopAdbMonitor();
   recordSessionProxyState(!!proxyProcess, {
     port: activeProxyPort,
