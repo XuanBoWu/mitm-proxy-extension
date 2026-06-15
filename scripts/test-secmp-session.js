@@ -23,6 +23,16 @@ function main() {
     req_body: "{\"secret\":\"needle\"}",
     res_body: "{\"ok\":true}",
     content_type: "application/json",
+    server_ip: "8.8.8.8",
+    ip_location: "United States",
+    ip_location_detail: {
+      ip: "8.8.8.8",
+      state: "ready",
+      label: "United States",
+      country: "United States",
+      registeredCountry: "United States",
+      error: "",
+    },
   });
   session.appendBody("flow-1", "request", Buffer.from("{\"secret\":\"needle\"}", "utf8"), {
     contentType: "application/json",
@@ -55,6 +65,15 @@ function main() {
   assert.strictEqual(flows.length, 1);
   assert.strictEqual(flows[0].req_body, "{\"secret\":\"needle\"}");
   assert.strictEqual(flows[0].res_body, "{\"ok\":true}");
+  assert.strictEqual(flows[0].ip_location, "United States");
+  assert.deepStrictEqual(flows[0].ip_location_detail, {
+    ip: "8.8.8.8",
+    state: "ready",
+    label: "United States",
+    country: "United States",
+    registeredCountry: "United States",
+    error: "",
+  });
   assert.strictEqual(loaded.searchBody("flow-1", "request", "needle"), true);
   assert.strictEqual(loaded.getUiState().filterText, "needle");
   assert.strictEqual(loaded.getUiState().sort.direction, "desc");
@@ -78,6 +97,7 @@ function main() {
   assert.strictEqual(promoted.sessionName, "Promoted");
   assert.strictEqual(promoted.getProxyState().running, true);
   assert.strictEqual(promoted.getProxyState().port, 8080);
+  assert.strictEqual(promoted.getFlow("flow-1").ip_location, "United States");
   assert.strictEqual(promoted.getFlows().some((flow) => flow.id === "flow-2"), true);
   promoted.file.close();
 

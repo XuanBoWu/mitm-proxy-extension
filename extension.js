@@ -1900,6 +1900,16 @@ function copyBodyCache(from, to) {
   to._bodyFetched = !!(to._reqBodyFetched && to._resBodyFetched);
 }
 
+function copyPersistedFlowAnnotations(from, to) {
+  if (!from || !to) return;
+  if (from.ip_location != null) {
+    to.ip_location = from.ip_location;
+  }
+  if (from.ip_location_detail != null) {
+    to.ip_location_detail = from.ip_location_detail;
+  }
+}
+
 function syncFetchedBodiesToCurrentFlow(flow) {
   const current = capturedFlowById.get(flow.id);
   if (!current || current === flow) return;
@@ -1914,19 +1924,10 @@ function toListFlow(flow) {
   delete copy.req_body_base64;
   delete copy.res_body;
   delete copy.res_body_base64;
-  delete copy.ip_location;
-  delete copy.ip_location_detail;
   return copy;
 }
 
-function stripRuntimeOnlyFlowFields(flow) {
-  const copy = { ...flow };
-  delete copy.ip_location;
-  delete copy.ip_location_detail;
-  return copy;
-}
-
-// ===== IP location lookup (runtime-only, never persisted) =====
+// ===== IP location lookup =====
 
 function normalizeIpForLocation(value) {
   let ip = String(value || "").trim();
@@ -2002,6 +2003,120 @@ function getIpLocationPayloadForIp(ip, result = ipLocationCache.get(ip)) {
   };
 }
 
+function getPersistedIpLocationPayloadForFlow(flow) {
+  if (!flow) return null;
+  const detail = flow.ip_location_detail;
+  const ip = normalizeIpForLocation((detail && detail.ip) || flow.server_ip);
+  if (!ip) return null;
+  if (detail && typeof detail === "object") {
+    const state = String(detail.state || "").trim();
+    const country = String(detail.country || "");
+    const registeredCountry = String(detail.registeredCountry || detail.registered_country || "");
+    const label = String(detail.label || flow.ip_location || country || registeredCountry || "");
+    if (state === "ready" && (country || registeredCountry || label)) {
+      return {
+        ip,
+        state,
+        label: label || country || registeredCountry || "-",
+        country,
+        registeredCountry,
+        error: String(detail.error || ""),
+      };
+    }
+    if (state === "local") {
+      return {
+        ip,
+        state,
+        label: label || "Local",
+        country: country || "Local",
+        registeredCountry: registeredCountry || "Local",
+        error: "",
+      };
+    }
+  }
+  if (flow.ip_location) {
+    const label = String(flow.ip_location);
+    return {
+      ip,
+      state: "ready",
+      label,
+      country: label,
+      registeredCountry: "",
+      error: "",
+    };
+  }
+  return null;
+}
+
+function ipLocationPayloadToResult(payload) {
+  if (!payload) return null;
+  const result = makeIpLocationResult(
+    payload.state,
+    payload.country || "",
+    payload.registeredCountry || "",
+    payload.error || ""
+  );
+  if (payload.label) result.label = payload.label;
+  return result;
+}
+
+function buildIpLocationSnapshot(ip, result) {
+  if (!result) return null;
+  const state = result.state;
+  if (state !== "ready" && state !== "local") return null;
+  if (state === "ready" && !(result.country || result.registeredCountry || result.label)) return null;
+  return {
+    ip,
+    state,
+    label: result.label || result.country || result.registeredCountry || "-",
+    country: result.country || "",
+    registeredCountry: result.registeredCountry || "",
+    error: "",
+  };
+}
+
+function applyIpLocationSnapshotToFlow(flow, snapshot) {
+  if (!flow || !snapshot) return false;
+  if (getPersistedIpLocationPayloadForFlow(flow)) return false;
+  flow.ip_location = snapshot.label || snapshot.country || snapshot.registeredCountry || "";
+  flow.ip_location_detail = snapshot;
+  return true;
+}
+
+function seedIpLocationCacheFromFlow(flow) {
+  const payload = getPersistedIpLocationPayloadForFlow(flow);
+  if (!payload) return null;
+  const current = ipLocationCache.get(payload.ip);
+  if (!current || current.state === "loading" || current.state === "failed") {
+    ipLocationCache.set(payload.ip, ipLocationPayloadToResult(payload));
+  }
+  return payload;
+}
+
+function getPersistedIpLocationPayloadForIp(ip) {
+  for (const flow of capturedFlows) {
+    if (normalizeIpForLocation(flow?.server_ip) !== ip) continue;
+    const payload = getPersistedIpLocationPayloadForFlow(flow);
+    if (payload) return payload;
+  }
+  return null;
+}
+
+function persistIpLocationForIp(ip, result) {
+  const snapshot = buildIpLocationSnapshot(ip, result);
+  if (!snapshot) return;
+  const updatedFlows = [];
+  for (const flow of capturedFlows) {
+    if (normalizeIpForLocation(flow?.server_ip) !== ip) continue;
+    if (applyIpLocationSnapshotToFlow(flow, snapshot)) {
+      updatedFlows.push(flow);
+    }
+  }
+  if (updatedFlows.length > 0) {
+    recordSessionFlows(updatedFlows);
+  }
+}
+
 function postIpLocationConfig() {
   if (!panel) return;
   panel.webview.postMessage({
@@ -2049,17 +2164,43 @@ function resetIpLocationRuntimeState(options = {}) {
 function scheduleIpLocationForFlows(flows) {
   if (!isIpLocationEnabled()) return;
   const updatedIps = [];
+  const flowsWithNewPersistedLocation = [];
   for (const flow of flows || []) {
     const ip = normalizeIpForLocation(flow?.server_ip);
-    if (!ip || ipLocationCache.has(ip)) continue;
+    if (!ip) continue;
+
+    const persisted = seedIpLocationCacheFromFlow(flow);
+    if (persisted) {
+      updatedIps.push(ip);
+      continue;
+    }
+
+    const cached = ipLocationCache.get(ip);
+    if (cached) {
+      const snapshot = buildIpLocationSnapshot(ip, cached);
+      if (applyIpLocationSnapshotToFlow(flow, snapshot)) {
+        flowsWithNewPersistedLocation.push(flow);
+      }
+      updatedIps.push(ip);
+      continue;
+    }
+
     if (isLocalOrSpecialIp(ip)) {
-      ipLocationCache.set(ip, makeIpLocationResult("local"));
+      const result = makeIpLocationResult("local");
+      ipLocationCache.set(ip, result);
+      const snapshot = buildIpLocationSnapshot(ip, result);
+      if (applyIpLocationSnapshotToFlow(flow, snapshot)) {
+        flowsWithNewPersistedLocation.push(flow);
+      }
       updatedIps.push(ip);
       continue;
     }
     ipLocationCache.set(ip, makeIpLocationResult("loading"));
     ipLocationQueue.add(ip);
     updatedIps.push(ip);
+  }
+  if (flowsWithNewPersistedLocation.length > 0) {
+    recordSessionFlows(flowsWithNewPersistedLocation);
   }
   if (updatedIps.length > 0) {
     postIpLocationUpdates(updatedIps);
@@ -2163,13 +2304,18 @@ async function processIpLocationQueue() {
         if (generation !== ipLocationGeneration || !isIpLocationEnabled()) break;
         const updatedIps = [];
         for (const item of results) {
+          const persisted = getPersistedIpLocationPayloadForIp(item.ip);
+          if (persisted) {
+            ipLocationCache.set(item.ip, ipLocationPayloadToResult(persisted));
+            updatedIps.push(item.ip);
+            continue;
+          }
           if (!item.country && !item.registeredCountry) {
             ipLocationCache.set(item.ip, makeIpLocationResult("failed"));
           } else {
-            ipLocationCache.set(
-              item.ip,
-              makeIpLocationResult("ready", item.country, item.registeredCountry)
-            );
+            const result = makeIpLocationResult("ready", item.country, item.registeredCountry);
+            ipLocationCache.set(item.ip, result);
+            persistIpLocationForIp(item.ip, result);
           }
           updatedIps.push(item.ip);
         }
@@ -2504,6 +2650,7 @@ function handleWebSocketFlowEvent(msg) {
     }
     const transformed = transformFlow(data);
     copyBodyCache(existing, transformed);
+    copyPersistedFlowAnnotations(existing, transformed);
     if (replaceCapturedFlow(data.id, transformed)) {
       recordSessionFlows([transformed]);
       enqueueBodyAutoFetch(transformed);
@@ -2591,6 +2738,7 @@ async function pollFlows() {
           (!existing.duration_ms && f.response?.timestamp_start)) {
         const transformed = transformFlow(f);
         copyBodyCache(existing, transformed);
+        copyPersistedFlowAnnotations(existing, transformed);
         if (replaceCapturedFlow(f.id, transformed)) {
           recordSessionFlows([transformed]);
           enqueueBodyAutoFetch(transformed);
@@ -4579,7 +4727,7 @@ async function exportJson(options = {}) {
   // Fetch bodies for all flows not yet loaded (parallel with bounded concurrency)
   const fetchResult = await fetchAllFlowBodiesWithProgress(flowsToExport);
 
-  const flowsWithSeq = flowsToExport.map((f) => ({ _num: getFlowOrdinal(f), ...stripRuntimeOnlyFlowFields(f) }));
+  const flowsWithSeq = flowsToExport.map((f) => ({ _num: getFlowOrdinal(f), ...f }));
   fs.writeFileSync(result.fsPath, JSON.stringify(flowsWithSeq, null, 2));
   showExportResult(flowsToExport.length, result.fsPath, fetchResult.failed);
 }

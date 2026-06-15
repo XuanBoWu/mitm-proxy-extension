@@ -2015,7 +2015,30 @@ function getProtocolBucket(flow) {
 
 function getIpLocationForFlow(flow) {
   const ip = String(flow.server_ip || "").trim();
-  return ip ? ipLocationByIp.get(ip) || null : null;
+  if (ip && ipLocationByIp.has(ip)) return ipLocationByIp.get(ip);
+  const detail = flow?.ip_location_detail;
+  if (detail && typeof detail === "object") {
+    const label = detail.label || flow.ip_location || detail.country || detail.registeredCountry || detail.registered_country || "";
+    return {
+      ip: detail.ip || ip,
+      state: detail.state || "ready",
+      label,
+      country: detail.country || "",
+      registeredCountry: detail.registeredCountry || detail.registered_country || "",
+      error: detail.error || "",
+    };
+  }
+  if (flow?.ip_location) {
+    return {
+      ip,
+      state: "ready",
+      label: flow.ip_location,
+      country: flow.ip_location,
+      registeredCountry: "",
+      error: "",
+    };
+  }
+  return null;
 }
 
 function getIpLocationLabel(flow) {
