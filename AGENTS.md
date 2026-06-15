@@ -189,11 +189,11 @@ node scripts/test-extension-runtime-install.js --runtime-zip dist/secmp-runtime-
 
 1. 用户点击「启动代理」→ extension.js 在 Windows/macOS 启动打包 runtime entrypoint，在 Linux/source-dev 启动 `proxy_engine.py --port 8080 --web-port {random}`
 2. proxy_engine.py 启动 WebMaster，在 stderr 输出 `WEB_PORT={port}` 和 `AUTH_TOKEN={32-char-hex}`
-3. extension.js 解析 stderr 获取 webPort 和 authToken，启动 500ms 定时轮询
-4. 轮询 `GET http://127.0.0.1:{webPort}/flows.json?token={token}` 获取全部 flow 元数据（不含 body）
-5. extension.js 将 mitmweb flow 格式转换为 webview 格式 → 批量发送 `postMessage({command: "addFlows", flows})`
-6. Webview 一次渲染所有新 flow，列表支持上下键导航（不循环）
-7. 检测已知 flow 的 status_code/res_size 变化 → 批量发送 `updateFlows`（响应状态实时更新）
+3. extension.js 解析 stderr 获取 webPort 和 authToken，连接 `GET /updates?token={token}` WebSocket 实时事件流，并启动 `/flows.json` 对账轮询
+4. WebSocket 消费 mitmweb 12.x `type/payload` envelope：处理 `flows/add` / `flows/update` / `flows/reset`，忽略 `events/add` 日志事件
+5. 轮询 `GET http://127.0.0.1:{webPort}/flows.json?token={token}` 作为启动、断线和重连后的对账兜底；WebSocket inactive 时活跃间隔 150ms、空闲间隔 1000ms，WebSocket live 时 10s 对账
+6. extension.js 将 mitmweb flow 格式转换为 webview 格式 → 发送 `postMessage({command: "addFlows", flows})` / `updateFlows`
+7. Webview 渲染新 flow，列表支持上下键导航（不循环）；响应状态通过 `updateFlows` 实时更新
 8. 点击 flow 时，extension.js 按需请求 body：`GET /flows/{id}/request/content.data?token={token}`；响应未完成（无 `timestamp_end`）时不拉取响应体，避免把空/部分内容缓存为最终 body
 9. Body 内容分别缓存到 `flow.req_body` / `flow.res_body`，以 `_reqBodyFetched` / `_resBodyFetched` 标记加载完成，以 `_reqBodyState` / `_resBodyState`（loading/pending/ready/error/unavailable）+ `_reqBodyError` / `_resBodyError` 描述生命周期，发送 `showDetail` 到 webview；列表消息（addFlows/updateFlows/sessionLoaded）一律不携带 body 负载
 10. 响应完成后 extension.js 后台自动拉取 body（并发 2，≤8MB）并写入 `.secmp` 会话；停止代理前以可取消的进度通知拉取剩余 body，保证代理停止后 body 仍可查看/检索/导出
@@ -221,11 +221,11 @@ node scripts/test-extension-runtime-install.js --runtime-zip dist/secmp-runtime-
 | `/flows/{id}/response/content/{view}.json` | GET | 响应体经 contentview 格式化 |
 | `/clear` | POST | 清空所有 flow |
 | `/state.json` | GET | mitmproxy 版本、contentviews 列表等 |
-| `/updates` | WebSocket | 实时 flow 推送（`flows/add`, `flows/update`, `flows/reset`） |
+| `/updates` | WebSocket | 实时事件推送；mitmweb 12.x 使用 `type/payload` envelope，flow 事件为 `flows/add`、`flows/update`、`flows/reset` |
 
 ### flow_to_json 格式
 
-WebSocket 和 REST API 返回的 flow JSON 格式（`mitmproxy/tools/web/app.py:flow_to_json()`）：
+WebSocket 的 `payload` 和 REST API 返回的 flow JSON 格式（`mitmproxy/tools/web/app.py:flow_to_json()`）：
 - **不含 body 内容**（减少传输量），仅含 `contentLength` 和 `contentHash`
 - 请求头/响应头为 tuple 数组格式：`[["name", "value"], ...]`（非 object）
 - `client_conn`/`server_conn` 包含 TLS 信息：`tls_version`, `cipher`, `sni`, `alpn`, `peername` 等

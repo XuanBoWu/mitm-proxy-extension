@@ -4,7 +4,10 @@ All notable changes to SecMP are documented in this file.
 
 ## Unreleased
 
-- No unreleased changes.
+### 修复
+
+- 修复 mitmweb 12.x `/updates` WebSocket 事件解析：兼容 `type/payload` 消息格式和嵌套 flow payload，避免实时流已连接但新增请求仍依赖 `/flows.json` 10 秒对账批量出现。
+- 降低 WebSocket fallback 时的轮询延迟，并为 flow feed 增加连接、重连、对账和新增 flow 状态日志，方便判断当前是否处于实时 WebSocket 路径。
 
 ## 0.3.2 - 2026-06-15
 

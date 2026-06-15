@@ -59,8 +59,8 @@ const SUPPORTED_RUNTIME_PLATFORMS = new Set(["win32", "darwin"]);
 const SUPPORTED_LOCALES = new Set(["zh-CN", "en-US"]);
 const DEFAULT_LOCALE = "zh-CN";
 const FLOW_POLL_INTERVAL_MS = 1000;
-const FLOW_POLL_ACTIVE_MS = 500;
-const FLOW_POLL_IDLE_MS = 2000;
+const FLOW_POLL_ACTIVE_MS = 150;
+const FLOW_POLL_IDLE_MS = 1000;
 const FLOW_POLL_IDLE_THRESHOLD = 3;
 const MITMWEB_REQUEST_TIMEOUT_MS = 5000;
 const SESSION_SYNC_DELAY_MS = 3000;
@@ -2459,10 +2459,23 @@ function transformFlow(f) {
 let flowWebSocket = null;
 let flowWebSocketActive = false;
 let flowWebSocketReconnectAttempts = 0;
+let flowFeedStatus = "stopped";
+let flowFeedEnabled = false;
+let lastPollStatusLogAt = 0;
+let nextFlowWebSocketReconnectDelay = 0;
+let flowWebSocketParseErrorLogCount = 0;
+let flowWebSocketIgnoredMessageLogCount = 0;
+
+function setFlowFeedStatus(status, detail = "") {
+  if (flowFeedStatus === status && !detail) return;
+  flowFeedStatus = status;
+  log(`[flow-feed] ${status}${detail ? `: ${detail}` : ""}`);
+}
 
 function connectFlowWebSocket() {
-  if (!webPort || !authToken) return;
-  disconnectFlowWebSocket();
+  if (!flowFeedEnabled || !webPort || !authToken) return;
+  disconnectFlowWebSocket({ resetReconnect: false, logClose: false });
+  setFlowFeedStatus("websocket-connecting", `127.0.0.1:${webPort}/updates`);
 
   const key = crypto.randomBytes(16).toString("base64");
   const req = http.request({
@@ -2478,7 +2491,12 @@ function connectFlowWebSocket() {
   });
 
   req.on("upgrade", (res, socket) => {
+    if (!flowFeedEnabled) {
+      socket.destroy();
+      return;
+    }
     if (res.statusCode !== 101) {
+      setFlowFeedStatus("websocket-upgrade-failed", `status=${res.statusCode}; using poll fallback`);
       socket.destroy();
       scheduleWebSocketReconnect();
       return;
@@ -2486,15 +2504,20 @@ function connectFlowWebSocket() {
 
     flowWebSocketActive = true;
     flowWebSocketReconnectAttempts = 0;
+    nextFlowWebSocketReconnectDelay = 0;
+    flowWebSocketParseErrorLogCount = 0;
+    flowWebSocketIgnoredMessageLogCount = 0;
     flowWebSocket = socket;
+    setFlowFeedStatus("websocket-live", "using mitmweb /updates; poll runs every 10s for reconciliation");
     let frameBuffer = Buffer.alloc(0);
 
     socket.on("data", (raw) => {
       frameBuffer = Buffer.concat([frameBuffer, raw]);
       while (frameBuffer.length >= 2) {
+        const firstByte = frameBuffer[0];
         const secondByte = frameBuffer[1];
         const masked = (secondByte & 0x80) !== 0;
-        const opcode = secondByte & 0x0f;
+        const opcode = firstByte & 0x0f;
         let payloadLen = frameBuffer[1] & 0x7f;
         let offset = 2;
         if (payloadLen === 126) {
@@ -2542,9 +2565,15 @@ function connectFlowWebSocket() {
         if (opcode === 0x1 || opcode === 0x0) {
           // Text frame (or continuation) — parse as JSON event
           try {
-            const msg = JSON.parse(payload.toString("utf8"));
+            const text = payload.toString("utf8");
+            const msg = JSON.parse(text);
             handleWebSocketFlowEvent(msg);
-          } catch (_) { /* skip unparseable frames */ }
+          } catch (err) {
+            if (flowWebSocketParseErrorLogCount < 5) {
+              flowWebSocketParseErrorLogCount += 1;
+              log(`[flow-feed] websocket frame parse failed opcode=${opcode} bytes=${payload.length}: ${err.message}`);
+            }
+          }
         }
       }
     });
@@ -2552,20 +2581,26 @@ function connectFlowWebSocket() {
     socket.on("close", () => {
       flowWebSocket = null;
       flowWebSocketActive = false;
+      if (!flowFeedEnabled) return;
+      setFlowFeedStatus("websocket-closed", "using poll fallback");
       scheduleWebSocketReconnect();
     });
 
-    socket.on("error", () => {
+    socket.on("error", (err) => {
       flowWebSocket = null;
       flowWebSocketActive = false;
+      if (!flowFeedEnabled) return;
+      setFlowFeedStatus("websocket-error", `${err.message}; using poll fallback`);
       try { socket.destroy(); } catch (_) {}
       scheduleWebSocketReconnect();
     });
   });
 
-  req.on("error", () => {
+  req.on("error", (err) => {
     flowWebSocket = null;
     flowWebSocketActive = false;
+    if (!flowFeedEnabled) return;
+    setFlowFeedStatus("websocket-request-error", `${err.message}; using poll fallback`);
     scheduleWebSocketReconnect();
   });
 
@@ -2573,20 +2608,30 @@ function connectFlowWebSocket() {
 }
 
 function scheduleWebSocketReconnect() {
-  if (!webPort || !authToken) return;
-  if (flowWebSocketReconnectAttempts > 10) return;
+  if (!flowFeedEnabled || !webPort || !authToken) return;
+  if (flowWebSocketReconnectAttempts > 10) {
+    setFlowFeedStatus("websocket-reconnect-stopped", "max attempts reached; poll fallback remains active");
+    return;
+  }
   flowWebSocketReconnectAttempts += 1;
   const delay = Math.min(1000 * Math.pow(2, flowWebSocketReconnectAttempts - 1), 30000);
+  nextFlowWebSocketReconnectDelay = delay;
+  log(`[flow-feed] websocket reconnect scheduled in ${delay}ms (attempt ${flowWebSocketReconnectAttempts}); poll fallback active`);
   if (flowWebSocketReconnectTimer) clearTimeout(flowWebSocketReconnectTimer);
   flowWebSocketReconnectTimer = setTimeout(() => {
     flowWebSocketReconnectTimer = null;
+    nextFlowWebSocketReconnectDelay = 0;
     connectFlowWebSocket();
   }, delay);
 }
 
-function disconnectFlowWebSocket() {
+function disconnectFlowWebSocket(options = {}) {
+  const { resetReconnect = true, logClose = true } = options;
   flowWebSocketActive = false;
-  flowWebSocketReconnectAttempts = 0;
+  if (resetReconnect) {
+    flowWebSocketReconnectAttempts = 0;
+    nextFlowWebSocketReconnectDelay = 0;
+  }
   if (flowWebSocketReconnectTimer) {
     clearTimeout(flowWebSocketReconnectTimer);
     flowWebSocketReconnectTimer = null;
@@ -2595,14 +2640,59 @@ function disconnectFlowWebSocket() {
     try { flowWebSocket.destroy(); } catch (_) {}
     flowWebSocket = null;
   }
+  if (logClose && flowFeedStatus !== "stopped") {
+    setFlowFeedStatus("websocket-disconnected", "flow feed stopped or restarting");
+  }
+}
+
+function extractWebSocketFlowPayload(payload) {
+  if (!payload) return null;
+  if (payload.id) return payload;
+  if (Array.isArray(payload)) {
+    return payload.find(item => item && item.id) || null;
+  }
+  for (const key of ["flow", "data", "item", "value", "payload"]) {
+    const nested = payload[key];
+    if (!nested) continue;
+    if (nested.id) return nested;
+    if (Array.isArray(nested)) {
+      const match = nested.find(item => item && item.id);
+      if (match) return match;
+    }
+  }
+  return null;
 }
 
 function handleWebSocketFlowEvent(msg) {
-  // mitmweb WebSocket events: { resource: "flows", cmd: "add"|"update"|"reset", data: ... }
-  // Also handle flat format: { cmd: "add"|"update"|"reset", data: ... }
-  const cmd = msg.cmd || "";
-  const resource = msg.resource || "flows";
-  if (resource !== "flows") return;
+  // mitmweb 12.x uses { type: "flows/add", payload: flow }.
+  // Keep compatibility with older/flat forms:
+  // { resource: "flows", cmd: "add", data: flow } and { cmd: "add", data: flow }.
+  let cmd = msg.cmd || "";
+  let resource = msg.resource || "";
+  let data = msg.data;
+  let rawPayload = msg.data;
+  if (msg.type && typeof msg.type === "string") {
+    const slashIndex = msg.type.indexOf("/");
+    if (slashIndex > 0) {
+      resource = msg.type.slice(0, slashIndex);
+      cmd = msg.type.slice(slashIndex + 1);
+      rawPayload = msg.payload;
+      data = extractWebSocketFlowPayload(msg.payload);
+    }
+  }
+  if (!data && rawPayload) {
+    data = extractWebSocketFlowPayload(rawPayload);
+  }
+  if (!resource && cmd) {
+    resource = "flows";
+  }
+  if (resource !== "flows") {
+    if (resource !== "events" && flowWebSocketIgnoredMessageLogCount < 5) {
+      flowWebSocketIgnoredMessageLogCount += 1;
+      log(`[flow-feed] websocket ignored type=${msg.type || "-"} resource=${resource || "-"} cmd=${cmd || "-"}`);
+    }
+    return;
+  }
 
   if (cmd === "reset") {
     resetCapturedFlows();
@@ -2622,8 +2712,13 @@ function handleWebSocketFlowEvent(msg) {
     return;
   }
 
-  const data = msg.data;
-  if (!data || !data.id) return;
+  if (!data || !data.id) {
+    if (flowWebSocketIgnoredMessageLogCount < 5) {
+      flowWebSocketIgnoredMessageLogCount += 1;
+      log(`[flow-feed] websocket ignored type=${msg.type || "-"} cmd=${cmd || "-"} without flow id`);
+    }
+    return;
+  }
 
   if (cmd === "add") {
     if (ignoredFlowIdsAfterClear.has(data.id)) return;
@@ -2640,6 +2735,7 @@ function handleWebSocketFlowEvent(msg) {
         flows: [toListFlow(transformed)],
       });
     }
+    log(`[flow-feed] websocket add flow id=${data.id} method=${transformed.method || "-"} host=${transformed.host || "-"}`);
     idlePollCount = 0;
   } else if (cmd === "update") {
     const existing = capturedFlowById.get(data.id);
@@ -2666,10 +2762,22 @@ function handleWebSocketFlowEvent(msg) {
   }
 }
 
+function maybeLogPollStatus(total, newCount, updatedCount) {
+  const now = Date.now();
+  const shouldLog = newCount > 0 || updatedCount > 0 || now - lastPollStatusLogAt > 10000;
+  if (!shouldLog) return;
+  lastPollStatusLogAt = now;
+  const mode = flowWebSocketActive ? "reconcile" : "fallback";
+  const hasActivity = idlePollCount < FLOW_POLL_IDLE_THRESHOLD;
+  const nextInterval = flowWebSocketActive ? 10000 : (hasActivity ? FLOW_POLL_ACTIVE_MS : FLOW_POLL_IDLE_MS);
+  const reconnect = nextFlowWebSocketReconnectDelay ? `, wsReconnectIn=${nextFlowWebSocketReconnectDelay}ms` : "";
+  log(`[flow-feed] poll ${mode}: total=${total}, new=${newCount}, updated=${updatedCount}, next=${nextInterval}ms, ws=${flowWebSocketActive ? "live" : "inactive"}${reconnect}`);
+}
+
 // ===== Flow polling (reconciliation fallback) =====
 
 async function pollFlows() {
-  if (!webPort || !authToken) return;
+  if (!flowFeedEnabled || !webPort || !authToken) return;
   if (pollingInProgress) return;
 
   pollingInProgress = true;
@@ -2759,8 +2867,9 @@ async function pollFlows() {
     } else {
       idlePollCount += 1;
     }
-  } catch (_) {
-    // Silently skip polling errors (server might not be ready yet)
+    maybeLogPollStatus(flows.length, newFlows.length, updatedFlows.length);
+  } catch (err) {
+    log(`[flow-feed] poll failed: ${err.message}`);
     idlePollCount += 1;
   } finally {
     pollingInProgress = false;
@@ -2800,17 +2909,22 @@ function startFlowPolling() {
   ignoredFlowIdsAfterClear.clear();
   mitmwebHadFlows = false;
   idlePollCount = 0;
+  flowFeedEnabled = true;
+  lastPollStatusLogAt = 0;
   ensureActiveSession();
-  pollFlows();
+  setFlowFeedStatus("starting", `poll active=${FLOW_POLL_ACTIVE_MS}ms idle=${FLOW_POLL_IDLE_MS}ms`);
   connectFlowWebSocket();
+  pollFlows();
 }
 
 function stopFlowPolling() {
-  disconnectFlowWebSocket();
+  flowFeedEnabled = false;
+  disconnectFlowWebSocket({ logClose: flowFeedStatus !== "stopped" });
   if (pollingTimer) {
     clearTimeout(pollingTimer);
     pollingTimer = null;
   }
+  setFlowFeedStatus("stopped");
 }
 
 // ===== ADB Device Management =====
