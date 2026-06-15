@@ -16,6 +16,8 @@
   "secmp.config.fontSize.large": "Large",
   "secmp.config.fontSize.maximum": "Maximum",
   "secmp.config.openPanelAfterNewSession": "Automatically open the capture panel after creating a temporary or persistent SecMP session.",
+  "secmp.config.certPushWaitMinutes": "How many minutes SecMP waits for an ADB device after manually pushing the CA certificate. Use 0 to fail immediately.",
+  "secmp.config.autoPushCertOnDeviceReconnect": "Automatically push and inject the CA certificate when an ADB device reconnects. SecMP uses su and does not run adb root.",
   "secmp.config.ipLocation.enabled": "Show an IP location column in the capture list and query locations for public server IP addresses.",
   "secmp.config.ipLocation.endpoint.markdown": "HTTP POST endpoint for IP location lookup. Leave empty to disable requests. After setting it, click [Test endpoint](command:secmp.testIpLocationEndpoint) or run `SecMP: Test IP Location Endpoint` from the Command Palette.",
   "secmp.config.windowsRuntimePath": "Deprecated compatibility setting. Use secmp.runtimePath instead.",

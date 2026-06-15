@@ -1,5 +1,5 @@
 const vscode = require("vscode");
-const { spawn, exec } = require("child_process");
+const { spawn, exec, execFile } = require("child_process");
 const path = require("path");
 const fs = require("fs");
 const os = require("os");
@@ -39,6 +39,14 @@ let ipLocationTimer = null;
 let ipLocationInFlight = false;
 let ipLocationGeneration = 0;
 let activeCaptureNetwork = null;
+let selectedAdbSerial = null;
+let adbMonitorTimer = null;
+let adbMonitorInFlight = false;
+let lastAdbMonitorState = { serial: null, connected: false, bootId: null };
+let autoPushCompletedBootKeys = new Set();
+let autoPushAttemptedOnlineKey = null;
+let certPushTask = null;
+let certManagerDeviceArgsSupported = null;
 
 const TOOLS_DIR = path.join(__dirname, "tools");
 const DEFAULT_RUNTIME_VERSION = "0.1.2";
@@ -48,6 +56,9 @@ const GITHUB_RELEASE_LATEST_URL = `${DEFAULT_RUNTIME_REPO}/releases/latest`;
 const WINDOWS_RUNTIME_API_VERSION = 1;
 const WINDOWS_RUNTIME_RETAIN_PREVIOUS_COUNT = 1;
 const DEFAULT_UPDATE_CHECK_INTERVAL_HOURS = 24;
+const DEFAULT_CERT_PUSH_WAIT_MINUTES = 1;
+const MIN_CERT_PUSH_WAIT_MINUTES = 0;
+const MAX_CERT_PUSH_WAIT_MINUTES = 10;
 const DEFAULT_FONT_SIZE = 13;
 const MIN_FONT_SIZE = 12;
 const MAX_FONT_SIZE = 16;
@@ -74,6 +85,11 @@ const COPY_BODY_MAX_BYTES = BODY_AUTOFETCH_MAX_BYTES;
 const IP_LOCATION_BATCH_SIZE = 100;
 const IP_LOCATION_DEBOUNCE_MS = 600;
 const IP_LOCATION_REQUEST_TIMEOUT_MS = 10000;
+const ADB_MONITOR_IDLE_MS = 2000;
+const ADB_MONITOR_ACTIVE_MS = 1000;
+const ANDROID_SYSTEM_CACERTS_DIR = "/system/etc/security/cacerts";
+const ANDROID_APEX_CONSCRYPT_CACERTS_DIR = "/apex/com.android.conscrypt/cacerts";
+const ANDROID_CERT_WORK_DIR = "/data/local/tmp/";
 const DEFAULT_RUNTIME_SOURCES = {
   "0.1.0:win32:x64": {
     url: "https://github.com/XuanBoWu/mitm-proxy-extension/releases/download/v0.1.0/secmp-runtime-win32-x64-0.1.0.zip",
@@ -193,6 +209,18 @@ function getUpdateConfig() {
       ? intervalHours
       : DEFAULT_UPDATE_CHECK_INTERVAL_HOURS,
   };
+}
+
+function getCertPushWaitMinutes() {
+  const config = vscode.workspace.getConfiguration("secmp");
+  const raw = Number(config.get("certPushWaitMinutes", DEFAULT_CERT_PUSH_WAIT_MINUTES));
+  if (!Number.isFinite(raw)) return DEFAULT_CERT_PUSH_WAIT_MINUTES;
+  return Math.min(MAX_CERT_PUSH_WAIT_MINUTES, Math.max(MIN_CERT_PUSH_WAIT_MINUTES, Math.round(raw)));
+}
+
+function isAutoPushCertEnabled() {
+  const config = vscode.workspace.getConfiguration("secmp");
+  return Boolean(config.get("autoPushCertOnDeviceReconnect", false));
 }
 
 function getIpLocationConfig() {
@@ -2929,47 +2957,695 @@ function stopFlowPolling() {
 
 // ===== ADB Device Management =====
 
-async function checkAdbDevice() {
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function runAdb(args, options = {}) {
+  const serial = Object.prototype.hasOwnProperty.call(options, "serial")
+    ? options.serial
+    : selectedAdbSerial;
+  const adbArgs = serial ? ["-s", serial, ...args] : args;
   return new Promise((resolve) => {
-    exec("adb shell echo connected", { timeout: 10000 }, (err, stdout) => {
-      if (err || !stdout.includes("connected")) {
-        resolve({ connected: false, error: err?.message || "No device" });
-        return;
-      }
-      resolve({ connected: true });
+    execFile("adb", adbArgs, { timeout: options.timeout || 10000, windowsHide: true }, (err, stdout, stderr) => {
+      resolve({
+        success: !err,
+        code: err?.code || 0,
+        signal: err?.signal || null,
+        stdout: stdout || "",
+        stderr: stderr || "",
+        message: err?.message || stderr || "",
+      });
     });
   });
 }
 
-async function getDeviceInfo() {
-  return new Promise((resolve) => {
-    exec("adb shell getprop ro.build.version.release && adb shell getprop ro.product.model && adb shell whoami", { timeout: 10000 }, (err, stdout) => {
-      if (err) {
-        resolve({ error: err.message });
-        return;
+function parseAdbDevices(stdout) {
+  const devices = [];
+  for (const line of String(stdout || "").split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("List of devices")) continue;
+    const parts = trimmed.split(/\s+/);
+    const serial = parts[0];
+    const state = parts[1] || "unknown";
+    if (!serial || !state) continue;
+    const detail = {};
+    for (const part of parts.slice(2)) {
+      const idx = part.indexOf(":");
+      if (idx > 0) {
+        detail[part.slice(0, idx)] = part.slice(idx + 1);
       }
-      const lines = stdout.trim().split("\n");
-      const androidVersion = lines[0]?.trim() || "Unknown";
-      const model = lines[1]?.trim() || "Unknown";
-      const user = lines[2]?.trim() || "Unknown";
-      resolve({ androidVersion, model, user, isRoot: user === "root" });
+    }
+    devices.push({
+      serial,
+      state,
+      model: detail.model || "",
+      product: detail.product || "",
+      detail,
     });
-  });
+  }
+  return devices;
+}
+
+async function listAdbDevices() {
+  const result = await runAdb(["devices", "-l"], { serial: null, timeout: 5000 });
+  if (!result.success) {
+    return { devices: [], error: result.message || "adb devices failed" };
+  }
+  return { devices: parseAdbDevices(result.stdout), error: "" };
+}
+
+function chooseActiveAdbDevice(devices, options = {}) {
+  const online = (devices || []).filter((device) => device.state === "device");
+  if (options.serial) {
+    const requested = online.find((device) => device.serial === options.serial);
+    if (requested) return { device: requested };
+    return { error: t("extension.device.selectedUnavailable", { serial: options.serial }) };
+  }
+  if (selectedAdbSerial) {
+    const selected = online.find((device) => device.serial === selectedAdbSerial);
+    if (selected) return { device: selected };
+  }
+  if (online.length === 1) {
+    selectedAdbSerial = online[0].serial;
+    return { device: online[0] };
+  }
+  if (online.length > 1) {
+    return { error: t("extension.device.multipleOnline") };
+  }
+  return { error: t("extension.device.noneOnline") };
+}
+
+async function getActiveAdbDevice(options = {}) {
+  const snapshot = await listAdbDevices();
+  if (snapshot.error) return { connected: false, error: snapshot.error, devices: [] };
+  const chosen = chooseActiveAdbDevice(snapshot.devices, options);
+  if (!chosen.device) {
+    return { connected: false, error: chosen.error, devices: snapshot.devices };
+  }
+  selectedAdbSerial = chosen.device.serial;
+  return { connected: true, device: chosen.device, serial: chosen.device.serial, devices: snapshot.devices };
+}
+
+async function checkSuAccess(serial) {
+  const probes = [
+    { style: "su0", command: "su 0 sh -c 'id'" },
+    { style: "suc", command: "su -c 'id'" },
+  ];
+  for (const probe of probes) {
+    const result = await runAdb(["shell", probe.command], { serial, timeout: 8000 });
+    const output = `${result.stdout}\n${result.stderr}`;
+    if (result.success && output.includes("uid=0")) {
+      return { available: true, style: probe.style };
+    }
+  }
+  return { available: false, style: "" };
+}
+
+async function checkAdbDevice() {
+  const active = await getActiveAdbDevice();
+  if (!active.connected) {
+    return { connected: false, error: active.error };
+  }
+  return { connected: true, serial: active.serial, device: active.device };
+}
+
+async function getDeviceBootId(serial = selectedAdbSerial) {
+  const result = await runAdb(["shell", "cat /proc/sys/kernel/random/boot_id"], { serial, timeout: 8000 });
+  if (!result.success) {
+    return "";
+  }
+  return result.stdout.trim();
+}
+
+async function getDeviceInfo(serial = selectedAdbSerial) {
+  if (!serial) {
+    const active = await getActiveAdbDevice();
+    if (!active.connected) return { error: active.error };
+    serial = active.serial;
+  }
+  const [versionResult, modelResult, userResult] = await Promise.all([
+    runAdb(["shell", "getprop ro.build.version.release"], { serial, timeout: 10000 }),
+    runAdb(["shell", "getprop ro.product.model"], { serial, timeout: 10000 }),
+    runAdb(["shell", "whoami"], { serial, timeout: 10000 }),
+  ]);
+  if (!versionResult.success || !modelResult.success || !userResult.success) {
+    return { error: versionResult.message || modelResult.message || userResult.message };
+  }
+  const user = userResult.stdout.trim() || "Unknown";
+  const su = user === "root" ? { available: false, style: "" } : await checkSuAccess(serial);
+  return {
+    serial,
+    androidVersion: versionResult.stdout.trim() || "Unknown",
+    model: modelResult.stdout.trim() || "Unknown",
+    user,
+    isRoot: user === "root" || su.available,
+    isRootAdbd: user === "root",
+    suAvailable: su.available,
+    rootMethod: user === "root" ? "adbd" : (su.available ? "su" : ""),
+    suStyle: su.style,
+  };
 }
 
 async function ensureRoot() {
+  const active = await getActiveAdbDevice();
+  if (!active.connected) {
+    return { success: false, message: active.error };
+  }
+  const info = await getDeviceInfo(active.serial);
+  if (info.error) {
+    return { success: false, message: info.error };
+  }
+  if (info.isRootAdbd) {
+    return { success: true, message: t("extension.root.adbdAvailable", { serial: active.serial }) };
+  }
+  if (info.suAvailable) {
+    return { success: true, message: t("extension.root.suAvailable", { serial: active.serial }) };
+  }
+  return { success: false, message: t("extension.root.unavailable", { serial: active.serial }) };
+}
+
+function postCertStatus(status) {
+  if (!panel) return;
+  panel.webview.postMessage({
+    command: "certStatus",
+    ...status,
+  });
+}
+
+function postCertAutoPushConfig() {
+  if (!panel) return;
+  panel.webview.postMessage({
+    command: "certAutoPushConfig",
+    enabled: isAutoPushCertEnabled(),
+    waitMinutes: getCertPushWaitMinutes(),
+  });
+}
+
+function parseJsonOutput(output) {
+  const text = String(output || "").trim();
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch (_) {
+    const start = text.indexOf("{");
+    const end = text.lastIndexOf("}");
+    if (start >= 0 && end > start) {
+      try {
+        return JSON.parse(text.slice(start, end + 1));
+      } catch (_) {}
+    }
+  }
+  return null;
+}
+
+async function runCertManagerProcess(args) {
+  const certManager = await getCertManagerCommand();
   return new Promise((resolve) => {
-    exec("adb root", { timeout: 10000 }, async (err) => {
-      if (err) {
-        resolve({ success: false, message: t("extension.proxy.rootStartFailed") });
-        return;
-      }
-      setTimeout(async () => {
-        const info = await getDeviceInfo();
-        resolve({ success: info.isRoot, message: info.isRoot ? t("extension.proxy.rootConfirmed") : t("extension.proxy.rootFailed") });
-      }, 1000);
+    const proc = spawn(certManager.command, [...certManager.args, ...args], { windowsHide: true });
+    let output = "";
+    let stderr = "";
+    proc.stdout.on("data", (d) => (output += d));
+    proc.stderr.on("data", (d) => {
+      stderr += d;
+      log(`cert: ${d}`);
+    });
+    proc.on("error", (err) => {
+      resolve({ success: false, code: -1, stdout: output, stderr, message: err.message });
+    });
+    proc.on("close", (code) => {
+      resolve({
+        success: code === 0,
+        code,
+        stdout: output,
+        stderr,
+        message: output.trim() || stderr.trim(),
+      });
     });
   });
+}
+
+async function runCertManagerJson(args) {
+  const result = await runCertManagerProcess(args);
+  const parsed = parseJsonOutput(result.stdout);
+  if (parsed) return parsed;
+  return {
+    success: result.success,
+    message: result.message || (result.success ? t("extension.cert.completed") : t("extension.cert.failed")),
+  };
+}
+
+async function certManagerSupportsDeviceArgs() {
+  if (certManagerDeviceArgsSupported != null) return certManagerDeviceArgsSupported;
+  const result = await runCertManagerProcess(["push", "--help"]);
+  const help = `${result.stdout}\n${result.stderr}`;
+  certManagerDeviceArgsSupported = help.includes("--serial") && help.includes("--root-mode");
+  return certManagerDeviceArgsSupported;
+}
+
+function androidShellQuote(value) {
+  return `'${String(value).replace(/'/g, `'\\''`)}'`;
+}
+
+function buildSuShellCommand(command, suStyle) {
+  if (suStyle === "su0") return `su 0 sh -c ${androidShellQuote(command)}`;
+  if (suStyle === "suc") return `su -c ${androidShellQuote(command)}`;
+  throw new Error(`Unsupported su style: ${suStyle || "-"}`);
+}
+
+async function runRootAdbShell(serial, command, info, options = {}) {
+  const timeout = options.timeout || 15000;
+  const check = options.check !== false;
+  const shellCommand = info?.isRootAdbd
+    ? command
+    : buildSuShellCommand(command, info?.suStyle || (await checkSuAccess(serial)).style);
+  const result = await runAdb(["shell", shellCommand], { serial, timeout });
+  if (check && !result.success) {
+    throw new Error(result.message || result.stderr || `adb shell failed: ${command}`);
+  }
+  return result;
+}
+
+function parseAndroidMajorVersion(versionText) {
+  const match = String(versionText || "").match(/\d+/);
+  if (!match) return 0;
+  return Number(match[0]) || 0;
+}
+
+function chunkItems(items, size) {
+  const chunks = [];
+  for (let i = 0; i < items.length; i += size) {
+    chunks.push(items.slice(i, i + size));
+  }
+  return chunks;
+}
+
+async function getPidsByName(serial, name, info) {
+  const result = await runRootAdbShell(serial, `pidof ${name}`, info, { check: false, timeout: 10000 });
+  if (!result.success || !result.stdout.trim()) return [];
+  return result.stdout.trim().split(/\s+/).filter((pid) => /^\d+$/.test(pid));
+}
+
+async function getChildPids(serial, parentPid, info) {
+  const result = await runRootAdbShell(serial, `ps -o PID --ppid ${parentPid}`, info, { check: false, timeout: 10000 });
+  if (!result.success) return [];
+  const pids = [];
+  for (const line of result.stdout.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.toUpperCase() === "PID") continue;
+    if (/^\d+$/.test(trimmed)) pids.push(trimmed);
+  }
+  return pids;
+}
+
+async function injectCertificateWithAdb(serial, info) {
+  const androidVersion = parseAndroidMajorVersion(info.androidVersion);
+  const isAndroid14 = androidVersion >= 14;
+  const certSourceDir = isAndroid14 ? ANDROID_APEX_CONSCRYPT_CACERTS_DIR : ANDROID_SYSTEM_CACERTS_DIR;
+  const bindTargetDir = isAndroid14 ? ANDROID_APEX_CONSCRYPT_CACERTS_DIR : ANDROID_SYSTEM_CACERTS_DIR;
+  const tmpfsMountDir = ANDROID_SYSTEM_CACERTS_DIR;
+  const tmpCopyDir = "/data/local/tmp/tmp-ca-copy";
+  const warnings = [];
+
+  try {
+    await runRootAdbShell(serial, `rm -rf ${tmpCopyDir} && mkdir -p -m 700 ${tmpCopyDir}`, info, { timeout: 15000 });
+    await runRootAdbShell(serial, `cp ${certSourceDir}/* ${tmpCopyDir}/`, info, { timeout: 30000 });
+    await runRootAdbShell(serial, `mount -t tmpfs tmpfs ${tmpfsMountDir}`, info, { timeout: 15000 });
+    await runRootAdbShell(serial, `mv ${tmpCopyDir}/* ${tmpfsMountDir}/`, info, { timeout: 30000 });
+    await runRootAdbShell(serial, `cp ${ANDROID_CERT_WORK_DIR}*.0 ${tmpfsMountDir}/`, info, { timeout: 30000 });
+    await runRootAdbShell(serial, `chown root:root ${tmpfsMountDir}/*`, info, { timeout: 15000 });
+    await runRootAdbShell(serial, `chmod 644 ${tmpfsMountDir}/*`, info, { timeout: 15000 });
+    await runRootAdbShell(serial, `chcon u:object_r:system_file:s0 ${tmpfsMountDir}/*`, info, { timeout: 15000 });
+
+    const zygotePids = new Set();
+    for (const name of ["zygote64", "zygote"]) {
+      for (const pid of await getPidsByName(serial, name, info)) {
+        zygotePids.add(pid);
+      }
+    }
+    const zygotes = [...zygotePids].sort((a, b) => Number(a) - Number(b));
+    if (zygotes.length === 0) {
+      warnings.push("No Zygote process found, namespace injection skipped");
+    } else {
+      for (const pid of zygotes) {
+        try {
+          await runRootAdbShell(
+            serial,
+            `nsenter --mount=/proc/${pid}/ns/mnt -- mount --bind ${tmpfsMountDir} ${bindTargetDir}`,
+            info,
+            { timeout: 15000 }
+          );
+        } catch (err) {
+          warnings.push(`nsenter zygote ${pid}: ${err.message}`);
+        }
+      }
+
+      const appPids = new Set();
+      for (const pid of zygotes) {
+        for (const childPid of await getChildPids(serial, pid, info)) {
+          appPids.add(childPid);
+        }
+      }
+      const apps = [...appPids].sort((a, b) => Number(a) - Number(b));
+      if (apps.length > 0) {
+        for (const batch of chunkItems(apps, 20)) {
+          const commands = batch.map((pid) => (
+            `( nsenter --mount=/proc/${pid}/ns/mnt -- mount --bind ${tmpfsMountDir} ${bindTargetDir} >/dev/null 2>&1 || true ) &`
+          ));
+          await runRootAdbShell(serial, `${commands.join(" ")} wait`, info, { check: false, timeout: 30000 });
+        }
+      } else {
+        warnings.push("No app processes found for namespace injection");
+      }
+    }
+    await runRootAdbShell(serial, `rm -rf ${tmpCopyDir}`, info, { check: false, timeout: 5000 });
+    return {
+      success: true,
+      message: `Certificate injection completed${warnings.length ? ` (warnings: ${warnings.join("; ")})` : ""}`,
+      warnings: warnings.length ? warnings : null,
+    };
+  } catch (err) {
+    try {
+      await runRootAdbShell(serial, `rm -rf ${tmpCopyDir}`, info, { check: false, timeout: 5000 });
+    } catch (_) {}
+    return { success: false, message: `Injection failed: ${err.message}` };
+  }
+}
+
+async function pushCertificateWithExtensionAdb(caPath, serial, info) {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "secmp-cert-"));
+  const convertResult = await runCertManagerJson(["convert", "--cert", caPath, "--output-dir", tmpDir]);
+  if (!convertResult.success || !convertResult.outputFile) {
+    return { success: false, message: convertResult.message || t("extension.cert.failed") };
+  }
+  const pushResult = await runAdb(["push", convertResult.outputFile, ANDROID_CERT_WORK_DIR], { serial, timeout: 30000 });
+  if (!pushResult.success) {
+    return { success: false, message: pushResult.message || pushResult.stderr || "adb push failed" };
+  }
+  const injectResult = await injectCertificateWithAdb(serial, info);
+  return {
+    success: injectResult.success,
+    message: `${convertResult.hash}.0 pushed and injected. ${injectResult.message}`,
+    hash: convertResult.hash,
+    push: {
+      success: true,
+      message: `Certificate pushed: ${path.basename(convertResult.outputFile)}`,
+      remotePath: `${ANDROID_CERT_WORK_DIR}${path.basename(convertResult.outputFile)}`,
+    },
+    inject: injectResult,
+  };
+}
+
+async function waitForAdbDevice(timeoutMs, options = {}) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() <= deadline) {
+    const remainingSeconds = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
+    postCertStatus({
+      success: false,
+      state: "waiting",
+      remainingSeconds,
+      message: t("extension.cert.waitingForDevice", { seconds: remainingSeconds }),
+    });
+    const active = await getActiveAdbDevice({ serial: options.serial });
+    if (active.connected) {
+      return active;
+    }
+    await delay(Math.min(ADB_MONITOR_ACTIVE_MS, Math.max(250, deadline - Date.now())));
+  }
+  return { connected: false, error: t("extension.cert.waitTimeout") };
+}
+
+async function executeCertificatePush(serial, source = "manual") {
+  const caPath = path.join(certDir, "mitmproxy-ca-cert.pem");
+  if (!fs.existsSync(caPath)) {
+    return { success: false, message: t("extension.cert.missing") };
+  }
+
+  postCertStatus({
+    success: false,
+    state: "checkingRoot",
+    serial,
+    message: t("extension.cert.checkingRoot", { serial }),
+  });
+  const info = await getDeviceInfo(serial);
+  if (info.error) {
+    return { success: false, message: info.error };
+  }
+  if (!info.isRoot) {
+    return { success: false, message: t("extension.root.unavailable", { serial }) };
+  }
+
+  postCertStatus({
+    success: false,
+    state: "running",
+    serial,
+    message: t("extension.cert.pushingToDevice", { serial }),
+  });
+  const supportsDeviceArgs = await certManagerSupportsDeviceArgs();
+  const result = supportsDeviceArgs
+    ? await runCertManagerJson([
+      "push",
+      "--cert", caPath,
+      "--serial", serial,
+      "--root-mode", "auto",
+    ])
+    : await pushCertificateWithExtensionAdb(caPath, serial, info);
+  return {
+    ...result,
+    serial,
+    source,
+    message: result.message || (result.success ? t("extension.cert.completed") : t("extension.cert.failed")),
+  };
+}
+
+async function pushCertificateWithWait(options = {}) {
+  if (certPushTask) {
+    const message = t("extension.cert.taskRunning");
+    postCertStatus({ success: false, state: "busy", message });
+    return { success: false, message };
+  }
+
+  const source = options.source || "manual";
+  const waitMinutes = Number.isFinite(Number(options.waitMinutes))
+    ? Math.max(0, Number(options.waitMinutes))
+    : getCertPushWaitMinutes();
+  certPushTask = { source, startedAt: Date.now() };
+  try {
+    const caPath = path.join(certDir, "mitmproxy-ca-cert.pem");
+    if (!fs.existsSync(caPath)) {
+      const result = { success: false, message: t("extension.cert.missing") };
+      postCertStatus({ ...result, state: "error" });
+      return result;
+    }
+
+    let active = await getActiveAdbDevice({ serial: options.serial });
+    if (!active.connected && waitMinutes > 0) {
+      active = await waitForAdbDevice(waitMinutes * 60 * 1000, { serial: options.serial });
+    }
+    if (!active.connected) {
+      const result = { success: false, message: active.error || t("extension.device.noneOnline") };
+      postCertStatus({ ...result, state: "error" });
+      return result;
+    }
+
+    selectedAdbSerial = active.serial;
+    postCertStatus({
+      success: false,
+      state: "running",
+      serial: active.serial,
+      message: t("extension.cert.deviceDetected", { serial: active.serial }),
+    });
+
+    const result = await executeCertificatePush(active.serial, source);
+    postCertStatus({
+      ...result,
+      state: result.success ? "success" : "error",
+      message: result.message,
+    });
+    if (result.success) {
+      deviceInfo = await getDeviceInfo(active.serial);
+      postDeviceStatus(active.serial, deviceInfo);
+    }
+    return result;
+  } catch (err) {
+    const result = { success: false, message: err.message || t("extension.cert.failed") };
+    postCertStatus({ ...result, state: "error" });
+    return result;
+  } finally {
+    certPushTask = null;
+    scheduleAdbMonitor(ADB_MONITOR_IDLE_MS);
+  }
+}
+
+function postDeviceStatus(serial, info = null, connected = true) {
+  if (!panel) return;
+  if (connected) {
+    panel.webview.postMessage({
+      command: "deviceStatus",
+      connected: true,
+      serial,
+      info,
+    });
+  } else {
+    panel.webview.postMessage({
+      command: "deviceStatus",
+      connected: false,
+    });
+  }
+}
+
+function shouldRunAdbMonitor() {
+  return !!panel || isAutoPushCertEnabled() || !!certPushTask;
+}
+
+function startAdbMonitor() {
+  if (adbMonitorTimer || adbMonitorInFlight || !shouldRunAdbMonitor()) return;
+  adbMonitorTimer = setTimeout(() => {
+    adbMonitorTimer = null;
+    pollAdbMonitor();
+  }, 0);
+}
+
+function stopAdbMonitor() {
+  if (adbMonitorTimer) {
+    clearTimeout(adbMonitorTimer);
+    adbMonitorTimer = null;
+  }
+}
+
+function scheduleAdbMonitor(delayMs = ADB_MONITOR_IDLE_MS) {
+  if (!shouldRunAdbMonitor()) {
+    stopAdbMonitor();
+    return;
+  }
+  if (adbMonitorTimer) return;
+  adbMonitorTimer = setTimeout(() => {
+    adbMonitorTimer = null;
+    pollAdbMonitor();
+  }, delayMs);
+}
+
+async function getDeviceBootIdWithRetry(serial, attempts = 5) {
+  for (let i = 0; i < attempts; i += 1) {
+    const bootId = await getDeviceBootId(serial);
+    if (bootId) return bootId;
+    await delay(1000);
+  }
+  return "";
+}
+
+async function maybeAutoPushCertificate(device) {
+  if (!isAutoPushCertEnabled() || certPushTask || !device?.serial) return;
+  const bootId = await getDeviceBootIdWithRetry(device.serial);
+  const key = `${device.serial}:${bootId || "unknown"}`;
+  if (autoPushCompletedBootKeys.has(key) || autoPushAttemptedOnlineKey === key) return;
+  autoPushAttemptedOnlineKey = key;
+  postCertStatus({
+    success: false,
+    state: "running",
+    serial: device.serial,
+    message: t("extension.cert.autoPushStarted", { serial: device.serial }),
+  });
+  const result = await pushCertificateWithWait({
+    source: "auto",
+    waitMinutes: 0,
+    serial: device.serial,
+  });
+  if (result.success && bootId) {
+    autoPushCompletedBootKeys.add(key);
+  }
+}
+
+async function pollAdbMonitor() {
+  if (adbMonitorInFlight) {
+    scheduleAdbMonitor(ADB_MONITOR_IDLE_MS);
+    return;
+  }
+  adbMonitorInFlight = true;
+  try {
+    const snapshot = await listAdbDevices();
+    const chosen = snapshot.error ? { error: snapshot.error } : chooseActiveAdbDevice(snapshot.devices);
+    if (!chosen.device) {
+      if (lastAdbMonitorState.connected) {
+        deviceInfo = null;
+        postDeviceStatus(null, null, false);
+      }
+      lastAdbMonitorState = { serial: null, connected: false, bootId: null };
+      autoPushAttemptedOnlineKey = null;
+      return;
+    }
+
+    const serial = chosen.device.serial;
+    const stateChanged = !lastAdbMonitorState.connected || lastAdbMonitorState.serial !== serial;
+    selectedAdbSerial = serial;
+    if (stateChanged) {
+      deviceInfo = await getDeviceInfo(serial);
+      postDeviceStatus(serial, deviceInfo);
+      const bootId = await getDeviceBootId(serial);
+      lastAdbMonitorState = { serial, connected: true, bootId };
+      void maybeAutoPushCertificate(chosen.device).catch((err) => log(`Auto certificate push failed: ${err.message}`));
+    }
+  } catch (err) {
+    log(`ADB monitor failed: ${err.message}`);
+  } finally {
+    adbMonitorInFlight = false;
+    scheduleAdbMonitor(certPushTask ? ADB_MONITOR_ACTIVE_MS : ADB_MONITOR_IDLE_MS);
+  }
+}
+
+async function handleExportCertificate() {
+  const caPath = path.join(certDir, "mitmproxy-ca-cert.pem");
+  if (!fs.existsSync(caPath)) {
+    const message = t("extension.cert.missing");
+    postCertStatus({ success: false, state: "error", message });
+    vscode.window.showErrorMessage(message);
+    return;
+  }
+
+  const androidFormat = t("extension.cert.exportAndroidFormat");
+  const cerFormat = t("extension.cert.exportCerFormat");
+  const selected = await vscode.window.showQuickPick([androidFormat, cerFormat], {
+    placeHolder: t("extension.cert.exportFormatPlaceholder"),
+  });
+  if (!selected) return;
+
+  try {
+    if (selected === androidFormat) {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "secmp-cert-"));
+      const result = await runCertManagerJson(["convert", "--cert", caPath, "--output-dir", tmpDir]);
+      if (!result.success || !result.outputFile) {
+        throw new Error(result.message || t("extension.cert.exportFailed"));
+      }
+      const defaultName = path.basename(result.outputFile);
+      const saveUri = await vscode.window.showSaveDialog({
+        filters: { "Android Certificate": ["0"], "All Files": ["*"] },
+        defaultUri: getDefaultFileDialogUri(defaultName),
+      });
+      if (!saveUri) return;
+      fs.copyFileSync(result.outputFile, saveUri.fsPath);
+      await rememberFileDialogDir(saveUri.fsPath);
+      const message = t("extension.cert.exported", { path: saveUri.fsPath });
+      postCertStatus({ success: true, state: "success", message });
+      vscode.window.showInformationMessage(message);
+      return;
+    }
+
+    const saveUri = await vscode.window.showSaveDialog({
+      filters: { "Certificate": ["cer"], "All Files": ["*"] },
+      defaultUri: getDefaultFileDialogUri("secmp-ca-cert.cer"),
+    });
+    if (!saveUri) return;
+    const cert = new crypto.X509Certificate(fs.readFileSync(caPath));
+    fs.writeFileSync(saveUri.fsPath, cert.raw);
+    await rememberFileDialogDir(saveUri.fsPath);
+    const message = t("extension.cert.exported", { path: saveUri.fsPath });
+    postCertStatus({ success: true, state: "success", message });
+    vscode.window.showInformationMessage(message);
+  } catch (err) {
+    const message = t("extension.cert.exportFailedWithMessage", { message: err.message });
+    postCertStatus({ success: false, state: "error", message });
+    vscode.window.showErrorMessage(message);
+  }
 }
 
 async function getLocalIp() {
@@ -3034,28 +3710,33 @@ function normalizeCaptureNetwork(network, port) {
 }
 
 async function setDeviceProxy(proxyHost, proxyPort) {
-  return new Promise((resolve) => {
-    const cmd = `adb shell settings put global http_proxy ${proxyHost}:${proxyPort}`;
-    exec(cmd, { timeout: 10000 }, (err, stdout) => {
-      if (err) {
-        resolve({ success: false, message: err.message });
-      } else {
-        resolve({ success: true, message: t("extension.proxy.setResult", { host: proxyHost, port: proxyPort }) });
-      }
-    });
+  const active = await getActiveAdbDevice();
+  if (!active.connected) {
+    return { success: false, message: active.error };
+  }
+  const result = await runAdb(["shell", `settings put global http_proxy ${proxyHost}:${proxyPort}`], {
+    serial: active.serial,
+    timeout: 10000,
   });
+  if (!result.success) {
+    return { success: false, message: result.message };
+  }
+  return { success: true, message: t("extension.proxy.setResult", { host: proxyHost, port: proxyPort }) };
 }
 
 async function clearDeviceProxy() {
-  return new Promise((resolve) => {
-    exec("adb shell settings put global http_proxy :0", { timeout: 10000 }, (err) => {
-      if (err) {
-        resolve({ success: false, message: err.message });
-      } else {
-        resolve({ success: true, message: t("extension.proxy.clearDeviceResult") });
-      }
-    });
+  const active = await getActiveAdbDevice();
+  if (!active.connected) {
+    return { success: false, message: active.error };
+  }
+  const result = await runAdb(["shell", "settings put global http_proxy :0"], {
+    serial: active.serial,
+    timeout: 10000,
   });
+  if (!result.success) {
+    return { success: false, message: result.message };
+  }
+  return { success: true, message: t("extension.proxy.clearDeviceResult") };
 }
 
 // ===== Proxy Engine Management =====
@@ -3425,24 +4106,19 @@ async function createPanel() {
           postCachedIpLocations();
         }
         postIpLocationConfig();
+        postCertAutoPushConfig();
+        startAdbMonitor();
         await postEnvironmentStatus(context);
         break;
 
       case "refreshDevice": {
         const connected = await checkAdbDevice();
         if (connected.connected) {
-          deviceInfo = await getDeviceInfo();
-          panel.webview.postMessage({
-            command: "deviceStatus",
-            connected: true,
-            info: deviceInfo,
-          });
+          deviceInfo = await getDeviceInfo(connected.serial);
+          postDeviceStatus(connected.serial, deviceInfo);
         } else {
           deviceInfo = null;
-          panel.webview.postMessage({
-            command: "deviceStatus",
-            connected: false,
-          });
+          postDeviceStatus(null, null, false);
         }
         await postEnvironmentStatus(context);
         break;
@@ -3454,7 +4130,10 @@ async function createPanel() {
           command: "rootResult",
           ...rootResult,
         });
-        deviceInfo = await getDeviceInfo();
+        if (rootResult.success && selectedAdbSerial) {
+          deviceInfo = await getDeviceInfo(selectedAdbSerial);
+          postDeviceStatus(selectedAdbSerial, deviceInfo);
+        }
         await postEnvironmentStatus(context);
         break;
       }
@@ -3536,6 +4215,18 @@ async function createPanel() {
           }
         }
         await postEnvironmentStatus(context);
+        break;
+      }
+
+      case "setAutoPushCert": {
+        const config = vscode.workspace.getConfiguration("secmp");
+        await config.update("autoPushCertOnDeviceReconnect", !!message.enabled, vscode.ConfigurationTarget.Global);
+        postCertAutoPushConfig();
+        if (isAutoPushCertEnabled()) {
+          startAdbMonitor();
+        } else {
+          scheduleAdbMonitor();
+        }
         break;
       }
 
@@ -3750,42 +4441,15 @@ async function createPanel() {
         break;
 
       case "pushCert": {
-        const caPath = path.join(certDir, "mitmproxy-ca-cert.pem");
-        if (!fs.existsSync(caPath)) {
-          panel.webview.postMessage({
-            command: "certStatus",
-            success: false,
-            message: t("extension.cert.missing"),
-          });
-          break;
-        }
-        let certManager;
-        try {
-          certManager = await getCertManagerCommand();
-        } catch (err) {
-          panel.webview.postMessage({
-            command: "certStatus",
-            success: false,
-            message: err.message,
-          });
-          break;
-        }
-        const proc = spawn(certManager.command, [...certManager.args, "push", "--cert", caPath], { windowsHide: true });
-        let output = "";
-        proc.stdout.on("data", (d) => (output += d));
-        proc.stderr.on("data", (d) => log(`cert: ${d}`));
-        proc.on("close", (code) => {
-          try {
-            const result = JSON.parse(output);
-            panel.webview.postMessage({ command: "certStatus", ...result });
-          } catch (_) {
-            panel.webview.postMessage({
-              command: "certStatus",
-              success: code === 0,
-              message: output || t("extension.cert.completed"),
-            });
-          }
+        await pushCertificateWithWait({
+          source: "manual",
+          waitMinutes: getCertPushWaitMinutes(),
         });
+        break;
+      }
+
+      case "exportCert": {
+        await handleExportCertificate();
         break;
       }
 
@@ -3801,6 +4465,7 @@ async function createPanel() {
 
   panel.onDidDispose(() => {
     panel = null;
+    scheduleAdbMonitor();
     if (!allowPanelDispose && activeSession) {
       handlePanelClosedDuringCapture();
     }
@@ -5149,35 +5814,15 @@ function activate(context) {
   });
 
   const pushCertCmd = vscode.commands.registerCommand("secmp.pushCert", async () => {
-    const caPath = path.join(certDir, "mitmproxy-ca-cert.pem");
-    if (!fs.existsSync(caPath)) {
-      vscode.window.showErrorMessage(t("extension.cert.missing"));
-      return;
-    }
-
-    let certManager;
-    try {
-      certManager = await getCertManagerCommand();
-    } catch (err) {
-      vscode.window.showErrorMessage(err.message);
-      return;
-    }
-    const proc = spawn(certManager.command, [...certManager.args, "push", "--cert", caPath], { windowsHide: true });
-    let output = "";
-    proc.stdout.on("data", d => output += d);
-    proc.stderr.on("data", d => log(`cert: ${d}`));
-    proc.on("close", (code) => {
-      try {
-        const result = JSON.parse(output);
-        if (result.success) {
-          vscode.window.showInformationMessage(result.message);
-        } else {
-          vscode.window.showErrorMessage(result.message);
-        }
-      } catch (_) {
-        vscode.window.showInformationMessage(output || t("extension.cert.completed"));
-      }
+    const result = await pushCertificateWithWait({
+      source: "manual",
+      waitMinutes: getCertPushWaitMinutes(),
     });
+    if (result.success) {
+      vscode.window.showInformationMessage(result.message);
+    } else {
+      vscode.window.showErrorMessage(result.message);
+    }
   });
 
   const setupProxyCmd = vscode.commands.registerCommand("secmp.setupProxy", async () => {
@@ -5250,6 +5895,15 @@ function activate(context) {
         fontSize: getConfiguredFontSize(),
       });
     }
+    if (event.affectsConfiguration("secmp.autoPushCertOnDeviceReconnect") ||
+        event.affectsConfiguration("secmp.certPushWaitMinutes")) {
+      postCertAutoPushConfig();
+      if (isAutoPushCertEnabled()) {
+        startAdbMonitor();
+      } else {
+        scheduleAdbMonitor();
+      }
+    }
     if (event.affectsConfiguration("secmp.ipLocation") ||
         event.affectsConfiguration("secmp.ipLocationEnabled") ||
         event.affectsConfiguration("secmp.ipLocationEndpoint")) {
@@ -5269,11 +5923,15 @@ function activate(context) {
   );
 
   log("Commands registered");
+  if (isAutoPushCertEnabled()) {
+    startAdbMonitor();
+  }
   checkInterruptedSession();
 }
 
 function deactivate() {
   stopFlowPolling();
+  stopAdbMonitor();
   recordSessionProxyState(!!proxyProcess, {
     port: activeProxyPort,
     reason: "extensionDeactivate",

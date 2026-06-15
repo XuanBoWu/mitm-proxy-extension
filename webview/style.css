@@ -555,6 +555,20 @@ dd { color: var(--text-primary); }
 }
 .status-text.success { background: var(--green-bg); color: var(--green); }
 .status-text.error { background: var(--red-bg); color: var(--red); }
+.status-text.info { background: rgba(0, 122, 204, 0.18); color: var(--accent); }
+
+.setting-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 6px 0;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+.setting-row.compact {
+  margin: 6px 0 4px;
+}
 
 .mono-value {
   font-family: var(--font-mono);

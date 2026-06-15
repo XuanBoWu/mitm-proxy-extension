@@ -9,11 +9,11 @@ import sys
 import os
 import re
 import json
-import time
 import hashlib
 import shutil
 import subprocess
 import argparse
+import shlex
 
 if sys.platform == "win32":
     sys.stdout = open(sys.stdout.fileno(), mode="w", encoding="utf-8", buffering=1)
@@ -21,6 +21,9 @@ if sys.platform == "win32":
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 WORK_PATH = "/data/local/tmp/"
+ADB_SERIAL = None
+ROOT_MODE = "su"
+SU_COMMAND_STYLE = None
 
 # Android cert directories
 SYSTEM_CACERTS_DIR = "/system/etc/security/cacerts"
@@ -60,19 +63,70 @@ def run_cmd(args, check=False, timeout=None):
         ) from e
 
 
+def adb_base_args():
+    args = ["adb"]
+    if ADB_SERIAL:
+        args.extend(["-s", ADB_SERIAL])
+    return args
+
+
 def adb_shell(command, check=True, timeout=15):
     """在 Android 设备上执行 shell 命令。"""
     return run_cmd(
-        ["adb", "shell", command],
+        adb_base_args() + ["shell", command],
         check=check,
         timeout=timeout,
     )
 
 
+def build_su_command(command, style):
+    quoted_command = shlex.quote(command)
+    if style == "su0":
+        return f"su 0 sh -c {quoted_command}"
+    if style == "suc":
+        return f"su -c {quoted_command}"
+    raise RuntimeError(f"Unsupported su style: {style}")
+
+
+def detect_su_style():
+    """检测设备 su 调用形式。不会执行 adb root。"""
+    global SU_COMMAND_STYLE
+    if SU_COMMAND_STYLE:
+        return SU_COMMAND_STYLE
+
+    probes = [
+        ("su0", "su 0 id"),
+        ("suc", "su -c id"),
+    ]
+    for style, command in probes:
+        result = adb_shell(command, check=False, timeout=8)
+        output = f"{result.stdout}\n{result.stderr}"
+        if result.returncode == 0 and "uid=0" in output:
+            SU_COMMAND_STYLE = style
+            return style
+    return None
+
+
+def adb_shell_root(command, check=True, timeout=15):
+    """以 root 权限执行设备内 shell 命令；默认通过 su，不重启 adbd。"""
+    if ROOT_MODE == "adbd":
+        return adb_shell(command, check=check, timeout=timeout)
+
+    if ROOT_MODE == "auto":
+        whoami = adb_shell("whoami", check=False, timeout=8).stdout.strip()
+        if whoami == "root":
+            return adb_shell(command, check=check, timeout=timeout)
+
+    su_style = detect_su_style()
+    if not su_style:
+        raise RuntimeError("su root access is unavailable. SecMP did not run adb root.")
+    return adb_shell(build_su_command(command, su_style), check=check, timeout=timeout)
+
+
 def adb_push(source, target_dir):
     """adb push 文件到设备。"""
     result = run_cmd(
-        ["adb", "push", source, target_dir],
+        adb_base_args() + ["push", source, target_dir],
         check=False,
     )
     if result.returncode != 0:
@@ -123,9 +177,9 @@ def convert_to_android_cert(cert_pem_path, output_dir=None):
 # ===== ADB 设备管理 =====
 
 def check_device():
-    """Check if ADB device is connected and has root."""
+    """Check if ADB device is connected and whether root execution is available."""
     try:
-        result = run_cmd(["adb", "shell", "echo", "connected"], check=False, timeout=5)
+        result = run_cmd(adb_base_args() + ["shell", "echo", "connected"], check=False, timeout=5)
         if result.returncode != 0 or "connected" not in result.stdout:
             return {"connected": False, "error": "No ADB device connected"}
     except Exception as e:
@@ -134,23 +188,20 @@ def check_device():
     version = adb_shell("getprop ro.build.version.release", check=False).stdout.strip()
     model = adb_shell("getprop ro.product.model", check=False).stdout.strip()
     whoami = adb_shell("whoami", check=False).stdout.strip()
+    su_style = None if whoami == "root" else detect_su_style()
 
     info = {
         "connected": True,
+        "serial": ADB_SERIAL,
         "androidVersion": version,
         "model": model,
-        "isRoot": whoami == "root",
+        "shellUser": whoami,
+        "isRoot": whoami == "root" or bool(su_style),
+        "isRootAdbd": whoami == "root",
+        "suAvailable": bool(su_style),
+        "rootMethod": "adbd" if whoami == "root" else ("su" if su_style else None),
+        "suStyle": su_style,
     }
-
-    if not info["isRoot"]:
-        try:
-            run_cmd(["adb", "root"], check=False, timeout=15)
-            time.sleep(1)
-            whoami2 = adb_shell("whoami", check=False).stdout.strip()
-            info["isRoot"] = whoami2 == "root"
-            info["rootMessage"] = "Root access acquired" if info["isRoot"] else "Root failed"
-        except Exception as e:
-            info["rootMessage"] = str(e)
 
     return info
 
@@ -184,7 +235,7 @@ def parse_android_major_version(version_text):
 
 def _get_pids_by_name(process_name):
     """通过 pidof 获取进程 PID 列表。"""
-    result = adb_shell(f"pidof {process_name}", check=False, timeout=10)
+    result = adb_shell_root(f"pidof {process_name}", check=False, timeout=10)
     if result.returncode != 0 or not result.stdout.strip():
         return []
     return [p for p in result.stdout.strip().split() if p.isdigit()]
@@ -192,7 +243,7 @@ def _get_pids_by_name(process_name):
 
 def _get_child_pids(parent_pid):
     """获取指定父进程的所有子进程 PID。"""
-    result = adb_shell(f"ps -o PID --ppid {parent_pid}", check=False, timeout=10)
+    result = adb_shell_root(f"ps -o PID --ppid {parent_pid}", check=False, timeout=10)
     if result.returncode != 0:
         return []
 
@@ -218,7 +269,7 @@ def inject_certificates():
     """
     device = check_device()
     if not device.get("isRoot"):
-        return {"success": False, "message": "Device must be rooted to inject certificates"}
+        return {"success": False, "message": "Root access is required. su is unavailable and SecMP did not run adb root."}
 
     android_version = parse_android_major_version(device.get("androidVersion", "0"))
     is_android14 = android_version >= 14
@@ -236,32 +287,32 @@ def inject_certificates():
 
     try:
         # Step 1: 清理并创建临时目录
-        adb_shell(f"rm -rf {tmp_copy_dir} && mkdir -p -m 700 {tmp_copy_dir}",
-                   check=True, timeout=15)
+        adb_shell_root(f"rm -rf {tmp_copy_dir} && mkdir -p -m 700 {tmp_copy_dir}",
+                       check=True, timeout=15)
 
         # Step 2: 复制现有系统证书到临时目录
-        adb_shell(f"cp {cert_source_dir}/* {tmp_copy_dir}/",
-                   check=True, timeout=30)
+        adb_shell_root(f"cp {cert_source_dir}/* {tmp_copy_dir}/",
+                       check=True, timeout=30)
 
         # Step 3: 在 /system/etc/security/cacerts 上挂载 tmpfs
-        adb_shell(f"mount -t tmpfs tmpfs {tmpfs_mount_dir}",
-                   check=True, timeout=15)
+        adb_shell_root(f"mount -t tmpfs tmpfs {tmpfs_mount_dir}",
+                       check=True, timeout=15)
 
         # Step 4: 将原有证书移动回 tmpfs
-        adb_shell(f"mv {tmp_copy_dir}/* {tmpfs_mount_dir}/",
-                   check=True, timeout=30)
+        adb_shell_root(f"mv {tmp_copy_dir}/* {tmpfs_mount_dir}/",
+                       check=True, timeout=30)
 
         # Step 5: 复制新的 .0 证书
-        adb_shell(f"cp {WORK_PATH}*.0 {tmpfs_mount_dir}/",
-                   check=True, timeout=30)
+        adb_shell_root(f"cp {WORK_PATH}*.0 {tmpfs_mount_dir}/",
+                       check=True, timeout=30)
 
         # Step 6: 修正权限和 SELinux 上下文
-        adb_shell(f"chown root:root {tmpfs_mount_dir}/*",
-                   check=True, timeout=15)
-        adb_shell(f"chmod 644 {tmpfs_mount_dir}/*",
-                   check=True, timeout=15)
-        adb_shell(f"chcon u:object_r:system_file:s0 {tmpfs_mount_dir}/*",
-                   check=True, timeout=15)
+        adb_shell_root(f"chown root:root {tmpfs_mount_dir}/*",
+                       check=True, timeout=15)
+        adb_shell_root(f"chmod 644 {tmpfs_mount_dir}/*",
+                       check=True, timeout=15)
+        adb_shell_root(f"chcon u:object_r:system_file:s0 {tmpfs_mount_dir}/*",
+                       check=True, timeout=15)
 
         # Step 7: 获取 Zygote PID
         zygote_pids = []
@@ -275,7 +326,7 @@ def inject_certificates():
             # Step 8: 注入 Zygote namespace
             for z_pid in zygote_pids:
                 try:
-                    adb_shell(
+                    adb_shell_root(
                         f"nsenter --mount=/proc/{z_pid}/ns/mnt -- "
                         f"mount --bind {tmpfs_mount_dir} {bind_target_dir}",
                         check=True, timeout=15,
@@ -302,12 +353,12 @@ def inject_certificates():
                             f">/dev/null 2>&1 || true ) &"
                         )
                     batch_cmd = " ".join(commands) + " wait"
-                    adb_shell(batch_cmd, check=False, timeout=30)
+                    adb_shell_root(batch_cmd, check=False, timeout=30)
             else:
                 errors.append("No app processes found for namespace injection")
 
         # 清理临时目录
-        adb_shell(f"rm -rf {tmp_copy_dir}", check=False)
+        adb_shell_root(f"rm -rf {tmp_copy_dir}", check=False)
 
         return {
             "success": True,
@@ -318,7 +369,10 @@ def inject_certificates():
 
     except RuntimeError as e:
         # 尝试清理
-        adb_shell(f"rm -rf {tmp_copy_dir}", check=False, timeout=5)
+        try:
+            adb_shell_root(f"rm -rf {tmp_copy_dir}", check=False, timeout=5)
+        except RuntimeError:
+            pass
         return {
             "success": False,
             "message": f"Injection failed: {str(e)[:500]}",
@@ -328,21 +382,37 @@ def inject_certificates():
 # ===== CLI =====
 
 def main():
+    global ADB_SERIAL, ROOT_MODE
+
     parser = argparse.ArgumentParser(description="Certificate manager for SecMP")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    subparsers.add_parser("check", help="Check ADB device status")
+    def add_adb_options(command_parser):
+        command_parser.add_argument("--serial", default=None, help="ADB device serial")
+        command_parser.add_argument(
+            "--root-mode",
+            choices=["su", "adbd", "auto"],
+            default="su",
+            help="Root execution mode. The default uses su and never runs adb root.",
+        )
+
+    check_parser = subparsers.add_parser("check", help="Check ADB device status")
+    add_adb_options(check_parser)
 
     push_parser = subparsers.add_parser("push", help="Convert, push and inject certificate")
     push_parser.add_argument("--cert", required=True, help="Path to CA certificate (PEM format)")
+    add_adb_options(push_parser)
 
     convert_parser = subparsers.add_parser("convert", help="Convert PEM cert to Android .0 format only")
     convert_parser.add_argument("--cert", required=True, help="Path to CA certificate (PEM format)")
     convert_parser.add_argument("--output-dir", default=None, help="Output directory (default: same as cert)")
 
-    subparsers.add_parser("inject", help="Inject certificates only")
+    inject_parser = subparsers.add_parser("inject", help="Inject certificates only")
+    add_adb_options(inject_parser)
 
     args = parser.parse_args()
+    ADB_SERIAL = getattr(args, "serial", None)
+    ROOT_MODE = getattr(args, "root_mode", "su")
 
     if args.command == "check":
         result = check_device()

@@ -141,7 +141,15 @@ runtime 查找优先级：
 
 ## Android 证书说明
 
-SecMP 使用 mitmproxy 生成的 CA 证书，并将其转换为 Android 使用的 `.0` 证书格式。设备必须已 root，才能将证书注入系统信任存储。
+SecMP 使用 mitmproxy 生成的 CA 证书，并将其转换为 Android 使用的 `.0` 证书格式。设备必须提供 root 执行能力，才能将证书注入系统信任存储。
+
+证书预置流程会尽量避免影响用户在电脑上已有的 ADB 操作：
+
+- SecMP 会将设备操作绑定到明确的 ADB serial，不依赖默认设备。
+- 证书预置期间 SecMP 不执行 `adb root`。如果当前设备 shell 已经是 root，则直接使用该 shell；否则尝试使用 `su`。
+- 手动预置证书时，如果设备尚未上线，SecMP 会按 `secmp.certPushWaitMinutes` 设置等待设备连接。默认等待 1 分钟，设为 0 时不等待。
+- 设备面板可以开启“设备重连后自动预置”。设备重新通过 ADB 上线后，SecMP 会自动预置证书；能读取 boot id 时，会按设备本次启动周期去重，避免重复自动注入。
+- 设备面板可以导出当前 mitmproxy CA 证书，支持 Android `.0` 格式和 `.cer` 格式，便于外部脚本或其他安装流程使用。
 
 Android 14 及更新版本使用 Conscrypt APEX 证书路径，SecMP 的证书管理器会处理这类路径。
 

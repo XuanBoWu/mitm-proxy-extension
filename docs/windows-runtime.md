@@ -146,6 +146,19 @@ runtime/
 
 The extension extracts the runtime into extension global storage and then starts the executables from there. ADB remains an external dependency.
 
+The certificate manager entrypoint should support these device-aware commands in new runtimes:
+
+```bash
+cert_manager check --serial <adb-serial> --root-mode su
+cert_manager push --cert <mitmproxy-ca-cert.pem> --serial <adb-serial> --root-mode auto
+cert_manager inject --serial <adb-serial> --root-mode auto
+cert_manager convert --cert <mitmproxy-ca-cert.pem> --output-dir <dir>
+```
+
+`--root-mode su` uses device-side `su` and never runs `adb root`. `--root-mode auto` uses an already-root ADB shell when available and otherwise falls back to `su`; it also does not run `adb root`.
+
+SecMP keeps a compatibility path for older packaged runtimes whose `cert_manager push` command only accepts `--cert`: the extension uses the packaged `convert` command to create the Android `.0` certificate, then performs `adb -s <serial> push` and the root injection steps itself. This lets a VSIX-side certificate workflow fix run before the matching refreshed runtime package is published, but release candidates that modify `tools/cert_manager.py` should still bump `secmp.runtimeVersion` and ship new runtime assets.
+
 `manifest.json` must include:
 
 ```json

@@ -4,6 +4,14 @@ All notable changes to SecMP are documented in this file.
 
 ## Unreleased
 
+### 证书管理
+
+- 手动预置 CA 证书时支持等待 ADB 设备上线，默认等待 1 分钟，可通过 `secmp.certPushWaitMinutes` 在 0-10 分钟之间配置，并在 Webview 中显示倒计时。
+- 设备面板新增“设备重连后自动预置”开关，SecMP 会持续监听 ADB 状态，并在设备重新上线后自动预置证书；能读取 boot id 时按启动周期去重，避免同一次开机重复注入。
+- 证书预置流程默认不执行 `adb root`，所有 ADB 操作绑定明确 serial；root 操作优先使用当前 root shell 或设备内 `su`，降低中断用户已有 `adb logcat` / shell / forward 会话的风险。
+- 设备面板新增证书导出入口，支持导出 Android `.0` 证书和 `.cer` 证书，便于外部脚本、手工安装或其他证书安装流程使用。
+- `cert_manager.py` 新增 `--serial` 和 `--root-mode` 参数；extension 会兼容旧 packaged runtime，只用旧 runtime 做证书转换，再由 extension 执行 serial 绑定的推送和注入流程。
+
 ### 修复
 
 - 修复 mitmweb 12.x `/updates` WebSocket 事件解析：兼容 `type/payload` 消息格式和嵌套 flow payload，避免实时流已连接但新增请求仍依赖 `/flows.json` 10 秒对账批量出现。

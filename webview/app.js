@@ -433,7 +433,13 @@ window.addEventListener("message", (event) => {
       showCertStatus(msg.success ? "success" : "error", msg.message);
       break;
     case "certStatus":
-      showCertStatus(msg.success ? "success" : "error", msg.message);
+      showCertStatus(
+        msg.success ? "success" : (msg.state === "waiting" || msg.state === "running" || msg.state === "checkingRoot" || msg.state === "busy" ? "info" : "error"),
+        msg.message
+      );
+      break;
+    case "certAutoPushConfig":
+      $("autoPushCertToggle").checked = !!msg.enabled;
       break;
     case "proxySetupResult":
       showProxySetupStatus(msg.success ? "success" : "error", msg.message);
@@ -587,12 +593,14 @@ function updateDevicePanel(msg) {
 
   if (msg.connected) {
     adbStatus.querySelector(".dot").className = "dot connected";
-    adbStatusText.textContent = t("common.available");
+    adbStatusText.textContent = msg.serial ? `${t("common.available")} · ${msg.serial}` : t("common.available");
     deviceInfoCard.style.display = "block";
     if (msg.info) {
       $("devModel").textContent = msg.info.model || "-";
       $("devVersion").textContent = msg.info.androidVersion || "-";
-      $("devRoot").textContent = msg.info.isRoot ? t("device.root.yes") : t("device.root.no");
+      $("devRoot").textContent = msg.info.isRoot
+        ? (msg.info.rootMethod === "su" ? "su" : t("device.root.yes"))
+        : t("device.root.no");
     }
   } else {
     adbStatus.querySelector(".dot").className = "dot disconnected";
@@ -3626,6 +3634,17 @@ $("rootDeviceBtn").addEventListener("click", () => {
 $("pushCertBtn").addEventListener("click", () => {
   showCertStatus("", t("webview.device.pushingCert"));
   vscode.postMessage({ command: "pushCert" });
+});
+
+$("autoPushCertToggle").addEventListener("change", () => {
+  vscode.postMessage({
+    command: "setAutoPushCert",
+    enabled: $("autoPushCertToggle").checked,
+  });
+});
+
+$("exportCertBtn").addEventListener("click", () => {
+  vscode.postMessage({ command: "exportCert" });
 });
 
 $("startProxyBtn").addEventListener("click", () => {
