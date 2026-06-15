@@ -1949,6 +1949,7 @@ function isLocalOrSpecialIp(ip) {
     const [a, b, c, d] = parts;
     return (
       a === 10 ||
+      a === 0 ||
       a === 127 ||
       (a === 172 && b >= 16 && b <= 31) ||
       (a === 192 && b === 168) ||
@@ -2092,7 +2093,7 @@ function parseIpLocationResponse(body, requestedIps) {
   }));
 }
 
-function requestJson(urlString, body, timeoutMs = IP_LOCATION_REQUEST_TIMEOUT_MS) {
+function requestIpLocationJson(urlString, body, timeoutMs = IP_LOCATION_REQUEST_TIMEOUT_MS) {
   return new Promise((resolve, reject) => {
     let parsed;
     try {
@@ -2112,8 +2113,10 @@ function requestJson(urlString, body, timeoutMs = IP_LOCATION_REQUEST_TIMEOUT_MS
       method: "POST",
       timeout: timeoutMs,
       headers: {
+        "Accept": "application/json",
         "Content-Type": "application/json",
         "Content-Length": payload.length,
+        "User-Agent": `SecMP/${extensionPackage.version}`,
       },
     }, (res) => {
       const chunks = [];
@@ -2142,7 +2145,7 @@ function requestJson(urlString, body, timeoutMs = IP_LOCATION_REQUEST_TIMEOUT_MS
 }
 
 async function queryIpLocationBatch(endpoint, ips) {
-  const body = await requestJson(endpoint, { ips });
+  const body = await requestIpLocationJson(endpoint, { ips });
   return parseIpLocationResponse(body, ips);
 }
 
@@ -2196,12 +2199,13 @@ async function testIpLocationEndpoint() {
     return;
   }
   try {
-    const testIp = "8.8.8.8";
-    const results = await queryIpLocationBatch(config.endpoint, [testIp]);
-    const result = results[0] || {};
-    if (!result.country && !result.registeredCountry) {
+    const testIps = ["8.8.8.8", "223.5.5.5"];
+    const results = await queryIpLocationBatch(config.endpoint, testIps);
+    const hasValidResult = results.some((result) => result.country || result.registeredCountry);
+    if (!hasValidResult) {
       throw new Error(t("extension.ipLocation.test.invalidResponse"));
     }
+    const result = results.find((item) => item.country || item.registeredCountry) || {};
     vscode.window.showInformationMessage(t("extension.ipLocation.test.success", {
       country: result.country || "-",
       registeredCountry: result.registeredCountry || "-",
