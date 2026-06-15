@@ -1,6 +1,6 @@
-# SecMP 0.3.1
+# SecMP 0.3.3
 
-SecMP 0.3.1 adds optional IP location enrichment, capture-network binding, safer certificate preset workflows, a local MCP inspection interface, and a refreshed Windows/macOS runtime.
+SecMP 0.3.3 adds optional IP location enrichment, capture-network binding, safer certificate preset workflows, a local MCP inspection interface, and a refreshed Windows/macOS runtime.
 
 ## Highlights
 
@@ -16,7 +16,7 @@ SecMP 0.3.1 adds optional IP location enrichment, capture-network binding, safer
 
 ## Runtime
 
-This release uses runtime `0.3.1`.
+This release uses runtime `0.3.3`.
 
 The runtime package includes the `--connect-addr` proxy engine argument used to bind upstream connections to the selected capture network and the updated certificate manager entrypoint with serial/root-mode support. `runtimeApiVersion` remains `1` because the extension keeps compatibility with the existing runtime command protocol.
 
@@ -30,7 +30,7 @@ The runtime package includes the `--connect-addr` proxy engine argument used to 
 
 ## Installation
 
-1. Download `secmp-0.3.1.vsix`.
+1. Download `secmp-0.3.3.vsix`.
 2. In VS Code or VSCodium, run `Extensions: Install from VSIX...`.
 3. Run `SecMP: New Temporary Session`, `SecMP: New Persistent Session`, or open an existing `.secmp` session from the SecMP sidebar.
 4. Start the proxy from the capture panel.
@@ -40,15 +40,15 @@ The runtime package includes the `--connect-addr` proxy engine argument used to 
 
 This release includes every change since the previous release tag `v0.3.0`, including IP location lookup, capture-network binding, the corrected lookup request format, persistent IP location snapshots in `.secmp` sessions, safer certificate preset operations, MCP inspection tooling, WebSocket flow-event parsing fixes, and the runtime package needed for upstream network binding and updated certificate manager commands.
 
-Because `secmp.runtimeVersion` changes to `0.3.1`, SecMP installs the matching runtime package for the current platform instead of reusing cached runtime `0.3.0`.
+Because `secmp.runtimeVersion` changes to `0.3.3`, SecMP installs the matching runtime package for the current platform instead of reusing cached runtime `0.3.0`.
 
 ## Assets
 
-- `secmp-0.3.1.vsix`
-- `secmp-runtime-win32-x64-0.3.1.zip`
-- `secmp-runtime-win32-x64-0.3.1.zip.sha256`
-- `secmp-runtime-darwin-arm64-0.3.1.zip`
-- `secmp-runtime-darwin-arm64-0.3.1.zip.sha256`
+- `secmp-0.3.3.vsix`
+- `secmp-runtime-win32-x64-0.3.3.zip`
+- `secmp-runtime-win32-x64-0.3.3.zip.sha256`
+- `secmp-runtime-darwin-arm64-0.3.3.zip`
+- `secmp-runtime-darwin-arm64-0.3.3.zip.sha256`
 
 ## Notice
 

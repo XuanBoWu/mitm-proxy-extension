@@ -3,7 +3,7 @@
   "displayName": "SecMP",
   "icon": "media/icon.png",
   "description": "%secmp.description%",
-  "version": "0.3.1",
+  "version": "0.3.3",
   "publisher": "xbowu",
   "license": "MIT",
   "repository": {
@@ -67,7 +67,7 @@
         },
         "secmp.runtimeVersion": {
           "type": "string",
-          "default": "0.3.1",
+          "default": "0.3.3",
           "description": "%secmp.config.runtimeVersion%"
         },
         "secmp.language": {
@@ -200,7 +200,7 @@
         },
         "secmp.windowsRuntimeVersion": {
           "type": "string",
-          "default": "0.3.1",
+          "default": "0.3.3",
           "description": "%secmp.config.windowsRuntimeVersion%"
         },
         "secmp.updateCheckEnabled": {

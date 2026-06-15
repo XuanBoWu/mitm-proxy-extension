@@ -6,7 +6,7 @@ All notable changes to SecMP are documented in this file.
 
 暂无。
 
-## 0.3.1 - 2026-06-16
+## 0.3.3 - 2026-06-16
 
 ### IP 归属地与采集网络
 
@@ -37,9 +37,9 @@ All notable changes to SecMP are documented in this file.
 
 ### 发布与 runtime
 
-- 将 VSIX 版本更新为 `0.3.1`。
-- 将 `secmp.runtimeVersion` 更新为 `0.3.1`，用于发布包含采集网络绑定参数和新版证书管理入口的 Windows/macOS runtime 包；`runtimeApiVersion` 继续保持兼容的 `1`。
-- 更新 README、发布说明、runtime 文档和 MCP 文档，明确 0.3.1 的 VSIX/runtime 产物、IP 归属地持久化行为、采集网络绑定能力、证书预置流程和本地 MCP 调试接口。
+- 将 VSIX 版本更新为 `0.3.3`。
+- 将 `secmp.runtimeVersion` 更新为 `0.3.3`，用于发布包含采集网络绑定参数和新版证书管理入口的 Windows/macOS runtime 包；`runtimeApiVersion` 继续保持兼容的 `1`。
+- 更新 README、发布说明、runtime 文档和 MCP 文档，明确 0.3.3 的 VSIX/runtime 产物、IP 归属地持久化行为、采集网络绑定能力、证书预置流程和本地 MCP 调试接口。
 
 ## 0.3.0 - 2026-06-14
 

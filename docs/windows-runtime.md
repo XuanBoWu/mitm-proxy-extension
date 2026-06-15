@@ -93,8 +93,8 @@ Configure a local runtime archive path for offline installation:
 
 ```json
 {
-  "secmp.runtimeVersion": "0.3.1",
-  "secmp.runtimeArchivePath": "C:\\Users\\me\\Downloads\\secmp-runtime-win32-x64-0.3.1.zip"
+  "secmp.runtimeVersion": "0.3.3",
+  "secmp.runtimeArchivePath": "C:\\Users\\me\\Downloads\\secmp-runtime-win32-x64-0.3.3.zip"
 }
 ```
 
@@ -102,7 +102,7 @@ You can also point directly to an extracted runtime directory:
 
 ```json
 {
-  "secmp.runtimeVersion": "0.3.1",
+  "secmp.runtimeVersion": "0.3.3",
   "secmp.runtimePath": "C:\\tools\\secmp-runtime\\runtime"
 }
 ```
@@ -111,8 +111,8 @@ For hosted distribution, configure the runtime URL:
 
 ```json
 {
-  "secmp.runtimeVersion": "0.3.1",
-  "secmp.runtimeUrl": "https://github.com/XuanBoWu/mitm-proxy-extension/releases/download/v0.3.1/secmp-runtime-win32-x64-0.3.1.zip",
+  "secmp.runtimeVersion": "0.3.3",
+  "secmp.runtimeUrl": "https://github.com/XuanBoWu/mitm-proxy-extension/releases/download/v0.3.3/secmp-runtime-win32-x64-0.3.3.zip",
   "secmp.runtimeSha256": "<sha256-from-ci>"
 }
 ```
@@ -163,7 +163,7 @@ SecMP keeps a compatibility path for older packaged runtimes whose `cert_manager
 
 ```json
 {
-  "runtimeVersion": "0.3.1",
+  "runtimeVersion": "0.3.3",
   "runtimeApiVersion": 1,
   "platform": "darwin",
   "arch": "arm64",

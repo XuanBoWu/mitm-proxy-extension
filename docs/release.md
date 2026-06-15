@@ -59,31 +59,31 @@ Before creating a release:
 Build the Windows runtime:
 
 ```powershell
-npm run runtime:windows -- -RuntimeVersion 0.3.1 -OutputDir dist
+npm run runtime:windows -- -RuntimeVersion 0.3.3 -OutputDir dist
 ```
 
 Build the macOS runtime:
 
 ```bash
-npm run runtime:macos -- --runtime-version 0.3.1 --output-dir dist
+npm run runtime:macos -- --runtime-version 0.3.3 --output-dir dist
 ```
 
 Smoke test the runtime:
 
 ```powershell
-.\scripts\test-windows-runtime.ps1 -RuntimeZip .\dist\secmp-runtime-win32-x64-0.3.1.zip -RuntimeVersion 0.3.1
+.\scripts\test-windows-runtime.ps1 -RuntimeZip .\dist\secmp-runtime-win32-x64-0.3.3.zip -RuntimeVersion 0.3.3
 ```
 
 Smoke test extension runtime installation:
 
 ```powershell
-npm run runtime:windows:test-install -- --runtime-zip .\dist\secmp-runtime-win32-x64-0.3.1.zip --runtime-version 0.3.1
+npm run runtime:windows:test-install -- --runtime-zip .\dist\secmp-runtime-win32-x64-0.3.3.zip --runtime-version 0.3.3
 ```
 
 On macOS, use the same install smoke test with the macOS runtime zip:
 
 ```bash
-node scripts/test-extension-runtime-install.js --runtime-zip dist/secmp-runtime-darwin-arm64-0.3.1.zip --runtime-version 0.3.1
+node scripts/test-extension-runtime-install.js --runtime-zip dist/secmp-runtime-darwin-arm64-0.3.3.zip --runtime-version 0.3.3
 ```
 
 Package the VSIX:
@@ -99,8 +99,8 @@ After the final code is on `master`, create and push a tag:
 ```powershell
 git checkout master
 git pull --ff-only
-git tag v0.3.1
-git push origin v0.3.1
+git tag v0.3.3
+git push origin v0.3.3
 ```
 
 The `Build Runtime Packages` workflow will:
@@ -119,14 +119,14 @@ For a manual release run, trigger the workflow with:
 
 ```text
 publish=true
-runtime_version=0.3.1
-release_tag=v0.3.1
+runtime_version=0.3.3
+release_tag=v0.3.3
 ```
 
 ## Release Notes Template
 
 ```markdown
-## SecMP 0.3.1
+## SecMP 0.3.3
 
 Patch release for a focused bug fix or feature stage.
 
@@ -149,7 +149,7 @@ Patch release for a focused bug fix or feature stage.
 
 ### Assets
 
-- `secmp-0.3.1.vsix`
+- `secmp-0.3.3.vsix`
 
 Runtime assets are included only when `secmp.runtimeVersion` changes.
 ```
