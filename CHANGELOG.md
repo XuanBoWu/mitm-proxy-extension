@@ -6,7 +6,24 @@ All notable changes to SecMP are documented in this file.
 
 - No unreleased changes.
 
-## 0.3.1 - 2026-06-15
+## 0.3.2 - 2026-06-15
+
+### IP 归属地与采集网络
+
+- 请求列表新增可选 IP 归属地列：配置 `secmp.ipLocation.enabled` 和 `secmp.ipLocation.endpoint` 后，extension 按批量 `POST { "ips": [...] }` 查询公网 `server_ip` 的 `country` / `registered_country`，Webview 只接收轻量归属地更新，不把查询逻辑放进前端。
+- 修复 IP 归属地查询请求体格式，确保服务端收到 `{ "ips": [...] }` 而不是裸数组。
+- IP 归属地结果现在会写入 `.secmp` flow 元数据并随会话文件固化；重新打开会话时优先使用文件里的 `ip_location` / `ip_location_detail`，不会因为后续接口结果变化或重新查询而改写历史抓包。
+- 启动代理时将 Webview 选择的采集网络同时用于代理监听地址和 mitmproxy 后向出口，runtime 通过 `--connect-addr` 在 `server_connect` 阶段绑定连接目标服务器时使用的本地源地址。
+- 请求列表 IP 列 tooltip 增加服务端 IP、后向出口、代理监听地址和 `mitmproxy server_conn.peername` 来源说明，方便判断 IP 归属地数据对应的出口条件。
+- 请求列表右键菜单新增“复制 IP”，位于“复制 Host”下方并支持多选。
+
+### 发布与 runtime
+
+- 将 VSIX 版本更新为 `0.3.2`。
+- 将 `secmp.runtimeVersion` 更新为 `0.3.2`，用于发布包含采集网络绑定参数的 Windows/macOS runtime 包；这是从上一个正式 release `v0.3.0` 以来的 runtime 变更。
+- 更新 README、发布说明和 runtime 文档，明确 0.3.2 的 VSIX/runtime 产物、IP 归属地持久化行为和采集网络绑定能力。
+
+## 0.3.1 - 2026-06-15 (staging candidate, superseded by 0.3.2)
 
 ### 采集网络绑定
 

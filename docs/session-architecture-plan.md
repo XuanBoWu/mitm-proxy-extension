@@ -4,7 +4,7 @@
 
 - Branch: `codex/session-capture-architecture`
 - First committed foundation: `382c241 feat: add session-based capture storage`
-- Current uncommitted stage covers sidebar session workspace, session UI state persistence, ordering fixes, and close/open behavior fixes.
+- Current implemented state covers session-first capture, body persistence, extension-side body filtering, WebSocket flow updates with polling reconciliation, optional IP location snapshots, and capture-network binding.
 
 ## Product Direction
 
@@ -71,9 +71,9 @@ SecMP should behave like a session-first capture tool:
 - `deactivate()` flushes the active session and writes a resume marker.
 - On activation, interrupted sessions can be restored, kept, or discarded if temporary.
 
-## Current Validation
+## Validation
 
-The following commands passed after the current uncommitted stage:
+The session-related validation set is:
 
 ```sh
 node --check extension.js
@@ -87,6 +87,7 @@ npm run l10n:check
 
 - This section records the session-architecture implementation checkpoint. For current release versions, use `package.json`.
 - SecMP 0.3.0 updates `secmp.runtimeVersion` to `0.3.0` so refreshed Windows/macOS runtime icon assets are shipped with matching runtime packages.
+- SecMP 0.3.2 updates `secmp.runtimeVersion` to `0.3.2` so the runtime release includes the `--connect-addr` proxy-engine support required for capture-network binding.
 
 ## Current Known Limitations
 
@@ -113,9 +114,9 @@ The current Webview still uses the older message editor model for detail bodies.
 - Search results should be stable: no partial match counts shown as final.
 - Binary bodies should save fully but show only a small raw preview, while image/audio/video render views can preview the full media when supported.
 
-### Capture Event Stream Still Uses Polling
+### Capture Event Stream Uses WebSocket With Polling Reconciliation
 
-The plan still calls for replacing `/flows.json` polling with mitmweb `/updates` WebSocket plus snapshot reconciliation. This has not been implemented yet.
+The capture path now consumes mitmweb `/updates` WebSocket events for add/update/reset and keeps `/flows.json` polling as startup/reconnect reconciliation.
 
 ## Recommended Next Implementation Phase
 
@@ -141,7 +142,7 @@ Replace full-body `contenteditable` detail rendering with a virtual viewer:
 
 ### Phase 3: Stable Body Filtering
 
-Move body filtering to extension-side session scanning:
+Extension-side body filtering is implemented for the current flow set. Further hardening can still improve long-running sessions:
 
 - Freeze a watermark for the current flow set.
 - Fetch missing text bodies for flows up to the watermark.
@@ -151,7 +152,7 @@ Move body filtering to extension-side session scanning:
 
 ### Phase 4: WebSocket Capture Feed
 
-Replace interval polling with mitmweb `/updates`:
+The WebSocket feed is implemented. Remaining work is operational hardening:
 
 - connect after `WEB_PORT` and `AUTH_TOKEN`
 - process add/update/reset events
@@ -160,7 +161,7 @@ Replace interval polling with mitmweb `/updates`:
 
 ## Commit Guidance
 
-The current uncommitted changes should likely be committed as:
+Historical commit suggestion from the original session-architecture checkpoint:
 
 ```txt
 feat: add session workspace sidebar

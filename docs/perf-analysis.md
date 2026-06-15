@@ -2,6 +2,8 @@
 
 分支: `perf/experimental-performance`
 
+> 历史说明：本文记录的是 `perf/experimental-performance` 分支早期的性能瓶颈。当前发布路径已经使用 mitmweb `/updates` WebSocket 事件，并将 `/flows.json` 轮询作为对账兜底；列表消息不再携带 body 负载，body 过滤也已迁移到 extension 侧执行。
+
 ## 一、数据流总览与关键耗时
 
 ```
@@ -20,12 +22,12 @@ Android设备 ──→ mitmproxy ──→ REST API (flows.json) ──→ exte
 
 ## 二、卡点清单（按链路顺序）
 
-### 卡点 1: REST API 轮询替代 WebSocket
+### 历史卡点 1: REST API 轮询替代 WebSocket
 
 - 文件: `extension.js:1703-1784` (pollFlows)
 - 现象: 每秒请求 `/flows.json` 返回**全量**flow 列表（所有已抓包元数据）
 - 大流量时影响: 10000 flows × ~2KB each ≈ 20MB JSON 传输/解析每秒
-- mitmweb 已提供 `/updates` WebSocket endpoint (add/update/reset 事件)，扩展未使用
+- 当前状态: 扩展已使用 mitmweb `/updates` WebSocket endpoint (add/update/reset 事件)，`/flows.json` 仅作为启动和重连后的对账兜底。
 
 ### 卡点 2: transformFlow 全量对象重建
 

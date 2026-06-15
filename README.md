@@ -17,6 +17,8 @@ SecMP is intended for authorized testing of devices and applications you own or 
 - Inspect request and response headers and bodies in a Burp-style viewer.
 - Filter by URL, headers, bodies, method, status, type, and protocol.
 - Create temporary or persistent `.secmp` capture sessions and reopen recent session files from the SecMP sidebar.
+- Show an optional IP location column for captured server IPs, with lookup results persisted into `.secmp` sessions as an audit snapshot.
+- Bind the selected capture network to both the proxy listener and the mitmproxy upstream source address when multiple host interfaces are available.
 - Export captures as HAR or JSON.
 - Use the SecMP Activity Bar icon and sidebar to create/open sessions before entering the capture panel.
 - Run on Windows and macOS with a packaged runtime, without requiring users to install Python or mitmproxy.
@@ -78,6 +80,7 @@ The SecMP icon in the Activity Bar provides the session start page and common ac
 - `SecMP: Clear Device Proxy`
 - `SecMP: Clean Runtime Cache`
 - `SecMP: Check for Updates`
+- `SecMP: Test IP Location Endpoint`
 - `SecMP: Export as HAR`
 - `SecMP: Export as JSON`
 
@@ -87,9 +90,11 @@ Settings are optional for normal manual installation.
 
 ```json
 {
-  "secmp.runtimeVersion": "0.3.0",
+  "secmp.runtimeVersion": "0.3.2",
   "secmp.language": "auto",
   "secmp.openPanelAfterNewSession": true,
+  "secmp.ipLocation.enabled": false,
+  "secmp.ipLocation.endpoint": "",
   "secmp.updateCheckEnabled": true,
   "secmp.updateCheckIntervalHours": 24
 }
@@ -103,13 +108,15 @@ The runtime version is separate from the VSIX version. SecMP reuses a cached run
 
 The update checker only checks the extension VSIX version. Runtime upgrades are still controlled by `secmp.runtimeVersion`, so an extension update can reuse the existing runtime when the runtime API and version have not changed.
 
+IP location lookup is disabled by default. When enabled, `secmp.ipLocation.endpoint` must point to an HTTP or HTTPS endpoint that accepts `POST { "ips": ["8.8.8.8"] }` and returns `{"ips":[{"8.8.8.8":{"country":"...","registered_country":"..."}}]}`. Successful lookup results are written into the active `.secmp` session so reopened historical captures keep the original location snapshot.
+
 Use `SecMP: Clean Runtime Cache` to remove old cached runtimes for the current platform. The command keeps the current runtime version and the newest previous version, deletes older runtime directories and stale downloaded runtime zips, and does not delete the mitmproxy CA/config directory.
 
 For offline installation, configure a local runtime archive path:
 
 ```json
 {
-  "secmp.runtimeArchivePath": "C:\\Users\\me\\Downloads\\secmp-runtime-win32-x64-0.3.0.zip"
+  "secmp.runtimeArchivePath": "C:\\Users\\me\\Downloads\\secmp-runtime-win32-x64-0.3.2.zip"
 }
 ```
 
@@ -177,13 +184,13 @@ python -m venv .venv
 Build the Windows runtime:
 
 ```powershell
-npm run runtime:windows -- -RuntimeVersion 0.3.0 -OutputDir dist
+npm run runtime:windows -- -RuntimeVersion 0.3.2 -OutputDir dist
 ```
 
 Build the macOS runtime:
 
 ```bash
-npm run runtime:macos -- --runtime-version 0.3.0 --output-dir dist
+npm run runtime:macos -- --runtime-version 0.3.2 --output-dir dist
 ```
 
 Runtime builds embed platform icon assets from `media/secmp.ico` on Windows and `media/secmp.icns` on macOS. Updating those files changes the packaged runtime output.
