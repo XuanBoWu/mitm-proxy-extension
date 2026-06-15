@@ -1,24 +1,21 @@
-# SecMP 0.3.0
+# SecMP 0.3.2
 
-SecMP 0.3.0 focuses on trustworthy body capture, responsive large-message handling, faster capture review workflows, and refreshed cross-platform icon assets.
+SecMP 0.3.2 adds optional IP location enrichment for captured server IPs, preserves those lookup results in `.secmp` session files, and ships a refreshed runtime that can bind mitmproxy upstream connections to the selected capture network.
 
 ## Highlights
 
-- Fixed body reliability so request/response details distinguish loading, pending, ready, error, unavailable, and truly empty body states instead of showing ambiguous `(empty)` content.
-- Added background response-body fetching and stop-before-exit body completion so captured bodies remain available after the proxy stops.
-- Reworked body filtering so the extension fetches and searches body content, reports progress, and keeps unsearched flows visible instead of treating them as non-matches.
-- Improved large-message detail search with debounce, cancellation, time-sliced regex matching, and efficient DOM Range highlighting.
-- Reduced Webview message size by keeping body payloads out of list update messages and loading details on demand.
-- Added `secmp.fontSize` and a Webview font-size control for request lists and Request/Response details.
-- Added request-list and detail-context menu actions for faster copy, export, filter, session, and detail workflows.
-- Improved session exit and history actions, and restarted the proxy automatically when the configured port changes.
-- Refreshed all SecMP icon assets, including the extension icon, Webview header icon, Activity Bar icon, Windows `.ico`, and macOS `.icns`.
+- Added an optional IP location column for captured `server_ip` values. Configure `secmp.ipLocation.enabled` and `secmp.ipLocation.endpoint`, then use `SecMP: Test IP Location Endpoint` to validate the endpoint.
+- Fixed the IP location lookup request body so the endpoint receives `POST { "ips": [...] }`.
+- Persisted successful IP location results into flow metadata as `ip_location` / `ip_location_detail`, so reopened `.secmp` captures keep the original location snapshot instead of being overwritten by later lookup results.
+- Bound the selected capture network to both the proxy listener and the mitmproxy upstream source address, making multi-interface captures and location checks line up with the intended outbound network.
+- Improved the IP column tooltip with server IP, upstream source address, proxy listener address, and `mitmproxy server_conn.peername` source details.
+- Added request-list context menu support for copying IP addresses.
 
 ## Runtime
 
-This release uses runtime `0.3.0`.
+This release uses runtime `0.3.2`.
 
-The runtime command protocol and internal proxy/certificate-manager logic are unchanged from runtime `0.1.2`, but the runtime packages are rebuilt so Windows and macOS executable icons match the refreshed SecMP branding.
+The runtime package includes the `--connect-addr` proxy engine argument used to bind upstream connections to the selected capture network. Because this runtime capability was added after the last official release tag `v0.3.0`, the 0.3.2 GitHub Release includes fresh Windows and macOS runtime packages.
 
 ## Requirements
 
@@ -30,25 +27,25 @@ The runtime command protocol and internal proxy/certificate-manager logic are un
 
 ## Installation
 
-1. Download `secmp-0.3.0.vsix`.
+1. Download `secmp-0.3.2.vsix`.
 2. In VS Code or VSCodium, run `Extensions: Install from VSIX...`.
 3. Run `SecMP: New Temporary Session`, `SecMP: New Persistent Session`, or open an existing `.secmp` session from the SecMP sidebar.
 4. Start the proxy from the capture panel.
 5. Push the CA certificate and configure the Android device proxy as needed.
 
-## Update From 0.2.11
+## Update From 0.3.0
 
-This release includes every change since the previous release tag `v0.2.11`, including body reliability fixes, large-message performance work, trustworthy body filtering, Webview font-size controls, context-menu actions, session workflow improvements, proxy restart on port changes, and refreshed icon assets.
+This release includes every change since the previous release tag `v0.3.0`, including IP location lookup, capture-network binding, the corrected lookup request format, persistent IP location snapshots in `.secmp` sessions, and the runtime package needed for upstream network binding.
 
-Because `secmp.runtimeVersion` changes to `0.3.0`, SecMP installs the matching runtime package for the current platform instead of reusing cached runtime `0.1.2`.
+Because `secmp.runtimeVersion` changes to `0.3.2`, SecMP installs the matching runtime package for the current platform instead of reusing cached runtime `0.3.0`.
 
 ## Assets
 
-- `secmp-0.3.0.vsix`
-- `secmp-runtime-win32-x64-0.3.0.zip`
-- `secmp-runtime-win32-x64-0.3.0.zip.sha256`
-- `secmp-runtime-darwin-arm64-0.3.0.zip`
-- `secmp-runtime-darwin-arm64-0.3.0.zip.sha256`
+- `secmp-0.3.2.vsix`
+- `secmp-runtime-win32-x64-0.3.2.zip`
+- `secmp-runtime-win32-x64-0.3.2.zip.sha256`
+- `secmp-runtime-darwin-arm64-0.3.2.zip`
+- `secmp-runtime-darwin-arm64-0.3.2.zip.sha256`
 
 ## Notice
 

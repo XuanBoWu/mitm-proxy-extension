@@ -49,7 +49,7 @@ Before creating a release:
 - Confirm the icon asset is selected and wired into `package.json`.
 - Confirm runtime icon assets are current when building runtime packages: `media/secmp.ico` for Windows and `media/secmp.icns` for macOS.
 - Confirm `README.md`, `README.zh-CN.md`, `LICENSE`, `CHANGELOG.md`, `SECURITY.md`, `RELEASE_NOTES.md`, and runtime documentation are up to date.
-- Confirm local packaged runtime build and extension runtime install smoke tests pass for the target platform.
+- Confirm local packaged runtime build and extension runtime install smoke tests pass for the target platform when `secmp.runtimeVersion` changes or when the matching runtime release does not already exist.
 - Confirm GitHub Actions build, runtime smoke tests, and VSIX packaging pass.
 - Confirm the release job uses the `release` environment if manual approval is required.
 - Confirm release notes mention OS network access prompts and the rooted Android device requirement.
@@ -59,31 +59,31 @@ Before creating a release:
 Build the Windows runtime:
 
 ```powershell
-npm run runtime:windows -- -RuntimeVersion 0.3.0 -OutputDir dist
+npm run runtime:windows -- -RuntimeVersion 0.3.2 -OutputDir dist
 ```
 
 Build the macOS runtime:
 
 ```bash
-npm run runtime:macos -- --runtime-version 0.3.0 --output-dir dist
+npm run runtime:macos -- --runtime-version 0.3.2 --output-dir dist
 ```
 
 Smoke test the runtime:
 
 ```powershell
-.\scripts\test-windows-runtime.ps1 -RuntimeZip .\dist\secmp-runtime-win32-x64-0.3.0.zip -RuntimeVersion 0.3.0
+.\scripts\test-windows-runtime.ps1 -RuntimeZip .\dist\secmp-runtime-win32-x64-0.3.2.zip -RuntimeVersion 0.3.2
 ```
 
 Smoke test extension runtime installation:
 
 ```powershell
-npm run runtime:windows:test-install -- --runtime-zip .\dist\secmp-runtime-win32-x64-0.3.0.zip --runtime-version 0.3.0
+npm run runtime:windows:test-install -- --runtime-zip .\dist\secmp-runtime-win32-x64-0.3.2.zip --runtime-version 0.3.2
 ```
 
 On macOS, use the same install smoke test with the macOS runtime zip:
 
 ```bash
-node scripts/test-extension-runtime-install.js --runtime-zip dist/secmp-runtime-darwin-arm64-0.3.0.zip --runtime-version 0.3.0
+node scripts/test-extension-runtime-install.js --runtime-zip dist/secmp-runtime-darwin-arm64-0.3.2.zip --runtime-version 0.3.2
 ```
 
 Package the VSIX:
@@ -99,8 +99,8 @@ After the final code is on `master`, create and push a tag:
 ```powershell
 git checkout master
 git pull --ff-only
-git tag v0.1.3
-git push origin v0.1.3
+git tag v0.3.2
+git push origin v0.3.2
 ```
 
 The `Build Runtime Packages` workflow will:
@@ -119,14 +119,14 @@ For a manual release run, trigger the workflow with:
 
 ```text
 publish=true
-runtime_version=0.3.0
-release_tag=v0.1.3
+runtime_version=0.3.2
+release_tag=v0.3.2
 ```
 
 ## Release Notes Template
 
 ```markdown
-## SecMP 0.1.3
+## SecMP 0.3.2
 
 Patch release for a focused bug fix or feature stage.
 
@@ -149,9 +149,9 @@ Patch release for a focused bug fix or feature stage.
 
 ### Assets
 
-- `secmp-0.1.3.vsix`
+- `secmp-0.3.2.vsix`
 
 Runtime assets are included only when `secmp.runtimeVersion` changes.
 ```
 
-Runtime icon-only changes still produce new runtime binaries when they affect `media/secmp.ico` or `media/secmp.icns`; handle them as runtime package changes for release planning.
+Runtime assets are also required when the release would otherwise point at a runtime version that has no published GitHub Release. Runtime icon-only changes still produce new runtime binaries when they affect `media/secmp.ico` or `media/secmp.icns`; handle them as runtime package changes for release planning.

@@ -139,6 +139,8 @@ let filterBodyMatchedIds = new Set();
 let filterBodyUnsearchedIds = new Set();
 let filterRefreshTimer = null;
 let lastFilterFooterStatus = "";
+let ipLocationEnabled = false;
+let ipLocationByIp = new Map();
 
 // Search state
 let _searchTerm = "";
@@ -157,7 +159,7 @@ let wrapState = { req: true, res: true };
 let detailViewState = { req: "formatted", res: "formatted" };
 
 // Column definitions — sizing: "content" = auto-fit to content, "fixed" = clip at preset width
-const COLUMNS = [
+const BASE_COLUMNS = [
   { id: "num",    title: "#",       width: 40,  sizing: "content", minWidth: 32  },
   { id: "tls",    title: "TLS",     width: 68,  sizing: "content", minWidth: 50  },
   { id: "proto",  title: t("webview.table.protocol", {}, "Protocol"), width: 68,  sizing: "content", minWidth: 52  },
@@ -171,10 +173,65 @@ const COLUMNS = [
   { id: "ip",     title: "IP",      width: 130, sizing: "content", minWidth: 90  },
   { id: "port",   title: t("webview.table.port", {}, "Port"),         width: 52,  sizing: "content", minWidth: 38  },
 ];
+const IP_LOCATION_COLUMN = {
+  id: "ipLocation",
+  title: t("webview.table.ipLocation", {}, "Location"),
+  width: 110,
+  sizing: "content",
+  minWidth: 78,
+};
+let COLUMNS = buildActiveColumns();
 
 // Column order / width persistence keyed by column id
 let colWidths = {};  // { colId: number (px) }
 let colOrder = [];   // ["num", "tls", ...]
+
+function buildActiveColumns() {
+  if (!ipLocationEnabled) return [...BASE_COLUMNS];
+  const columns = [];
+  for (const column of BASE_COLUMNS) {
+    columns.push(column);
+    if (column.id === "ip") columns.push(IP_LOCATION_COLUMN);
+  }
+  return columns;
+}
+
+function reconcileColumnOrder(order, columns = COLUMNS) {
+  const ids = columns.map((col) => col.id);
+  const idSet = new Set(ids);
+  const next = Array.isArray(order)
+    ? order.filter((id) => idSet.has(id))
+    : [];
+  for (const id of ids) {
+    if (next.includes(id)) continue;
+    if (id === "ipLocation") {
+      const ipIndex = next.indexOf("ip");
+      next.splice(ipIndex >= 0 ? ipIndex + 1 : next.length, 0, id);
+    } else {
+      next.push(id);
+    }
+  }
+  return next;
+}
+
+function applyIpLocationConfig(enabled) {
+  const nextEnabled = !!enabled;
+  if (ipLocationEnabled === nextEnabled && COLUMNS.length > 0) return;
+  ipLocationEnabled = nextEnabled;
+  COLUMNS = buildActiveColumns();
+  colOrder = reconcileColumnOrder(colOrder, COLUMNS);
+  for (const col of COLUMNS) {
+    if (!colWidths[col.id]) colWidths[col.id] = col.width;
+  }
+  if (sortState.colId && !COLUMNS.some((col) => col.id === sortState.colId)) {
+    sortState = { colId: null, direction: null };
+  }
+  lastRenderWindow = null;
+  buildColgroup();
+  rebuildTableHeader();
+  invalidateFilterCache();
+  scheduleFlowListRender();
+}
 
 // DOM refs
 const $ = (id) => document.getElementById(id);
@@ -329,6 +386,8 @@ window.addEventListener("message", (event) => {
     case "setStatus":
       proxyRunning = msg.proxyRunning;
       proxyPhase = msg.proxyPhase || (msg.proxyRunning ? "running" : "stopped");
+      applyIpLocationConfig(msg.ipLocationEnabled);
+      syncCaptureNetworkSelection(msg.captureNetwork);
       if (Number.isFinite(Number(msg.proxyPort)) && Number(msg.proxyPort) > 0) {
         currentProxyPort = Number(msg.proxyPort);
         $("proxyPort").value = String(currentProxyPort);
@@ -338,9 +397,26 @@ window.addEventListener("message", (event) => {
         scheduleFlowListRender();
       }
       break;
+    case "ipLocationConfig":
+      applyIpLocationConfig(msg.enabled);
+      break;
+    case "ipLocationReset":
+      ipLocationByIp = new Map();
+      if (sortState.colId === "ipLocation") invalidateFilterCache();
+      scheduleFlowListRender();
+      break;
+    case "ipLocationUpdate":
+      for (const location of msg.locations || []) {
+        if (!location?.ip) continue;
+        ipLocationByIp.set(location.ip, location);
+      }
+      if (sortState.colId === "ipLocation") invalidateFilterCache();
+      scheduleFlowListRender();
+      break;
     case "proxyStatus":
       proxyRunning = msg.running;
       proxyPhase = msg.phase || (msg.running ? "running" : "stopped");
+      syncCaptureNetworkSelection(msg.captureNetwork);
       if (Number.isFinite(Number(msg.port)) && Number(msg.port) > 0) {
         currentProxyPort = Number(msg.port);
         if (!proxyPortEditing || proxyPhase === "running") {
@@ -374,6 +450,7 @@ window.addEventListener("message", (event) => {
       break;
     case "flowsCleared":
       flows = [];
+      ipLocationByIp = new Map();
       rebuildFlowIndex();
       nextSeq = 1;
       invalidateFilterCache();
@@ -387,6 +464,7 @@ window.addEventListener("message", (event) => {
       break;
     case "sessionLoaded":
       flows = msg.flows;
+      ipLocationByIp = new Map();
       flows.forEach((f, i) => { if (f._seq == null) f._seq = i + 1; });
       rebuildFlowIndex();
       nextSeq = flows.reduce((max, flow) => Math.max(max, Number(flow._seq) || 0), 0) + 1;
@@ -479,6 +557,8 @@ function updateProxyPortControls() {
   $("stopProxyBtn").style.display = proxyRunning ? "block" : "none";
   setProxyControlsDisabled(transitioning);
   $("proxyPort").disabled = transitioning || (proxyRunning && !proxyPortEditing);
+  $("interfaceSelect").disabled = transitioning || proxyRunning;
+  $("refreshInterfaceBtn").disabled = transitioning || proxyRunning;
 }
 
 function updateProxyIndicator() {
@@ -1310,6 +1390,7 @@ flowTableBody.addEventListener("click", (event) => {
 const FLOW_CONTEXT_ACTIONS = [
   { id: "copyUrl", type: "copy", copyType: "url", labelKey: "webview.context.copyUrl", fallback: "复制 URL", scope: "all" },
   { id: "copyHost", type: "copy", copyType: "host", labelKey: "webview.context.copyHost", fallback: "复制 Host", scope: "all" },
+  { id: "copyIp", type: "copy", copyType: "ip", labelKey: "webview.context.copyIp", fallback: "复制 IP", scope: "all" },
   { id: "copySummary", type: "copy", copyType: "summary", labelKey: "webview.context.copySummary", fallback: "复制请求摘要", scope: "all" },
   { id: "copyRequestHeaders", type: "copy", copyType: "requestHeaders", labelKey: "webview.context.copyRequestHeaders", fallback: "复制请求头", scope: "all" },
   { id: "copyResponseHeaders", type: "copy", copyType: "responseHeaders", labelKey: "webview.context.copyResponseHeaders", fallback: "复制响应头", scope: "all" },
@@ -1932,6 +2013,67 @@ function getProtocolBucket(flow) {
     : "https";
 }
 
+function getIpLocationForFlow(flow) {
+  const ip = String(flow.server_ip || "").trim();
+  if (ip && ipLocationByIp.has(ip)) return ipLocationByIp.get(ip);
+  const detail = flow?.ip_location_detail;
+  if (detail && typeof detail === "object") {
+    const label = detail.label || flow.ip_location || detail.country || detail.registeredCountry || detail.registered_country || "";
+    return {
+      ip: detail.ip || ip,
+      state: detail.state || "ready",
+      label,
+      country: detail.country || "",
+      registeredCountry: detail.registeredCountry || detail.registered_country || "",
+      error: detail.error || "",
+    };
+  }
+  if (flow?.ip_location) {
+    return {
+      ip,
+      state: "ready",
+      label: flow.ip_location,
+      country: flow.ip_location,
+      registeredCountry: "",
+      error: "",
+    };
+  }
+  return null;
+}
+
+function getIpLocationLabel(flow) {
+  return getIpLocationForFlow(flow)?.label || "-";
+}
+
+function getIpLocationTitle(flow) {
+  const location = getIpLocationForFlow(flow);
+  if (!location) return "";
+  const country = location.country || location.label || "-";
+  const registeredCountry = location.registeredCountry || "-";
+  if (location.state === "ready") {
+    return `${t("webview.table.ipLocation", {}, "Location")}: ${country} / ${registeredCountry}`;
+  }
+  return location.error || location.label || "";
+}
+
+function getServerIpTitle(flow) {
+  const serverIp = flow.server_ip || "-";
+  const networkLabel = flow.capture_network_name
+    ? `${flow.capture_network_name} - ${flow.capture_network_ip || "-"}`
+    : (flow.capture_network_ip || "-");
+  const listenHost = flow.proxy_listen_host || flow.capture_network_ip || "-";
+  const listenPort = flow.proxy_listen_port || flow.capture_network_port || "";
+  const listenLabel = listenPort ? `${listenHost}:${listenPort}` : listenHost;
+  const outbound = flow.proxy_connect_addr || flow.capture_network_ip || "-";
+  return [
+    `${t("webview.ipTooltip.serverIp")}: ${serverIp}`,
+    `${t("webview.ipTooltip.outbound")}: ${networkLabel} (${outbound})`,
+    `${t("webview.ipTooltip.listen")}: ${listenLabel}`,
+    `${t("webview.ipTooltip.source")}: mitmproxy server_conn.peername`,
+    `${t("webview.ipTooltip.note")}`,
+  ].join("\n");
+}
+
 function renderCell(col, flow, rowNum) {
   switch (col) {
     case "num":
@@ -1963,7 +2105,9 @@ function renderCell(col, flow, rowNum) {
     case "mime":
       return `<td class="col-mime"><span class="mime-tag" title="${escapeHtml(flow.content_type || '')}">${mimeShort(flow)}</span></td>`;
     case "ip":
-      return `<td class="col-ip" title="${escapeHtml(flow.server_ip)}">${escapeHtml(flow.server_ip || '-')}</td>`;
+      return `<td class="col-ip" title="${escapeHtml(getServerIpTitle(flow))}">${escapeHtml(flow.server_ip || '-')}</td>`;
+    case "ipLocation":
+      return `<td class="col-ipLocation" title="${escapeHtml(getIpLocationTitle(flow))}">${escapeHtml(getIpLocationLabel(flow))}</td>`;
     case "port":
       return `<td class="col-port">${flow.port || '-'}</td>`;
     default:
@@ -1997,6 +2141,8 @@ function getCellText(col, flow, rowNum) {
       return flow.content_type || "";
     case "ip":
       return flow.server_ip || "";
+    case "ipLocation":
+      return getIpLocationLabel(flow);
     case "port":
       return flow.port || "";
     default:
@@ -2121,6 +2267,7 @@ function getSortValue(flow, colId) {
     case "size":   return flow.res_size || 0;
     case "mime":   return (flow.content_type || "").toLowerCase();
     case "ip":     return flow.server_ip || "";
+    case "ipLocation": return getIpLocationLabel(flow).toLowerCase();
     case "port":   return flow.port || 0;
     default:       return "";
   }
@@ -2133,9 +2280,8 @@ function getColumnOrder() {
     const saved = localStorage.getItem("secmp-column-order");
     if (saved) {
       const order = JSON.parse(saved);
-      const ids = COLUMNS.map(c => c.id);
-      if (Array.isArray(order) && ids.every(id => order.includes(id)) && order.length === ids.length) {
-        return order;
+      if (Array.isArray(order)) {
+        return reconcileColumnOrder(order, COLUMNS);
       }
     }
   } catch (_) {}
@@ -3483,8 +3629,8 @@ $("pushCertBtn").addEventListener("click", () => {
 });
 
 $("startProxyBtn").addEventListener("click", () => {
-  const ip = getSelectedInterface();
-  if (availableInterfaces.length > 1 && !ip) {
+  const network = getSelectedInterface();
+  if (availableInterfaces.length > 1 && !network) {
     showProxySetupStatus("error", t("webview.interfaces.needSelect"));
     return;
   }
@@ -3492,7 +3638,7 @@ $("startProxyBtn").addEventListener("click", () => {
   proxyPhase = "starting";
   updateProxyIndicator();
   footerStatus.textContent = t("webview.proxy.starting", { port });
-  vscode.postMessage({ command: "startProxy", port: port });
+  vscode.postMessage({ command: "startProxy", port: port, network });
 });
 
 $("stopProxyBtn").addEventListener("click", () => {
@@ -3518,6 +3664,11 @@ $("cancelProxyPortBtn").addEventListener("click", () => {
 });
 
 $("applyProxyPortBtn").addEventListener("click", () => {
+  const network = getSelectedInterface();
+  if (availableInterfaces.length > 1 && !network) {
+    showProxySetupStatus("error", t("webview.interfaces.needSelect"));
+    return;
+  }
   const nextPort = getProxyPortInputValue();
   if (nextPort === currentProxyPort) {
     proxyPortEditing = false;
@@ -3530,17 +3681,17 @@ $("applyProxyPortBtn").addEventListener("click", () => {
   $("proxyPort").value = String(nextPort);
   updateProxyIndicator();
   footerStatus.textContent = t("webview.proxy.restarting", { port: nextPort });
-  vscode.postMessage({ command: "restartProxy", port: nextPort });
+  vscode.postMessage({ command: "restartProxy", port: nextPort, network });
 });
 
 $("setDeviceProxyBtn").addEventListener("click", () => {
-  const ip = getSelectedInterface();
-  if (availableInterfaces.length > 1 && !ip) {
+  const network = getSelectedInterface();
+  if (availableInterfaces.length > 1 && !network) {
     showProxySetupStatus("error", t("webview.interfaces.needSelect"));
     return;
   }
   const port = getProxyPortInputValue();
-  vscode.postMessage({ command: "setProxy", port: port, ip: ip });
+  vscode.postMessage({ command: "setProxy", port: port, ip: network?.ip || "" });
 });
 
 $("refreshInterfaceBtn").addEventListener("click", () => {
@@ -3661,14 +3812,26 @@ function updateInterfaceSelect(interfaces) {
 }
 
 function getSelectedInterface() {
-  if (availableInterfaces.length === 1) return availableInterfaces[0].ip;
+  if (availableInterfaces.length === 1) return availableInterfaces[0];
   const sel = $("interfaceSelect");
   const val = sel ? sel.value : "";
   if (val) {
     selectedInterface = val;
     localStorage.setItem("secmp-selected-interface", val);
+    return availableInterfaces.find(iface => iface.ip === val) || { name: "", ip: val };
   }
-  return val || "";
+  return null;
+}
+
+function syncCaptureNetworkSelection(network) {
+  const ip = String(network?.ip || "").trim();
+  if (!ip) return;
+  selectedInterface = ip;
+  localStorage.setItem("secmp-selected-interface", ip);
+  const sel = $("interfaceSelect");
+  if (sel && [...sel.options].some(option => option.value === ip)) {
+    sel.value = ip;
+  }
 }
 
 function needsFilterContent() {
@@ -3866,11 +4029,8 @@ function applySessionUiState(state) {
     };
   }
   if (Array.isArray(state.colOrder)) {
-    const ids = COLUMNS.map((col) => col.id);
-    if (ids.every((id) => state.colOrder.includes(id)) && state.colOrder.length === ids.length) {
-      colOrder = [...state.colOrder];
-      saveColumnOrder(colOrder);
-    }
+    colOrder = reconcileColumnOrder(state.colOrder, COLUMNS);
+    saveColumnOrder(colOrder);
   }
   if (state.colWidths && typeof state.colWidths === "object") {
     colWidths = { ...colWidths, ...state.colWidths };

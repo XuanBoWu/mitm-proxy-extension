@@ -15,6 +15,15 @@ import argparse
 
 EXPECTED_MITMPROXY_VERSION = "12.2.2"
 
+
+class UpstreamBindAddon:
+    def __init__(self, connect_addr):
+        self.connect_addr = connect_addr
+
+    def server_connect(self, data):
+        if self.connect_addr and not data.server.sockname:
+            data.server.sockname = (self.connect_addr, 0)
+
 if sys.platform == "win32":
     sys.stdout = open(sys.stdout.fileno(), mode="w", encoding="utf-8", buffering=1)
     sys.stderr = open(sys.stderr.fileno(), mode="w", encoding="utf-8", buffering=1)
@@ -72,6 +81,7 @@ def main():
     parser.add_argument("--port", type=int, default=8080, help="Proxy listen port")
     parser.add_argument("--web-port", type=int, default=8081, help="Web UI port")
     parser.add_argument("--confdir", default=None, help="mitmproxy config directory")
+    parser.add_argument("--connect-addr", default=None, help="Local source address for upstream connections")
     args = parser.parse_args()
 
     if args.check_deps:
@@ -117,6 +127,8 @@ def main():
 
     async def run_proxy():
         master = WebMaster(opts)
+        if args.connect_addr:
+            master.addons.add(UpstreamBindAddon(args.connect_addr))
         # web_host/web_port registered by WebAddon, must set AFTER WebMaster creation
         master.options.update(
             web_host="127.0.0.1",
@@ -128,6 +140,8 @@ def main():
         # Output connection info in parseable format for extension.js
         sys.stderr.write(f"WEB_PORT={args.web_port}\n")
         sys.stderr.write(f"AUTH_TOKEN={auth_token}\n")
+        sys.stderr.write(f"LISTEN_HOST={args.host}\n")
+        sys.stderr.write(f"CONNECT_ADDR={args.connect_addr or ''}\n")
         sys.stderr.write(f"Proxy server listening on {args.host}:{args.port}\n")
         sys.stderr.flush()
 
