@@ -6,7 +6,7 @@ on:
       runtime_version:
         description: "Runtime package version"
         required: true
-        default: "0.3.2"
+        default: "0.3.1"
       publish:
         description: "Publish a GitHub Release after build and tests pass"
         required: true

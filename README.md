@@ -90,7 +90,7 @@ Settings are optional for normal manual installation.
 
 ```json
 {
-  "secmp.runtimeVersion": "0.3.2",
+  "secmp.runtimeVersion": "0.3.1",
   "secmp.language": "auto",
   "secmp.openPanelAfterNewSession": true,
   "secmp.ipLocation.enabled": false,
@@ -116,7 +116,7 @@ For offline installation, configure a local runtime archive path:
 
 ```json
 {
-  "secmp.runtimeArchivePath": "C:\\Users\\me\\Downloads\\secmp-runtime-win32-x64-0.3.2.zip"
+  "secmp.runtimeArchivePath": "C:\\Users\\me\\Downloads\\secmp-runtime-win32-x64-0.3.1.zip"
 }
 ```
 
@@ -192,13 +192,13 @@ python -m venv .venv
 Build the Windows runtime:
 
 ```powershell
-npm run runtime:windows -- -RuntimeVersion 0.3.2 -OutputDir dist
+npm run runtime:windows -- -RuntimeVersion 0.3.1 -OutputDir dist
 ```
 
 Build the macOS runtime:
 
 ```bash
-npm run runtime:macos -- --runtime-version 0.3.2 --output-dir dist
+npm run runtime:macos -- --runtime-version 0.3.1 --output-dir dist
 ```
 
 Runtime builds embed platform icon assets from `media/secmp.ico` on Windows and `media/secmp.icns` on macOS. Updating those files changes the packaged runtime output.

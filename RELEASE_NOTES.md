@@ -1,6 +1,6 @@
-# SecMP 0.3.2
+# SecMP 0.3.1
 
-SecMP 0.3.2 adds optional IP location enrichment for captured server IPs, preserves those lookup results in `.secmp` session files, and ships a refreshed runtime that can bind mitmproxy upstream connections to the selected capture network.
+SecMP 0.3.1 adds optional IP location enrichment, capture-network binding, safer certificate preset workflows, a local MCP inspection interface, and a refreshed Windows/macOS runtime.
 
 ## Highlights
 
@@ -10,12 +10,15 @@ SecMP 0.3.2 adds optional IP location enrichment for captured server IPs, preser
 - Bound the selected capture network to both the proxy listener and the mitmproxy upstream source address, making multi-interface captures and location checks line up with the intended outbound network.
 - Improved the IP column tooltip with server IP, upstream source address, proxy listener address, and `mitmproxy server_conn.peername` source details.
 - Added request-list context menu support for copying IP addresses.
+- Improved certificate preset operations so they bind to the selected ADB serial, avoid `adb root` by default, can wait for a reconnecting device, can auto-preset after reconnect, and can export Android `.0` / `.cer` certificates.
+- Added an optional local MCP inspection server for authorized debugging of active SecMP sessions and flow details.
+- Fixed mitmweb 12.x `/updates` WebSocket parsing so real-time flow events are consumed immediately instead of waiting for fallback reconciliation.
 
 ## Runtime
 
-This release uses runtime `0.3.2`.
+This release uses runtime `0.3.1`.
 
-The runtime package includes the `--connect-addr` proxy engine argument used to bind upstream connections to the selected capture network. Because this runtime capability was added after the last official release tag `v0.3.0`, the 0.3.2 GitHub Release includes fresh Windows and macOS runtime packages.
+The runtime package includes the `--connect-addr` proxy engine argument used to bind upstream connections to the selected capture network and the updated certificate manager entrypoint with serial/root-mode support. `runtimeApiVersion` remains `1` because the extension keeps compatibility with the existing runtime command protocol.
 
 ## Requirements
 
@@ -27,7 +30,7 @@ The runtime package includes the `--connect-addr` proxy engine argument used to 
 
 ## Installation
 
-1. Download `secmp-0.3.2.vsix`.
+1. Download `secmp-0.3.1.vsix`.
 2. In VS Code or VSCodium, run `Extensions: Install from VSIX...`.
 3. Run `SecMP: New Temporary Session`, `SecMP: New Persistent Session`, or open an existing `.secmp` session from the SecMP sidebar.
 4. Start the proxy from the capture panel.
@@ -35,17 +38,17 @@ The runtime package includes the `--connect-addr` proxy engine argument used to 
 
 ## Update From 0.3.0
 
-This release includes every change since the previous release tag `v0.3.0`, including IP location lookup, capture-network binding, the corrected lookup request format, persistent IP location snapshots in `.secmp` sessions, and the runtime package needed for upstream network binding.
+This release includes every change since the previous release tag `v0.3.0`, including IP location lookup, capture-network binding, the corrected lookup request format, persistent IP location snapshots in `.secmp` sessions, safer certificate preset operations, MCP inspection tooling, WebSocket flow-event parsing fixes, and the runtime package needed for upstream network binding and updated certificate manager commands.
 
-Because `secmp.runtimeVersion` changes to `0.3.2`, SecMP installs the matching runtime package for the current platform instead of reusing cached runtime `0.3.0`.
+Because `secmp.runtimeVersion` changes to `0.3.1`, SecMP installs the matching runtime package for the current platform instead of reusing cached runtime `0.3.0`.
 
 ## Assets
 
-- `secmp-0.3.2.vsix`
-- `secmp-runtime-win32-x64-0.3.2.zip`
-- `secmp-runtime-win32-x64-0.3.2.zip.sha256`
-- `secmp-runtime-darwin-arm64-0.3.2.zip`
-- `secmp-runtime-darwin-arm64-0.3.2.zip.sha256`
+- `secmp-0.3.1.vsix`
+- `secmp-runtime-win32-x64-0.3.1.zip`
+- `secmp-runtime-win32-x64-0.3.1.zip.sha256`
+- `secmp-runtime-darwin-arm64-0.3.1.zip`
+- `secmp-runtime-darwin-arm64-0.3.1.zip.sha256`
 
 ## Notice
 

@@ -87,7 +87,7 @@ npm run l10n:check
 
 - This section records the session-architecture implementation checkpoint. For current release versions, use `package.json`.
 - SecMP 0.3.0 updates `secmp.runtimeVersion` to `0.3.0` so refreshed Windows/macOS runtime icon assets are shipped with matching runtime packages.
-- SecMP 0.3.2 updates `secmp.runtimeVersion` to `0.3.2` so the runtime release includes the `--connect-addr` proxy-engine support required for capture-network binding.
+- SecMP 0.3.1 updates `secmp.runtimeVersion` to `0.3.1` so the runtime release includes the `--connect-addr` proxy-engine support required for capture-network binding.
 
 ## Current Known Limitations
 
