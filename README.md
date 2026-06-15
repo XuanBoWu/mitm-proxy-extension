@@ -90,7 +90,7 @@ Settings are optional for normal manual installation.
 
 ```json
 {
-  "secmp.runtimeVersion": "0.3.2",
+  "secmp.runtimeVersion": "0.3.3",
   "secmp.language": "auto",
   "secmp.openPanelAfterNewSession": true,
   "secmp.ipLocation.enabled": false,
@@ -116,7 +116,7 @@ For offline installation, configure a local runtime archive path:
 
 ```json
 {
-  "secmp.runtimeArchivePath": "C:\\Users\\me\\Downloads\\secmp-runtime-win32-x64-0.3.2.zip"
+  "secmp.runtimeArchivePath": "C:\\Users\\me\\Downloads\\secmp-runtime-win32-x64-0.3.3.zip"
 }
 ```
 
@@ -141,7 +141,15 @@ The older `secmp.windowsRuntime*` settings still work as compatibility aliases, 
 
 ## Android Certificate Notes
 
-SecMP uses mitmproxy's generated CA certificate and converts it to Android's `.0` certificate format. The device must be rooted to inject the certificate into the system trust store.
+SecMP uses mitmproxy's generated CA certificate and converts it to Android's `.0` certificate format. The device must provide root execution to inject the certificate into the system trust store.
+
+Certificate preset operations are designed to avoid disrupting other ADB work on the host:
+
+- SecMP binds device operations to a specific ADB serial instead of relying on the default device.
+- SecMP does not run `adb root` during certificate preset. If the device shell is already root it uses that shell; otherwise it tries `su`.
+- Manual certificate preset waits up to `secmp.certPushWaitMinutes` minutes for an ADB device to come online. The default is 1 minute, and 0 disables waiting.
+- The Device panel can automatically preset the certificate after an ADB device reconnects. SecMP deduplicates successful automatic preset by device boot where the boot id is available.
+- The Device panel can export the current mitmproxy CA certificate as Android `.0` format or `.cer` format for external installation workflows.
 
 Android 14 and newer use Conscrypt APEX certificate paths, which SecMP handles through the certificate manager.
 
@@ -184,13 +192,13 @@ python -m venv .venv
 Build the Windows runtime:
 
 ```powershell
-npm run runtime:windows -- -RuntimeVersion 0.3.2 -OutputDir dist
+npm run runtime:windows -- -RuntimeVersion 0.3.3 -OutputDir dist
 ```
 
 Build the macOS runtime:
 
 ```bash
-npm run runtime:macos -- --runtime-version 0.3.2 --output-dir dist
+npm run runtime:macos -- --runtime-version 0.3.3 --output-dir dist
 ```
 
 Runtime builds embed platform icon assets from `media/secmp.ico` on Windows and `media/secmp.icns` on macOS. Updating those files changes the packaged runtime output.

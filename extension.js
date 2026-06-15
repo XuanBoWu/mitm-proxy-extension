@@ -1,5 +1,5 @@
 const vscode = require("vscode");
-const { spawn, exec } = require("child_process");
+const { spawn, exec, execFile } = require("child_process");
 const path = require("path");
 const fs = require("fs");
 const os = require("os");
@@ -8,6 +8,7 @@ const https = require("https");
 const crypto = require("crypto");
 const net = require("net");
 const { CaptureSession } = require("./secmp_session");
+const { createSecmpMcpBridge } = require("./mcp_bridge");
 
 let proxyProcess = null;
 let outputChannel = null;
@@ -39,6 +40,16 @@ let ipLocationTimer = null;
 let ipLocationInFlight = false;
 let ipLocationGeneration = 0;
 let activeCaptureNetwork = null;
+let selectedAdbSerial = null;
+let adbMonitorTimer = null;
+let adbMonitorInFlight = false;
+let lastAdbMonitorState = { serial: null, connected: false, bootId: null };
+let autoPushCompletedBootKeys = new Set();
+let autoPushAttemptedOnlineKey = null;
+let certPushTask = null;
+let certManagerDeviceArgsSupported = null;
+let mcpBridge = null;
+let mcpBridgeToken = "";
 
 const TOOLS_DIR = path.join(__dirname, "tools");
 const DEFAULT_RUNTIME_VERSION = "0.1.2";
@@ -48,6 +59,9 @@ const GITHUB_RELEASE_LATEST_URL = `${DEFAULT_RUNTIME_REPO}/releases/latest`;
 const WINDOWS_RUNTIME_API_VERSION = 1;
 const WINDOWS_RUNTIME_RETAIN_PREVIOUS_COUNT = 1;
 const DEFAULT_UPDATE_CHECK_INTERVAL_HOURS = 24;
+const DEFAULT_CERT_PUSH_WAIT_MINUTES = 1;
+const MIN_CERT_PUSH_WAIT_MINUTES = 0;
+const MAX_CERT_PUSH_WAIT_MINUTES = 10;
 const DEFAULT_FONT_SIZE = 13;
 const MIN_FONT_SIZE = 12;
 const MAX_FONT_SIZE = 16;
@@ -59,8 +73,8 @@ const SUPPORTED_RUNTIME_PLATFORMS = new Set(["win32", "darwin"]);
 const SUPPORTED_LOCALES = new Set(["zh-CN", "en-US"]);
 const DEFAULT_LOCALE = "zh-CN";
 const FLOW_POLL_INTERVAL_MS = 1000;
-const FLOW_POLL_ACTIVE_MS = 500;
-const FLOW_POLL_IDLE_MS = 2000;
+const FLOW_POLL_ACTIVE_MS = 150;
+const FLOW_POLL_IDLE_MS = 1000;
 const FLOW_POLL_IDLE_THRESHOLD = 3;
 const MITMWEB_REQUEST_TIMEOUT_MS = 5000;
 const SESSION_SYNC_DELAY_MS = 3000;
@@ -74,6 +88,17 @@ const COPY_BODY_MAX_BYTES = BODY_AUTOFETCH_MAX_BYTES;
 const IP_LOCATION_BATCH_SIZE = 100;
 const IP_LOCATION_DEBOUNCE_MS = 600;
 const IP_LOCATION_REQUEST_TIMEOUT_MS = 10000;
+const ADB_MONITOR_IDLE_MS = 2000;
+const ADB_MONITOR_ACTIVE_MS = 1000;
+const MCP_DEFAULT_PORT = 39777;
+const MCP_DEFAULT_MAX_BODY_BYTES = 64 * 1024;
+const MCP_MAX_BODY_BYTES = 2 * 1024 * 1024;
+const MCP_DEFAULT_WAIT_TIMEOUT_MS = 10000;
+const MCP_MAX_WAIT_TIMEOUT_MS = 60000;
+const MCP_BODY_SNIPPET_CHARS = 240;
+const ANDROID_SYSTEM_CACERTS_DIR = "/system/etc/security/cacerts";
+const ANDROID_APEX_CONSCRYPT_CACERTS_DIR = "/apex/com.android.conscrypt/cacerts";
+const ANDROID_CERT_WORK_DIR = "/data/local/tmp/";
 const DEFAULT_RUNTIME_SOURCES = {
   "0.1.0:win32:x64": {
     url: "https://github.com/XuanBoWu/mitm-proxy-extension/releases/download/v0.1.0/secmp-runtime-win32-x64-0.1.0.zip",
@@ -193,6 +218,18 @@ function getUpdateConfig() {
       ? intervalHours
       : DEFAULT_UPDATE_CHECK_INTERVAL_HOURS,
   };
+}
+
+function getCertPushWaitMinutes() {
+  const config = vscode.workspace.getConfiguration("secmp");
+  const raw = Number(config.get("certPushWaitMinutes", DEFAULT_CERT_PUSH_WAIT_MINUTES));
+  if (!Number.isFinite(raw)) return DEFAULT_CERT_PUSH_WAIT_MINUTES;
+  return Math.min(MAX_CERT_PUSH_WAIT_MINUTES, Math.max(MIN_CERT_PUSH_WAIT_MINUTES, Math.round(raw)));
+}
+
+function isAutoPushCertEnabled() {
+  const config = vscode.workspace.getConfiguration("secmp");
+  return Boolean(config.get("autoPushCertOnDeviceReconnect", false));
 }
 
 function getIpLocationConfig() {
@@ -2459,10 +2496,23 @@ function transformFlow(f) {
 let flowWebSocket = null;
 let flowWebSocketActive = false;
 let flowWebSocketReconnectAttempts = 0;
+let flowFeedStatus = "stopped";
+let flowFeedEnabled = false;
+let lastPollStatusLogAt = 0;
+let nextFlowWebSocketReconnectDelay = 0;
+let flowWebSocketParseErrorLogCount = 0;
+let flowWebSocketIgnoredMessageLogCount = 0;
+
+function setFlowFeedStatus(status, detail = "") {
+  if (flowFeedStatus === status && !detail) return;
+  flowFeedStatus = status;
+  log(`[flow-feed] ${status}${detail ? `: ${detail}` : ""}`);
+}
 
 function connectFlowWebSocket() {
-  if (!webPort || !authToken) return;
-  disconnectFlowWebSocket();
+  if (!flowFeedEnabled || !webPort || !authToken) return;
+  disconnectFlowWebSocket({ resetReconnect: false, logClose: false });
+  setFlowFeedStatus("websocket-connecting", `127.0.0.1:${webPort}/updates`);
 
   const key = crypto.randomBytes(16).toString("base64");
   const req = http.request({
@@ -2478,7 +2528,12 @@ function connectFlowWebSocket() {
   });
 
   req.on("upgrade", (res, socket) => {
+    if (!flowFeedEnabled) {
+      socket.destroy();
+      return;
+    }
     if (res.statusCode !== 101) {
+      setFlowFeedStatus("websocket-upgrade-failed", `status=${res.statusCode}; using poll fallback`);
       socket.destroy();
       scheduleWebSocketReconnect();
       return;
@@ -2486,15 +2541,20 @@ function connectFlowWebSocket() {
 
     flowWebSocketActive = true;
     flowWebSocketReconnectAttempts = 0;
+    nextFlowWebSocketReconnectDelay = 0;
+    flowWebSocketParseErrorLogCount = 0;
+    flowWebSocketIgnoredMessageLogCount = 0;
     flowWebSocket = socket;
+    setFlowFeedStatus("websocket-live", "using mitmweb /updates; poll runs every 10s for reconciliation");
     let frameBuffer = Buffer.alloc(0);
 
     socket.on("data", (raw) => {
       frameBuffer = Buffer.concat([frameBuffer, raw]);
       while (frameBuffer.length >= 2) {
+        const firstByte = frameBuffer[0];
         const secondByte = frameBuffer[1];
         const masked = (secondByte & 0x80) !== 0;
-        const opcode = secondByte & 0x0f;
+        const opcode = firstByte & 0x0f;
         let payloadLen = frameBuffer[1] & 0x7f;
         let offset = 2;
         if (payloadLen === 126) {
@@ -2542,9 +2602,15 @@ function connectFlowWebSocket() {
         if (opcode === 0x1 || opcode === 0x0) {
           // Text frame (or continuation) — parse as JSON event
           try {
-            const msg = JSON.parse(payload.toString("utf8"));
+            const text = payload.toString("utf8");
+            const msg = JSON.parse(text);
             handleWebSocketFlowEvent(msg);
-          } catch (_) { /* skip unparseable frames */ }
+          } catch (err) {
+            if (flowWebSocketParseErrorLogCount < 5) {
+              flowWebSocketParseErrorLogCount += 1;
+              log(`[flow-feed] websocket frame parse failed opcode=${opcode} bytes=${payload.length}: ${err.message}`);
+            }
+          }
         }
       }
     });
@@ -2552,20 +2618,26 @@ function connectFlowWebSocket() {
     socket.on("close", () => {
       flowWebSocket = null;
       flowWebSocketActive = false;
+      if (!flowFeedEnabled) return;
+      setFlowFeedStatus("websocket-closed", "using poll fallback");
       scheduleWebSocketReconnect();
     });
 
-    socket.on("error", () => {
+    socket.on("error", (err) => {
       flowWebSocket = null;
       flowWebSocketActive = false;
+      if (!flowFeedEnabled) return;
+      setFlowFeedStatus("websocket-error", `${err.message}; using poll fallback`);
       try { socket.destroy(); } catch (_) {}
       scheduleWebSocketReconnect();
     });
   });
 
-  req.on("error", () => {
+  req.on("error", (err) => {
     flowWebSocket = null;
     flowWebSocketActive = false;
+    if (!flowFeedEnabled) return;
+    setFlowFeedStatus("websocket-request-error", `${err.message}; using poll fallback`);
     scheduleWebSocketReconnect();
   });
 
@@ -2573,20 +2645,30 @@ function connectFlowWebSocket() {
 }
 
 function scheduleWebSocketReconnect() {
-  if (!webPort || !authToken) return;
-  if (flowWebSocketReconnectAttempts > 10) return;
+  if (!flowFeedEnabled || !webPort || !authToken) return;
+  if (flowWebSocketReconnectAttempts > 10) {
+    setFlowFeedStatus("websocket-reconnect-stopped", "max attempts reached; poll fallback remains active");
+    return;
+  }
   flowWebSocketReconnectAttempts += 1;
   const delay = Math.min(1000 * Math.pow(2, flowWebSocketReconnectAttempts - 1), 30000);
+  nextFlowWebSocketReconnectDelay = delay;
+  log(`[flow-feed] websocket reconnect scheduled in ${delay}ms (attempt ${flowWebSocketReconnectAttempts}); poll fallback active`);
   if (flowWebSocketReconnectTimer) clearTimeout(flowWebSocketReconnectTimer);
   flowWebSocketReconnectTimer = setTimeout(() => {
     flowWebSocketReconnectTimer = null;
+    nextFlowWebSocketReconnectDelay = 0;
     connectFlowWebSocket();
   }, delay);
 }
 
-function disconnectFlowWebSocket() {
+function disconnectFlowWebSocket(options = {}) {
+  const { resetReconnect = true, logClose = true } = options;
   flowWebSocketActive = false;
-  flowWebSocketReconnectAttempts = 0;
+  if (resetReconnect) {
+    flowWebSocketReconnectAttempts = 0;
+    nextFlowWebSocketReconnectDelay = 0;
+  }
   if (flowWebSocketReconnectTimer) {
     clearTimeout(flowWebSocketReconnectTimer);
     flowWebSocketReconnectTimer = null;
@@ -2595,14 +2677,59 @@ function disconnectFlowWebSocket() {
     try { flowWebSocket.destroy(); } catch (_) {}
     flowWebSocket = null;
   }
+  if (logClose && flowFeedStatus !== "stopped") {
+    setFlowFeedStatus("websocket-disconnected", "flow feed stopped or restarting");
+  }
+}
+
+function extractWebSocketFlowPayload(payload) {
+  if (!payload) return null;
+  if (payload.id) return payload;
+  if (Array.isArray(payload)) {
+    return payload.find(item => item && item.id) || null;
+  }
+  for (const key of ["flow", "data", "item", "value", "payload"]) {
+    const nested = payload[key];
+    if (!nested) continue;
+    if (nested.id) return nested;
+    if (Array.isArray(nested)) {
+      const match = nested.find(item => item && item.id);
+      if (match) return match;
+    }
+  }
+  return null;
 }
 
 function handleWebSocketFlowEvent(msg) {
-  // mitmweb WebSocket events: { resource: "flows", cmd: "add"|"update"|"reset", data: ... }
-  // Also handle flat format: { cmd: "add"|"update"|"reset", data: ... }
-  const cmd = msg.cmd || "";
-  const resource = msg.resource || "flows";
-  if (resource !== "flows") return;
+  // mitmweb 12.x uses { type: "flows/add", payload: flow }.
+  // Keep compatibility with older/flat forms:
+  // { resource: "flows", cmd: "add", data: flow } and { cmd: "add", data: flow }.
+  let cmd = msg.cmd || "";
+  let resource = msg.resource || "";
+  let data = msg.data;
+  let rawPayload = msg.data;
+  if (msg.type && typeof msg.type === "string") {
+    const slashIndex = msg.type.indexOf("/");
+    if (slashIndex > 0) {
+      resource = msg.type.slice(0, slashIndex);
+      cmd = msg.type.slice(slashIndex + 1);
+      rawPayload = msg.payload;
+      data = extractWebSocketFlowPayload(msg.payload);
+    }
+  }
+  if (!data && rawPayload) {
+    data = extractWebSocketFlowPayload(rawPayload);
+  }
+  if (!resource && cmd) {
+    resource = "flows";
+  }
+  if (resource !== "flows") {
+    if (resource !== "events" && flowWebSocketIgnoredMessageLogCount < 5) {
+      flowWebSocketIgnoredMessageLogCount += 1;
+      log(`[flow-feed] websocket ignored type=${msg.type || "-"} resource=${resource || "-"} cmd=${cmd || "-"}`);
+    }
+    return;
+  }
 
   if (cmd === "reset") {
     resetCapturedFlows();
@@ -2622,8 +2749,13 @@ function handleWebSocketFlowEvent(msg) {
     return;
   }
 
-  const data = msg.data;
-  if (!data || !data.id) return;
+  if (!data || !data.id) {
+    if (flowWebSocketIgnoredMessageLogCount < 5) {
+      flowWebSocketIgnoredMessageLogCount += 1;
+      log(`[flow-feed] websocket ignored type=${msg.type || "-"} cmd=${cmd || "-"} without flow id`);
+    }
+    return;
+  }
 
   if (cmd === "add") {
     if (ignoredFlowIdsAfterClear.has(data.id)) return;
@@ -2640,6 +2772,7 @@ function handleWebSocketFlowEvent(msg) {
         flows: [toListFlow(transformed)],
       });
     }
+    log(`[flow-feed] websocket add flow id=${data.id} method=${transformed.method || "-"} host=${transformed.host || "-"}`);
     idlePollCount = 0;
   } else if (cmd === "update") {
     const existing = capturedFlowById.get(data.id);
@@ -2666,10 +2799,22 @@ function handleWebSocketFlowEvent(msg) {
   }
 }
 
+function maybeLogPollStatus(total, newCount, updatedCount) {
+  const now = Date.now();
+  const shouldLog = newCount > 0 || updatedCount > 0 || now - lastPollStatusLogAt > 10000;
+  if (!shouldLog) return;
+  lastPollStatusLogAt = now;
+  const mode = flowWebSocketActive ? "reconcile" : "fallback";
+  const hasActivity = idlePollCount < FLOW_POLL_IDLE_THRESHOLD;
+  const nextInterval = flowWebSocketActive ? 10000 : (hasActivity ? FLOW_POLL_ACTIVE_MS : FLOW_POLL_IDLE_MS);
+  const reconnect = nextFlowWebSocketReconnectDelay ? `, wsReconnectIn=${nextFlowWebSocketReconnectDelay}ms` : "";
+  log(`[flow-feed] poll ${mode}: total=${total}, new=${newCount}, updated=${updatedCount}, next=${nextInterval}ms, ws=${flowWebSocketActive ? "live" : "inactive"}${reconnect}`);
+}
+
 // ===== Flow polling (reconciliation fallback) =====
 
 async function pollFlows() {
-  if (!webPort || !authToken) return;
+  if (!flowFeedEnabled || !webPort || !authToken) return;
   if (pollingInProgress) return;
 
   pollingInProgress = true;
@@ -2759,8 +2904,9 @@ async function pollFlows() {
     } else {
       idlePollCount += 1;
     }
-  } catch (_) {
-    // Silently skip polling errors (server might not be ready yet)
+    maybeLogPollStatus(flows.length, newFlows.length, updatedFlows.length);
+  } catch (err) {
+    log(`[flow-feed] poll failed: ${err.message}`);
     idlePollCount += 1;
   } finally {
     pollingInProgress = false;
@@ -2800,62 +2946,715 @@ function startFlowPolling() {
   ignoredFlowIdsAfterClear.clear();
   mitmwebHadFlows = false;
   idlePollCount = 0;
+  flowFeedEnabled = true;
+  lastPollStatusLogAt = 0;
   ensureActiveSession();
-  pollFlows();
+  setFlowFeedStatus("starting", `poll active=${FLOW_POLL_ACTIVE_MS}ms idle=${FLOW_POLL_IDLE_MS}ms`);
   connectFlowWebSocket();
+  pollFlows();
 }
 
 function stopFlowPolling() {
-  disconnectFlowWebSocket();
+  flowFeedEnabled = false;
+  disconnectFlowWebSocket({ logClose: flowFeedStatus !== "stopped" });
   if (pollingTimer) {
     clearTimeout(pollingTimer);
     pollingTimer = null;
   }
+  setFlowFeedStatus("stopped");
 }
 
 // ===== ADB Device Management =====
 
-async function checkAdbDevice() {
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function runAdb(args, options = {}) {
+  const serial = Object.prototype.hasOwnProperty.call(options, "serial")
+    ? options.serial
+    : selectedAdbSerial;
+  const adbArgs = serial ? ["-s", serial, ...args] : args;
   return new Promise((resolve) => {
-    exec("adb shell echo connected", { timeout: 10000 }, (err, stdout) => {
-      if (err || !stdout.includes("connected")) {
-        resolve({ connected: false, error: err?.message || "No device" });
-        return;
-      }
-      resolve({ connected: true });
+    execFile("adb", adbArgs, { timeout: options.timeout || 10000, windowsHide: true }, (err, stdout, stderr) => {
+      resolve({
+        success: !err,
+        code: err?.code || 0,
+        signal: err?.signal || null,
+        stdout: stdout || "",
+        stderr: stderr || "",
+        message: err?.message || stderr || "",
+      });
     });
   });
 }
 
-async function getDeviceInfo() {
-  return new Promise((resolve) => {
-    exec("adb shell getprop ro.build.version.release && adb shell getprop ro.product.model && adb shell whoami", { timeout: 10000 }, (err, stdout) => {
-      if (err) {
-        resolve({ error: err.message });
-        return;
+function parseAdbDevices(stdout) {
+  const devices = [];
+  for (const line of String(stdout || "").split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("List of devices")) continue;
+    const parts = trimmed.split(/\s+/);
+    const serial = parts[0];
+    const state = parts[1] || "unknown";
+    if (!serial || !state) continue;
+    const detail = {};
+    for (const part of parts.slice(2)) {
+      const idx = part.indexOf(":");
+      if (idx > 0) {
+        detail[part.slice(0, idx)] = part.slice(idx + 1);
       }
-      const lines = stdout.trim().split("\n");
-      const androidVersion = lines[0]?.trim() || "Unknown";
-      const model = lines[1]?.trim() || "Unknown";
-      const user = lines[2]?.trim() || "Unknown";
-      resolve({ androidVersion, model, user, isRoot: user === "root" });
+    }
+    devices.push({
+      serial,
+      state,
+      model: detail.model || "",
+      product: detail.product || "",
+      detail,
     });
-  });
+  }
+  return devices;
+}
+
+async function listAdbDevices() {
+  const result = await runAdb(["devices", "-l"], { serial: null, timeout: 5000 });
+  if (!result.success) {
+    return { devices: [], error: result.message || "adb devices failed" };
+  }
+  return { devices: parseAdbDevices(result.stdout), error: "" };
+}
+
+function chooseActiveAdbDevice(devices, options = {}) {
+  const online = (devices || []).filter((device) => device.state === "device");
+  if (options.serial) {
+    const requested = online.find((device) => device.serial === options.serial);
+    if (requested) return { device: requested };
+    return { error: t("extension.device.selectedUnavailable", { serial: options.serial }) };
+  }
+  if (selectedAdbSerial) {
+    const selected = online.find((device) => device.serial === selectedAdbSerial);
+    if (selected) return { device: selected };
+  }
+  if (online.length === 1) {
+    selectedAdbSerial = online[0].serial;
+    return { device: online[0] };
+  }
+  if (online.length > 1) {
+    return { error: t("extension.device.multipleOnline") };
+  }
+  return { error: t("extension.device.noneOnline") };
+}
+
+async function getActiveAdbDevice(options = {}) {
+  const snapshot = await listAdbDevices();
+  if (snapshot.error) return { connected: false, error: snapshot.error, devices: [] };
+  const chosen = chooseActiveAdbDevice(snapshot.devices, options);
+  if (!chosen.device) {
+    return { connected: false, error: chosen.error, devices: snapshot.devices };
+  }
+  selectedAdbSerial = chosen.device.serial;
+  return { connected: true, device: chosen.device, serial: chosen.device.serial, devices: snapshot.devices };
+}
+
+async function checkSuAccess(serial) {
+  const probes = [
+    { style: "su0", command: "su 0 sh -c 'id'" },
+    { style: "suc", command: "su -c 'id'" },
+  ];
+  for (const probe of probes) {
+    const result = await runAdb(["shell", probe.command], { serial, timeout: 8000 });
+    const output = `${result.stdout}\n${result.stderr}`;
+    if (result.success && output.includes("uid=0")) {
+      return { available: true, style: probe.style };
+    }
+  }
+  return { available: false, style: "" };
+}
+
+async function checkAdbDevice() {
+  const active = await getActiveAdbDevice();
+  if (!active.connected) {
+    return { connected: false, error: active.error };
+  }
+  return { connected: true, serial: active.serial, device: active.device };
+}
+
+async function getDeviceBootId(serial = selectedAdbSerial) {
+  const result = await runAdb(["shell", "cat /proc/sys/kernel/random/boot_id"], { serial, timeout: 8000 });
+  if (!result.success) {
+    return "";
+  }
+  return result.stdout.trim();
+}
+
+async function getDeviceInfo(serial = selectedAdbSerial) {
+  if (!serial) {
+    const active = await getActiveAdbDevice();
+    if (!active.connected) return { error: active.error };
+    serial = active.serial;
+  }
+  const [versionResult, modelResult, userResult] = await Promise.all([
+    runAdb(["shell", "getprop ro.build.version.release"], { serial, timeout: 10000 }),
+    runAdb(["shell", "getprop ro.product.model"], { serial, timeout: 10000 }),
+    runAdb(["shell", "whoami"], { serial, timeout: 10000 }),
+  ]);
+  if (!versionResult.success || !modelResult.success || !userResult.success) {
+    return { error: versionResult.message || modelResult.message || userResult.message };
+  }
+  const user = userResult.stdout.trim() || "Unknown";
+  const su = user === "root" ? { available: false, style: "" } : await checkSuAccess(serial);
+  return {
+    serial,
+    androidVersion: versionResult.stdout.trim() || "Unknown",
+    model: modelResult.stdout.trim() || "Unknown",
+    user,
+    isRoot: user === "root" || su.available,
+    isRootAdbd: user === "root",
+    suAvailable: su.available,
+    rootMethod: user === "root" ? "adbd" : (su.available ? "su" : ""),
+    suStyle: su.style,
+  };
 }
 
 async function ensureRoot() {
+  const active = await getActiveAdbDevice();
+  if (!active.connected) {
+    return { success: false, message: active.error };
+  }
+  const info = await getDeviceInfo(active.serial);
+  if (info.error) {
+    return { success: false, message: info.error };
+  }
+  if (info.isRootAdbd) {
+    return { success: true, message: t("extension.root.adbdAvailable", { serial: active.serial }) };
+  }
+  if (info.suAvailable) {
+    return { success: true, message: t("extension.root.suAvailable", { serial: active.serial }) };
+  }
+  return { success: false, message: t("extension.root.unavailable", { serial: active.serial }) };
+}
+
+function postCertStatus(status) {
+  if (!panel) return;
+  panel.webview.postMessage({
+    command: "certStatus",
+    ...status,
+  });
+}
+
+function postCertAutoPushConfig() {
+  if (!panel) return;
+  panel.webview.postMessage({
+    command: "certAutoPushConfig",
+    enabled: isAutoPushCertEnabled(),
+    waitMinutes: getCertPushWaitMinutes(),
+  });
+}
+
+function parseJsonOutput(output) {
+  const text = String(output || "").trim();
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch (_) {
+    const start = text.indexOf("{");
+    const end = text.lastIndexOf("}");
+    if (start >= 0 && end > start) {
+      try {
+        return JSON.parse(text.slice(start, end + 1));
+      } catch (_) {}
+    }
+  }
+  return null;
+}
+
+async function runCertManagerProcess(args) {
+  const certManager = await getCertManagerCommand();
   return new Promise((resolve) => {
-    exec("adb root", { timeout: 10000 }, async (err) => {
-      if (err) {
-        resolve({ success: false, message: t("extension.proxy.rootStartFailed") });
-        return;
-      }
-      setTimeout(async () => {
-        const info = await getDeviceInfo();
-        resolve({ success: info.isRoot, message: info.isRoot ? t("extension.proxy.rootConfirmed") : t("extension.proxy.rootFailed") });
-      }, 1000);
+    const proc = spawn(certManager.command, [...certManager.args, ...args], { windowsHide: true });
+    let output = "";
+    let stderr = "";
+    proc.stdout.on("data", (d) => (output += d));
+    proc.stderr.on("data", (d) => {
+      stderr += d;
+      log(`cert: ${d}`);
+    });
+    proc.on("error", (err) => {
+      resolve({ success: false, code: -1, stdout: output, stderr, message: err.message });
+    });
+    proc.on("close", (code) => {
+      resolve({
+        success: code === 0,
+        code,
+        stdout: output,
+        stderr,
+        message: output.trim() || stderr.trim(),
+      });
     });
   });
+}
+
+async function runCertManagerJson(args) {
+  const result = await runCertManagerProcess(args);
+  const parsed = parseJsonOutput(result.stdout);
+  if (parsed) return parsed;
+  return {
+    success: result.success,
+    message: result.message || (result.success ? t("extension.cert.completed") : t("extension.cert.failed")),
+  };
+}
+
+async function certManagerSupportsDeviceArgs() {
+  if (certManagerDeviceArgsSupported != null) return certManagerDeviceArgsSupported;
+  const result = await runCertManagerProcess(["push", "--help"]);
+  const help = `${result.stdout}\n${result.stderr}`;
+  certManagerDeviceArgsSupported = help.includes("--serial") && help.includes("--root-mode");
+  return certManagerDeviceArgsSupported;
+}
+
+function androidShellQuote(value) {
+  return `'${String(value).replace(/'/g, `'\\''`)}'`;
+}
+
+function buildSuShellCommand(command, suStyle) {
+  if (suStyle === "su0") return `su 0 sh -c ${androidShellQuote(command)}`;
+  if (suStyle === "suc") return `su -c ${androidShellQuote(command)}`;
+  throw new Error(`Unsupported su style: ${suStyle || "-"}`);
+}
+
+async function runRootAdbShell(serial, command, info, options = {}) {
+  const timeout = options.timeout || 15000;
+  const check = options.check !== false;
+  const shellCommand = info?.isRootAdbd
+    ? command
+    : buildSuShellCommand(command, info?.suStyle || (await checkSuAccess(serial)).style);
+  const result = await runAdb(["shell", shellCommand], { serial, timeout });
+  if (check && !result.success) {
+    throw new Error(result.message || result.stderr || `adb shell failed: ${command}`);
+  }
+  return result;
+}
+
+function parseAndroidMajorVersion(versionText) {
+  const match = String(versionText || "").match(/\d+/);
+  if (!match) return 0;
+  return Number(match[0]) || 0;
+}
+
+function chunkItems(items, size) {
+  const chunks = [];
+  for (let i = 0; i < items.length; i += size) {
+    chunks.push(items.slice(i, i + size));
+  }
+  return chunks;
+}
+
+async function getPidsByName(serial, name, info) {
+  const result = await runRootAdbShell(serial, `pidof ${name}`, info, { check: false, timeout: 10000 });
+  if (!result.success || !result.stdout.trim()) return [];
+  return result.stdout.trim().split(/\s+/).filter((pid) => /^\d+$/.test(pid));
+}
+
+async function getChildPids(serial, parentPid, info) {
+  const result = await runRootAdbShell(serial, `ps -o PID --ppid ${parentPid}`, info, { check: false, timeout: 10000 });
+  if (!result.success) return [];
+  const pids = [];
+  for (const line of result.stdout.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.toUpperCase() === "PID") continue;
+    if (/^\d+$/.test(trimmed)) pids.push(trimmed);
+  }
+  return pids;
+}
+
+async function injectCertificateWithAdb(serial, info) {
+  const androidVersion = parseAndroidMajorVersion(info.androidVersion);
+  const isAndroid14 = androidVersion >= 14;
+  const certSourceDir = isAndroid14 ? ANDROID_APEX_CONSCRYPT_CACERTS_DIR : ANDROID_SYSTEM_CACERTS_DIR;
+  const bindTargetDir = isAndroid14 ? ANDROID_APEX_CONSCRYPT_CACERTS_DIR : ANDROID_SYSTEM_CACERTS_DIR;
+  const tmpfsMountDir = ANDROID_SYSTEM_CACERTS_DIR;
+  const tmpCopyDir = "/data/local/tmp/tmp-ca-copy";
+  const warnings = [];
+
+  try {
+    await runRootAdbShell(serial, `rm -rf ${tmpCopyDir} && mkdir -p -m 700 ${tmpCopyDir}`, info, { timeout: 15000 });
+    await runRootAdbShell(serial, `cp ${certSourceDir}/* ${tmpCopyDir}/`, info, { timeout: 30000 });
+    await runRootAdbShell(serial, `mount -t tmpfs tmpfs ${tmpfsMountDir}`, info, { timeout: 15000 });
+    await runRootAdbShell(serial, `mv ${tmpCopyDir}/* ${tmpfsMountDir}/`, info, { timeout: 30000 });
+    await runRootAdbShell(serial, `cp ${ANDROID_CERT_WORK_DIR}*.0 ${tmpfsMountDir}/`, info, { timeout: 30000 });
+    await runRootAdbShell(serial, `chown root:root ${tmpfsMountDir}/*`, info, { timeout: 15000 });
+    await runRootAdbShell(serial, `chmod 644 ${tmpfsMountDir}/*`, info, { timeout: 15000 });
+    await runRootAdbShell(serial, `chcon u:object_r:system_file:s0 ${tmpfsMountDir}/*`, info, { timeout: 15000 });
+
+    const zygotePids = new Set();
+    for (const name of ["zygote64", "zygote"]) {
+      for (const pid of await getPidsByName(serial, name, info)) {
+        zygotePids.add(pid);
+      }
+    }
+    const zygotes = [...zygotePids].sort((a, b) => Number(a) - Number(b));
+    if (zygotes.length === 0) {
+      warnings.push("No Zygote process found, namespace injection skipped");
+    } else {
+      for (const pid of zygotes) {
+        try {
+          await runRootAdbShell(
+            serial,
+            `nsenter --mount=/proc/${pid}/ns/mnt -- mount --bind ${tmpfsMountDir} ${bindTargetDir}`,
+            info,
+            { timeout: 15000 }
+          );
+        } catch (err) {
+          warnings.push(`nsenter zygote ${pid}: ${err.message}`);
+        }
+      }
+
+      const appPids = new Set();
+      for (const pid of zygotes) {
+        for (const childPid of await getChildPids(serial, pid, info)) {
+          appPids.add(childPid);
+        }
+      }
+      const apps = [...appPids].sort((a, b) => Number(a) - Number(b));
+      if (apps.length > 0) {
+        for (const batch of chunkItems(apps, 20)) {
+          const commands = batch.map((pid) => (
+            `( nsenter --mount=/proc/${pid}/ns/mnt -- mount --bind ${tmpfsMountDir} ${bindTargetDir} >/dev/null 2>&1 || true ) &`
+          ));
+          await runRootAdbShell(serial, `${commands.join(" ")} wait`, info, { check: false, timeout: 30000 });
+        }
+      } else {
+        warnings.push("No app processes found for namespace injection");
+      }
+    }
+    await runRootAdbShell(serial, `rm -rf ${tmpCopyDir}`, info, { check: false, timeout: 5000 });
+    return {
+      success: true,
+      message: `Certificate injection completed${warnings.length ? ` (warnings: ${warnings.join("; ")})` : ""}`,
+      warnings: warnings.length ? warnings : null,
+    };
+  } catch (err) {
+    try {
+      await runRootAdbShell(serial, `rm -rf ${tmpCopyDir}`, info, { check: false, timeout: 5000 });
+    } catch (_) {}
+    return { success: false, message: `Injection failed: ${err.message}` };
+  }
+}
+
+async function pushCertificateWithExtensionAdb(caPath, serial, info) {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "secmp-cert-"));
+  const convertResult = await runCertManagerJson(["convert", "--cert", caPath, "--output-dir", tmpDir]);
+  if (!convertResult.success || !convertResult.outputFile) {
+    return { success: false, message: convertResult.message || t("extension.cert.failed") };
+  }
+  const pushResult = await runAdb(["push", convertResult.outputFile, ANDROID_CERT_WORK_DIR], { serial, timeout: 30000 });
+  if (!pushResult.success) {
+    return { success: false, message: pushResult.message || pushResult.stderr || "adb push failed" };
+  }
+  const injectResult = await injectCertificateWithAdb(serial, info);
+  return {
+    success: injectResult.success,
+    message: `${convertResult.hash}.0 pushed and injected. ${injectResult.message}`,
+    hash: convertResult.hash,
+    push: {
+      success: true,
+      message: `Certificate pushed: ${path.basename(convertResult.outputFile)}`,
+      remotePath: `${ANDROID_CERT_WORK_DIR}${path.basename(convertResult.outputFile)}`,
+    },
+    inject: injectResult,
+  };
+}
+
+async function waitForAdbDevice(timeoutMs, options = {}) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() <= deadline) {
+    const remainingSeconds = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
+    postCertStatus({
+      success: false,
+      state: "waiting",
+      remainingSeconds,
+      message: t("extension.cert.waitingForDevice", { seconds: remainingSeconds }),
+    });
+    const active = await getActiveAdbDevice({ serial: options.serial });
+    if (active.connected) {
+      return active;
+    }
+    await delay(Math.min(ADB_MONITOR_ACTIVE_MS, Math.max(250, deadline - Date.now())));
+  }
+  return { connected: false, error: t("extension.cert.waitTimeout") };
+}
+
+async function executeCertificatePush(serial, source = "manual") {
+  const caPath = path.join(certDir, "mitmproxy-ca-cert.pem");
+  if (!fs.existsSync(caPath)) {
+    return { success: false, message: t("extension.cert.missing") };
+  }
+
+  postCertStatus({
+    success: false,
+    state: "checkingRoot",
+    serial,
+    message: t("extension.cert.checkingRoot", { serial }),
+  });
+  const info = await getDeviceInfo(serial);
+  if (info.error) {
+    return { success: false, message: info.error };
+  }
+  if (!info.isRoot) {
+    return { success: false, message: t("extension.root.unavailable", { serial }) };
+  }
+
+  postCertStatus({
+    success: false,
+    state: "running",
+    serial,
+    message: t("extension.cert.pushingToDevice", { serial }),
+  });
+  const supportsDeviceArgs = await certManagerSupportsDeviceArgs();
+  const result = supportsDeviceArgs
+    ? await runCertManagerJson([
+      "push",
+      "--cert", caPath,
+      "--serial", serial,
+      "--root-mode", "auto",
+    ])
+    : await pushCertificateWithExtensionAdb(caPath, serial, info);
+  return {
+    ...result,
+    serial,
+    source,
+    message: result.message || (result.success ? t("extension.cert.completed") : t("extension.cert.failed")),
+  };
+}
+
+async function pushCertificateWithWait(options = {}) {
+  if (certPushTask) {
+    const message = t("extension.cert.taskRunning");
+    postCertStatus({ success: false, state: "busy", message });
+    return { success: false, message };
+  }
+
+  const source = options.source || "manual";
+  const waitMinutes = Number.isFinite(Number(options.waitMinutes))
+    ? Math.max(0, Number(options.waitMinutes))
+    : getCertPushWaitMinutes();
+  certPushTask = { source, startedAt: Date.now() };
+  try {
+    const caPath = path.join(certDir, "mitmproxy-ca-cert.pem");
+    if (!fs.existsSync(caPath)) {
+      const result = { success: false, message: t("extension.cert.missing") };
+      postCertStatus({ ...result, state: "error" });
+      return result;
+    }
+
+    let active = await getActiveAdbDevice({ serial: options.serial });
+    if (!active.connected && waitMinutes > 0) {
+      active = await waitForAdbDevice(waitMinutes * 60 * 1000, { serial: options.serial });
+    }
+    if (!active.connected) {
+      const result = { success: false, message: active.error || t("extension.device.noneOnline") };
+      postCertStatus({ ...result, state: "error" });
+      return result;
+    }
+
+    selectedAdbSerial = active.serial;
+    postCertStatus({
+      success: false,
+      state: "running",
+      serial: active.serial,
+      message: t("extension.cert.deviceDetected", { serial: active.serial }),
+    });
+
+    const result = await executeCertificatePush(active.serial, source);
+    postCertStatus({
+      ...result,
+      state: result.success ? "success" : "error",
+      message: result.message,
+    });
+    if (result.success) {
+      deviceInfo = await getDeviceInfo(active.serial);
+      postDeviceStatus(active.serial, deviceInfo);
+    }
+    return result;
+  } catch (err) {
+    const result = { success: false, message: err.message || t("extension.cert.failed") };
+    postCertStatus({ ...result, state: "error" });
+    return result;
+  } finally {
+    certPushTask = null;
+    scheduleAdbMonitor(ADB_MONITOR_IDLE_MS);
+  }
+}
+
+function postDeviceStatus(serial, info = null, connected = true) {
+  if (!panel) return;
+  if (connected) {
+    panel.webview.postMessage({
+      command: "deviceStatus",
+      connected: true,
+      serial,
+      info,
+    });
+  } else {
+    panel.webview.postMessage({
+      command: "deviceStatus",
+      connected: false,
+    });
+  }
+}
+
+function shouldRunAdbMonitor() {
+  return !!panel || isAutoPushCertEnabled() || !!certPushTask;
+}
+
+function startAdbMonitor() {
+  if (adbMonitorTimer || adbMonitorInFlight || !shouldRunAdbMonitor()) return;
+  adbMonitorTimer = setTimeout(() => {
+    adbMonitorTimer = null;
+    pollAdbMonitor();
+  }, 0);
+}
+
+function stopAdbMonitor() {
+  if (adbMonitorTimer) {
+    clearTimeout(adbMonitorTimer);
+    adbMonitorTimer = null;
+  }
+}
+
+function scheduleAdbMonitor(delayMs = ADB_MONITOR_IDLE_MS) {
+  if (!shouldRunAdbMonitor()) {
+    stopAdbMonitor();
+    return;
+  }
+  if (adbMonitorTimer) return;
+  adbMonitorTimer = setTimeout(() => {
+    adbMonitorTimer = null;
+    pollAdbMonitor();
+  }, delayMs);
+}
+
+async function getDeviceBootIdWithRetry(serial, attempts = 5) {
+  for (let i = 0; i < attempts; i += 1) {
+    const bootId = await getDeviceBootId(serial);
+    if (bootId) return bootId;
+    await delay(1000);
+  }
+  return "";
+}
+
+async function maybeAutoPushCertificate(device) {
+  if (!isAutoPushCertEnabled() || certPushTask || !device?.serial) return;
+  const bootId = await getDeviceBootIdWithRetry(device.serial);
+  const key = `${device.serial}:${bootId || "unknown"}`;
+  if (autoPushCompletedBootKeys.has(key) || autoPushAttemptedOnlineKey === key) return;
+  autoPushAttemptedOnlineKey = key;
+  postCertStatus({
+    success: false,
+    state: "running",
+    serial: device.serial,
+    message: t("extension.cert.autoPushStarted", { serial: device.serial }),
+  });
+  const result = await pushCertificateWithWait({
+    source: "auto",
+    waitMinutes: 0,
+    serial: device.serial,
+  });
+  if (result.success && bootId) {
+    autoPushCompletedBootKeys.add(key);
+  }
+}
+
+async function pollAdbMonitor() {
+  if (adbMonitorInFlight) {
+    scheduleAdbMonitor(ADB_MONITOR_IDLE_MS);
+    return;
+  }
+  adbMonitorInFlight = true;
+  try {
+    const snapshot = await listAdbDevices();
+    const chosen = snapshot.error ? { error: snapshot.error } : chooseActiveAdbDevice(snapshot.devices);
+    if (!chosen.device) {
+      if (lastAdbMonitorState.connected) {
+        deviceInfo = null;
+        postDeviceStatus(null, null, false);
+      }
+      lastAdbMonitorState = { serial: null, connected: false, bootId: null };
+      autoPushAttemptedOnlineKey = null;
+      return;
+    }
+
+    const serial = chosen.device.serial;
+    const stateChanged = !lastAdbMonitorState.connected || lastAdbMonitorState.serial !== serial;
+    selectedAdbSerial = serial;
+    if (stateChanged) {
+      deviceInfo = await getDeviceInfo(serial);
+      postDeviceStatus(serial, deviceInfo);
+      const bootId = await getDeviceBootId(serial);
+      lastAdbMonitorState = { serial, connected: true, bootId };
+      void maybeAutoPushCertificate(chosen.device).catch((err) => log(`Auto certificate push failed: ${err.message}`));
+    }
+  } catch (err) {
+    log(`ADB monitor failed: ${err.message}`);
+  } finally {
+    adbMonitorInFlight = false;
+    scheduleAdbMonitor(certPushTask ? ADB_MONITOR_ACTIVE_MS : ADB_MONITOR_IDLE_MS);
+  }
+}
+
+async function handleExportCertificate() {
+  const caPath = path.join(certDir, "mitmproxy-ca-cert.pem");
+  if (!fs.existsSync(caPath)) {
+    const message = t("extension.cert.missing");
+    postCertStatus({ success: false, state: "error", message });
+    vscode.window.showErrorMessage(message);
+    return;
+  }
+
+  const androidFormat = t("extension.cert.exportAndroidFormat");
+  const cerFormat = t("extension.cert.exportCerFormat");
+  const selected = await vscode.window.showQuickPick([androidFormat, cerFormat], {
+    placeHolder: t("extension.cert.exportFormatPlaceholder"),
+  });
+  if (!selected) return;
+
+  try {
+    if (selected === androidFormat) {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "secmp-cert-"));
+      const result = await runCertManagerJson(["convert", "--cert", caPath, "--output-dir", tmpDir]);
+      if (!result.success || !result.outputFile) {
+        throw new Error(result.message || t("extension.cert.exportFailed"));
+      }
+      const defaultName = path.basename(result.outputFile);
+      const saveUri = await vscode.window.showSaveDialog({
+        filters: { "Android Certificate": ["0"], "All Files": ["*"] },
+        defaultUri: getDefaultFileDialogUri(defaultName),
+      });
+      if (!saveUri) return;
+      fs.copyFileSync(result.outputFile, saveUri.fsPath);
+      await rememberFileDialogDir(saveUri.fsPath);
+      const message = t("extension.cert.exported", { path: saveUri.fsPath });
+      postCertStatus({ success: true, state: "success", message });
+      vscode.window.showInformationMessage(message);
+      return;
+    }
+
+    const saveUri = await vscode.window.showSaveDialog({
+      filters: { "Certificate": ["cer"], "All Files": ["*"] },
+      defaultUri: getDefaultFileDialogUri("secmp-ca-cert.cer"),
+    });
+    if (!saveUri) return;
+    const cert = new crypto.X509Certificate(fs.readFileSync(caPath));
+    fs.writeFileSync(saveUri.fsPath, cert.raw);
+    await rememberFileDialogDir(saveUri.fsPath);
+    const message = t("extension.cert.exported", { path: saveUri.fsPath });
+    postCertStatus({ success: true, state: "success", message });
+    vscode.window.showInformationMessage(message);
+  } catch (err) {
+    const message = t("extension.cert.exportFailedWithMessage", { message: err.message });
+    postCertStatus({ success: false, state: "error", message });
+    vscode.window.showErrorMessage(message);
+  }
 }
 
 async function getLocalIp() {
@@ -2920,28 +3719,33 @@ function normalizeCaptureNetwork(network, port) {
 }
 
 async function setDeviceProxy(proxyHost, proxyPort) {
-  return new Promise((resolve) => {
-    const cmd = `adb shell settings put global http_proxy ${proxyHost}:${proxyPort}`;
-    exec(cmd, { timeout: 10000 }, (err, stdout) => {
-      if (err) {
-        resolve({ success: false, message: err.message });
-      } else {
-        resolve({ success: true, message: t("extension.proxy.setResult", { host: proxyHost, port: proxyPort }) });
-      }
-    });
+  const active = await getActiveAdbDevice();
+  if (!active.connected) {
+    return { success: false, message: active.error };
+  }
+  const result = await runAdb(["shell", `settings put global http_proxy ${proxyHost}:${proxyPort}`], {
+    serial: active.serial,
+    timeout: 10000,
   });
+  if (!result.success) {
+    return { success: false, message: result.message };
+  }
+  return { success: true, message: t("extension.proxy.setResult", { host: proxyHost, port: proxyPort }) };
 }
 
 async function clearDeviceProxy() {
-  return new Promise((resolve) => {
-    exec("adb shell settings put global http_proxy :0", { timeout: 10000 }, (err) => {
-      if (err) {
-        resolve({ success: false, message: err.message });
-      } else {
-        resolve({ success: true, message: t("extension.proxy.clearDeviceResult") });
-      }
-    });
+  const active = await getActiveAdbDevice();
+  if (!active.connected) {
+    return { success: false, message: active.error };
+  }
+  const result = await runAdb(["shell", "settings put global http_proxy :0"], {
+    serial: active.serial,
+    timeout: 10000,
   });
+  if (!result.success) {
+    return { success: false, message: result.message };
+  }
+  return { success: true, message: t("extension.proxy.clearDeviceResult") };
 }
 
 // ===== Proxy Engine Management =====
@@ -3311,24 +4115,19 @@ async function createPanel() {
           postCachedIpLocations();
         }
         postIpLocationConfig();
+        postCertAutoPushConfig();
+        startAdbMonitor();
         await postEnvironmentStatus(context);
         break;
 
       case "refreshDevice": {
         const connected = await checkAdbDevice();
         if (connected.connected) {
-          deviceInfo = await getDeviceInfo();
-          panel.webview.postMessage({
-            command: "deviceStatus",
-            connected: true,
-            info: deviceInfo,
-          });
+          deviceInfo = await getDeviceInfo(connected.serial);
+          postDeviceStatus(connected.serial, deviceInfo);
         } else {
           deviceInfo = null;
-          panel.webview.postMessage({
-            command: "deviceStatus",
-            connected: false,
-          });
+          postDeviceStatus(null, null, false);
         }
         await postEnvironmentStatus(context);
         break;
@@ -3340,7 +4139,10 @@ async function createPanel() {
           command: "rootResult",
           ...rootResult,
         });
-        deviceInfo = await getDeviceInfo();
+        if (rootResult.success && selectedAdbSerial) {
+          deviceInfo = await getDeviceInfo(selectedAdbSerial);
+          postDeviceStatus(selectedAdbSerial, deviceInfo);
+        }
         await postEnvironmentStatus(context);
         break;
       }
@@ -3422,6 +4224,18 @@ async function createPanel() {
           }
         }
         await postEnvironmentStatus(context);
+        break;
+      }
+
+      case "setAutoPushCert": {
+        const config = vscode.workspace.getConfiguration("secmp");
+        await config.update("autoPushCertOnDeviceReconnect", !!message.enabled, vscode.ConfigurationTarget.Global);
+        postCertAutoPushConfig();
+        if (isAutoPushCertEnabled()) {
+          startAdbMonitor();
+        } else {
+          scheduleAdbMonitor();
+        }
         break;
       }
 
@@ -3636,42 +4450,15 @@ async function createPanel() {
         break;
 
       case "pushCert": {
-        const caPath = path.join(certDir, "mitmproxy-ca-cert.pem");
-        if (!fs.existsSync(caPath)) {
-          panel.webview.postMessage({
-            command: "certStatus",
-            success: false,
-            message: t("extension.cert.missing"),
-          });
-          break;
-        }
-        let certManager;
-        try {
-          certManager = await getCertManagerCommand();
-        } catch (err) {
-          panel.webview.postMessage({
-            command: "certStatus",
-            success: false,
-            message: err.message,
-          });
-          break;
-        }
-        const proc = spawn(certManager.command, [...certManager.args, "push", "--cert", caPath], { windowsHide: true });
-        let output = "";
-        proc.stdout.on("data", (d) => (output += d));
-        proc.stderr.on("data", (d) => log(`cert: ${d}`));
-        proc.on("close", (code) => {
-          try {
-            const result = JSON.parse(output);
-            panel.webview.postMessage({ command: "certStatus", ...result });
-          } catch (_) {
-            panel.webview.postMessage({
-              command: "certStatus",
-              success: code === 0,
-              message: output || t("extension.cert.completed"),
-            });
-          }
+        await pushCertificateWithWait({
+          source: "manual",
+          waitMinutes: getCertPushWaitMinutes(),
         });
+        break;
+      }
+
+      case "exportCert": {
+        await handleExportCertificate();
         break;
       }
 
@@ -3687,6 +4474,7 @@ async function createPanel() {
 
   panel.onDidDispose(() => {
     panel = null;
+    scheduleAdbMonitor();
     if (!allowPanelDispose && activeSession) {
       handlePanelClosedDuringCapture();
     }
@@ -4169,6 +4957,821 @@ async function fetchAllFlowBodies(flows, concurrency = FILTER_BODY_FETCH_CONCURR
   const count = Math.min(concurrency, total);
   await Promise.all(Array.from({ length: count }, () => next()));
   return { failed, total };
+}
+
+// ===== MCP bridge service =====
+
+function getMcpConfig() {
+  const config = vscode.workspace.getConfiguration("secmp");
+  const rawPort = Number(config.get("mcp.port", MCP_DEFAULT_PORT));
+  const rawMaxBodyBytes = Number(config.get("mcp.maxBodyBytes", MCP_DEFAULT_MAX_BODY_BYTES));
+  return {
+    enabled: Boolean(config.get("mcp.enabled", false)),
+    port: Number.isInteger(rawPort) && rawPort >= 0 && rawPort <= 65535 ? rawPort : MCP_DEFAULT_PORT,
+    stateFile: String(config.get("mcp.stateFile", "") || "").trim() ||
+      path.join(os.homedir(), ".secmp", "mcp-bridge.json"),
+    redactByDefault: config.get("mcp.redactByDefault", true) !== false,
+    maxBodyBytes: clampNumber(rawMaxBodyBytes, 0, MCP_MAX_BODY_BYTES, MCP_DEFAULT_MAX_BODY_BYTES),
+  };
+}
+
+function clampNumber(value, min, max, fallback) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return fallback;
+  return Math.min(max, Math.max(min, Math.round(num)));
+}
+
+function parseBoolean(value, fallback = false) {
+  if (typeof value === "boolean") return value;
+  if (value == null || value === "") return fallback;
+  const normalized = String(value).trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(normalized)) return true;
+  if (["0", "false", "no", "off"].includes(normalized)) return false;
+  return fallback;
+}
+
+function parseStatusFilter(value) {
+  if (Array.isArray(value)) {
+    return value.map(Number).filter(Number.isFinite);
+  }
+  if (value == null || value === "") return [];
+  return String(value).split(",").map((item) => Number(item.trim())).filter(Number.isFinite);
+}
+
+function getFlowStartedAtMs(flow) {
+  return flow?.req_timestamp ? Math.round(flow.req_timestamp * 1000) : 0;
+}
+
+function flowMatchesMcpFilter(flow, filter = {}) {
+  if (!flow) return false;
+  const method = String(filter.method || "").trim().toUpperCase();
+  if (method && String(flow.method || "").toUpperCase() !== method) return false;
+  const host = String(filter.host || "").trim().toLowerCase();
+  if (host && String(flow.host || "").toLowerCase() !== host) return false;
+  const hostContains = String(filter.hostContains || "").trim().toLowerCase();
+  if (hostContains && !String(flow.host || "").toLowerCase().includes(hostContains)) return false;
+  const pathContains = String(filter.pathContains || "").trim().toLowerCase();
+  if (pathContains && !String(flow.path || "").toLowerCase().includes(pathContains)) return false;
+  const urlContains = String(filter.urlContains || filter.url || "").trim().toLowerCase();
+  if (urlContains && !String(flow.url || "").toLowerCase().includes(urlContains)) return false;
+  const contentTypeContains = String(filter.contentTypeContains || filter.contentType || "").trim().toLowerCase();
+  if (contentTypeContains && !String(flow.content_type || "").toLowerCase().includes(contentTypeContains)) return false;
+  const statuses = parseStatusFilter(filter.status);
+  if (statuses.length > 0 && !statuses.includes(Number(flow.status_code) || 0)) return false;
+  const sinceMs = Number(filter.sinceMs) || 0;
+  if (sinceMs > 0) {
+    const startedAt = getFlowStartedAtMs(flow);
+    if (!startedAt || startedAt < Date.now() - sinceMs) return false;
+  }
+  if (parseBoolean(filter.requireResponse, false) && !isResponseComplete(flow)) return false;
+  return true;
+}
+
+function getMcpFlowSummary(flow) {
+  return {
+    id: flow.id,
+    ordinal: getFlowOrdinal(flow),
+    type: flow.type || "http",
+    method: flow.method || "GET",
+    scheme: flow.scheme || "",
+    url: flow.url || "",
+    host: flow.host || "",
+    port: flow.port || 0,
+    path: flow.path || "",
+    status: flow.status_code || 0,
+    error: flow.error || "",
+    contentType: flow.content_type || "",
+    requestSize: flow.req_size || 0,
+    responseSize: flow.res_size || 0,
+    requestBodyState: flow._reqBodyState || (flow._reqBodyFetched ? "ready" : "missing"),
+    responseBodyState: flow._resBodyState || (flow._resBodyFetched ? "ready" : (isResponseComplete(flow) ? "missing" : "pending")),
+    startedAt: flow.req_timestamp ? new Date(flow.req_timestamp * 1000).toISOString() : "",
+    responseStartedAt: flow.res_timestamp ? new Date(flow.res_timestamp * 1000).toISOString() : "",
+    responseEndedAt: flow.res_timestamp_end ? new Date(flow.res_timestamp_end * 1000).toISOString() : "",
+    durationMs: flow.duration_ms || 0,
+    tls: {
+      version: flow.tls_version || "",
+      cipher: flow.tls_cipher || "",
+      sni: flow.tls_sni || "",
+      alpn: flow.tls_alpn || "",
+    },
+    serverIp: flow.server_ip || "",
+    ipLocation: getMcpIpLocation(flow),
+    clientIp: flow.client_ip || "",
+  };
+}
+
+function redactHeaderValue(name, value) {
+  if (/authorization|proxy-authorization|cookie|set-cookie|token|secret|api[-_]?key/i.test(String(name || ""))) {
+    return "[REDACTED]";
+  }
+  if (Array.isArray(value)) return value.map((item) => redactHeaderValue(name, item));
+  return value;
+}
+
+function redactHeaders(headers, redact) {
+  if (!redact) return { ...(headers || {}) };
+  const out = {};
+  for (const [name, value] of Object.entries(headers || {})) {
+    out[name] = redactHeaderValue(name, value);
+  }
+  return out;
+}
+
+function redactObject(value) {
+  if (Array.isArray(value)) return value.map(redactObject);
+  if (!value || typeof value !== "object") return value;
+  const out = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (/password|passwd|pwd|token|secret|authorization|cookie|session|credential|api[-_]?key/i.test(key)) {
+      out[key] = "[REDACTED]";
+    } else {
+      out[key] = redactObject(item);
+    }
+  }
+  return out;
+}
+
+function redactTextBody(text, contentType) {
+  const raw = String(text || "");
+  const trimmed = raw.trim();
+  if (!trimmed) return raw;
+  const ct = String(contentType || "").toLowerCase();
+  if (ct.includes("json") || trimmed.startsWith("{") || trimmed.startsWith("[")) {
+    try {
+      return JSON.stringify(redactObject(JSON.parse(raw)), null, 2);
+    } catch (_) {}
+  }
+  if (ct.includes("x-www-form-urlencoded")) {
+    try {
+      const params = new URLSearchParams(raw);
+      for (const key of [...params.keys()]) {
+        if (/password|passwd|pwd|token|secret|authorization|cookie|session|credential|api[-_]?key/i.test(key)) {
+          params.set(key, "[REDACTED]");
+        }
+      }
+      return params.toString();
+    } catch (_) {}
+  }
+  return raw
+    .replace(/((?:access_|refresh_)?token|password|passwd|pwd|secret|api[-_]?key)(["']?\s*[:=]\s*["']?)[^"',&\s}]+/gi, "$1$2[REDACTED]")
+    .replace(/(authorization|cookie)(\s*[:=]\s*)[^\r\n&]+/gi, "$1$2[REDACTED]");
+}
+
+function bufferFromFlowBody(flow, side) {
+  const isRequest = side === "request";
+  const base64 = isRequest ? flow.req_body_base64 : flow.res_body_base64;
+  const text = isRequest ? flow.req_body : flow.res_body;
+  if (base64) return { buffer: Buffer.from(base64, "base64"), binary: true };
+  return { buffer: Buffer.from(String(text || ""), "utf8"), binary: false };
+}
+
+function getMcpBodyPayload(flow, side, options = {}) {
+  const isRequest = side === "request";
+  const fetched = isRequest ? flow._reqBodyFetched : flow._resBodyFetched;
+  const state = isRequest
+    ? (flow._reqBodyState || (fetched ? "ready" : "missing"))
+    : (flow._resBodyState || (fetched ? "ready" : (isResponseComplete(flow) ? "missing" : "pending")));
+  const error = isRequest ? (flow._reqBodyError || "") : (flow._resBodyError || "");
+  const contentType = isRequest ? String(flow.req_headers?.["content-type"] || "") : String(flow.content_type || flow.res_headers?.["content-type"] || "");
+  const declaredSize = isRequest ? (flow.req_size || 0) : (flow.res_size || 0);
+  if (!fetched) {
+    return { state, error, contentType, size: declaredSize };
+  }
+  const { buffer, binary } = bufferFromFlowBody(flow, side);
+  const maxBodyBytes = clampNumber(options.maxBodyBytes, 0, MCP_MAX_BODY_BYTES, getMcpConfig().maxBodyBytes);
+  const truncated = maxBodyBytes >= 0 && buffer.length > maxBodyBytes;
+  const slice = truncated ? buffer.subarray(0, maxBodyBytes) : buffer;
+  const payload = {
+    state: "ready",
+    contentType,
+    size: buffer.length,
+    truncated,
+    sha256: crypto.createHash("sha256").update(buffer).digest("hex"),
+  };
+  if (binary) {
+    payload.encoding = "base64";
+    payload.base64 = slice.toString("base64");
+  } else {
+    payload.encoding = "utf8";
+    const text = slice.toString("utf8");
+    payload.text = options.redact ? redactTextBody(text, contentType) : text;
+  }
+  return payload;
+}
+
+async function serializeMcpFlow(flow, options = {}) {
+  const config = getMcpConfig();
+  const includeRequestBody = parseBoolean(options.includeRequestBody, false) || parseBoolean(options.includeBodies, false);
+  const includeResponseBody = parseBoolean(options.includeResponseBody, false) || parseBoolean(options.includeBodies, false);
+  const redact = parseBoolean(options.redact, config.redactByDefault);
+  if (includeRequestBody || includeResponseBody) {
+    await fetchFlowBodies(flow, {
+      request: includeRequestBody,
+      response: includeResponseBody,
+    });
+  }
+  const out = {
+    ...getMcpFlowSummary(flow),
+    request: {
+      headers: redactHeaders(flow.req_headers, redact),
+    },
+    response: {
+      headers: redactHeaders(flow.res_headers, redact),
+    },
+  };
+  if (includeRequestBody) {
+    out.request.body = getMcpBodyPayload(flow, "request", { ...options, redact });
+  }
+  if (includeResponseBody) {
+    out.response.body = getMcpBodyPayload(flow, "response", { ...options, redact });
+  }
+  return out;
+}
+
+function findMcpFlows(filter = {}) {
+  return capturedFlows.filter((flow) => flowMatchesMcpFilter(flow, filter));
+}
+
+function stringMatches(text, matcher) {
+  const value = String(text || "");
+  if (!matcher.term) return false;
+  if (matcher.regex) {
+    try {
+      return new RegExp(matcher.term, "i").test(value);
+    } catch (_) {
+      return false;
+    }
+  }
+  return value.toLowerCase().includes(String(matcher.term).toLowerCase());
+}
+
+function headersToSearchText(headers) {
+  return Object.entries(headers || {})
+    .map(([name, value]) => `${name}: ${formatHeaderValue(value)}`)
+    .join("\n");
+}
+
+function flowBodySearchText(flow, side) {
+  const base64 = side === "request" ? flow.req_body_base64 : flow.res_body_base64;
+  const text = side === "request" ? flow.req_body : flow.res_body;
+  if (text) return text;
+  if (!base64) return "";
+  try {
+    return Buffer.from(base64, "base64").toString("latin1");
+  } catch (_) {
+    return "";
+  }
+}
+
+function getMcpIpLocation(flow) {
+  const ip = normalizeIpForLocation(flow?.server_ip);
+  const enabled = isIpLocationEnabled();
+  if (!ip) {
+    return {
+      enabled,
+      state: "missing",
+      label: "",
+      country: "",
+      registeredCountry: "",
+      error: "",
+    };
+  }
+
+  const persisted = getPersistedIpLocationPayloadForFlow(flow);
+  if (persisted) {
+    return {
+      enabled,
+      state: persisted.state || "ready",
+      label: persisted.label || "",
+      country: persisted.country || "",
+      registeredCountry: persisted.registeredCountry || "",
+      error: persisted.error || "",
+    };
+  }
+
+  const cached = getIpLocationPayloadForIp(ip);
+  if (cached) {
+    return {
+      enabled,
+      state: cached.state || "unknown",
+      label: cached.label || "",
+      country: cached.country || "",
+      registeredCountry: cached.registeredCountry || "",
+      error: cached.error || "",
+    };
+  }
+
+  if (!enabled) {
+    return {
+      enabled: false,
+      state: "disabled",
+      label: "",
+      country: "",
+      registeredCountry: "",
+      error: "secmp.ipLocation.enabled is false or secmp.ipLocation.endpoint is empty",
+    };
+  }
+
+  return {
+    enabled: true,
+    state: "unknown",
+    label: "",
+    country: "",
+    registeredCountry: "",
+    error: "",
+  };
+}
+
+function getTopCounts(values, limit) {
+  const counts = new Map();
+  for (const value of values) {
+    const key = String(value || "").trim() || "(empty)";
+    counts.set(key, (counts.get(key) || 0) + 1);
+  }
+  return [...counts.entries()]
+    .map(([value, count]) => ({ value, count }))
+    .sort((a, b) => b.count - a.count || a.value.localeCompare(b.value))
+    .slice(0, limit);
+}
+
+function getHostStats(flows, options = {}) {
+  const hostContains = String(options.hostContains || "").trim().toLowerCase();
+  const hosts = new Map();
+  for (const flow of flows) {
+    const host = String(flow.host || "").trim();
+    if (!host) continue;
+    if (hostContains && !host.toLowerCase().includes(hostContains)) continue;
+    const existing = hosts.get(host) || {
+      host,
+      count: 0,
+      methods: {},
+      statuses: {},
+      ipLocationStates: {},
+      countries: {},
+      registeredCountries: {},
+      firstSeenAt: "",
+      lastSeenAt: "",
+    };
+    existing.count += 1;
+    const method = flow.method || "GET";
+    const status = String(flow.status_code || 0);
+    existing.methods[method] = (existing.methods[method] || 0) + 1;
+    existing.statuses[status] = (existing.statuses[status] || 0) + 1;
+    const location = getMcpIpLocation(flow);
+    const locationState = location.state || "unknown";
+    existing.ipLocationStates[locationState] = (existing.ipLocationStates[locationState] || 0) + 1;
+    if (location.country) {
+      existing.countries[location.country] = (existing.countries[location.country] || 0) + 1;
+    }
+    if (location.registeredCountry) {
+      existing.registeredCountries[location.registeredCountry] = (existing.registeredCountries[location.registeredCountry] || 0) + 1;
+    }
+    const startedAt = flow.req_timestamp ? new Date(flow.req_timestamp * 1000).toISOString() : "";
+    if (startedAt && (!existing.firstSeenAt || startedAt < existing.firstSeenAt)) existing.firstSeenAt = startedAt;
+    if (startedAt && (!existing.lastSeenAt || startedAt > existing.lastSeenAt)) existing.lastSeenAt = startedAt;
+    hosts.set(host, existing);
+  }
+  return [...hosts.values()];
+}
+
+function buildMcpStats(flows, top = 10) {
+  const hostStats = getHostStats(flows);
+  const locations = flows.map(getMcpIpLocation);
+  const topHosts = hostStats
+    .map((item) => ({ host: item.host, count: item.count }))
+    .sort((a, b) => b.count - a.count || a.host.localeCompare(b.host))
+    .slice(0, top);
+  return {
+    flowCount: flows.length,
+    uniqueHosts: hostStats.length,
+    responseComplete: flows.filter(isResponseComplete).length,
+    errors: flows.filter((flow) => !!flow.error).length,
+    topHosts,
+    methods: getTopCounts(flows.map((flow) => flow.method || "GET"), top),
+    statuses: getTopCounts(flows.map((flow) => String(flow.status_code || 0)), top),
+    contentTypes: getTopCounts(flows.map((flow) => flow.content_type || "(empty)"), top),
+    ipLocationStates: getTopCounts(locations.map((location) => location.state || "unknown"), top),
+    countries: getTopCounts(locations.map((location) => location.country).filter(Boolean), top),
+    registeredCountries: getTopCounts(locations.map((location) => location.registeredCountry).filter(Boolean), top),
+  };
+}
+
+function makeBodySnippet(text, matcher, redact, contentType) {
+  const value = String(text || "");
+  if (!value || !matcher.term) return "";
+  let index = -1;
+  let matchLength = String(matcher.term).length;
+  if (matcher.regex) {
+    try {
+      const match = new RegExp(matcher.term, "i").exec(value);
+      if (match) {
+        index = match.index;
+        matchLength = match[0].length;
+      }
+    } catch (_) {}
+  } else {
+    index = value.toLowerCase().indexOf(String(matcher.term).toLowerCase());
+  }
+  if (index < 0) return "";
+  const half = Math.floor(MCP_BODY_SNIPPET_CHARS / 2);
+  const start = Math.max(0, index - half);
+  const end = Math.min(value.length, index + matchLength + half);
+  const prefix = start > 0 ? "..." : "";
+  const suffix = end < value.length ? "..." : "";
+  const snippet = `${prefix}${value.slice(start, end)}${suffix}`;
+  return redact ? redactTextBody(snippet, contentType) : snippet;
+}
+
+function buildMcpHints(flow, options = {}) {
+  const includeRequestBody = parseBoolean(options.includeRequestBody, false) || parseBoolean(options.includeBodies, false);
+  const includeResponseBody = parseBoolean(options.includeResponseBody, false) || parseBoolean(options.includeBodies, false);
+  const hints = [];
+  if (!includeRequestBody && (flow.req_size || 0) > 0) {
+    hints.push("request body is available but not included; call secmp_get_flow with includeRequestBody=true");
+  }
+  if (!includeResponseBody && ((flow.res_size || 0) > 0 || flow._resBodyFetched)) {
+    hints.push("response body is available but not included; call secmp_get_flow with includeResponseBody=true");
+  }
+  return hints;
+}
+
+async function mcpStatus() {
+  const config = getMcpConfig();
+  const ipLocationConfig = getIpLocationConfig();
+  const stats = buildMcpStats(capturedFlows, 5);
+  return {
+    proxyRunning: !!proxyProcess,
+    proxyPort: activeProxyPort || 0,
+    webPort: webPort || 0,
+    flowFeedStatus,
+    websocketLive: !!flowWebSocketActive,
+    deviceConnected: !!deviceInfo?.connected,
+    device: deviceInfo || null,
+    flowCount: capturedFlows.length,
+    session: activeSession ? {
+      id: activeSession.sessionId,
+      name: activeSession.sessionName,
+      temporary: activeSession.temporary,
+      filePath: activeSession.filePath,
+    } : null,
+    bodyFetchBacklog: bodyFetchQueue.length + bodyFetchActive,
+    summary: {
+      uniqueHosts: stats.uniqueHosts,
+      topHosts: stats.topHosts,
+      methods: stats.methods,
+      statuses: stats.statuses,
+      ipLocationStates: stats.ipLocationStates,
+      countries: stats.countries,
+      registeredCountries: stats.registeredCountries,
+    },
+    ipLocation: {
+      enabled: isIpLocationEnabled(),
+      configured: !!(ipLocationConfig.enabled && ipLocationConfig.endpoint),
+      endpointConfigured: !!ipLocationConfig.endpoint,
+    },
+    mcp: {
+      enabled: config.enabled,
+      port: mcpBridge?.port || 0,
+      stateFile: config.stateFile,
+      redactByDefault: config.redactByDefault,
+      maxBodyBytes: config.maxBodyBytes,
+    },
+  };
+}
+
+async function mcpListFlows(filter = {}) {
+  const limit = clampNumber(filter.limit, 1, 200, 50);
+  const offset = clampNumber(filter.offset, 0, Number.MAX_SAFE_INTEGER, 0);
+  const matchedFlows = findMcpFlows(filter);
+  const order = String(filter.order || "desc").toLowerCase() === "asc" ? "asc" : "desc";
+  const ordered = order === "asc" ? matchedFlows : matchedFlows.slice().reverse();
+  const flows = ordered.slice(offset, offset + limit).map(getMcpFlowSummary);
+  return {
+    total: capturedFlows.length,
+    matched: matchedFlows.length,
+    offset,
+    limit,
+    order,
+    returned: flows.length,
+    hasMore: offset + flows.length < matchedFlows.length,
+    flows,
+  };
+}
+
+async function mcpGetFlow(id, options = {}) {
+  const flow = capturedFlowById.get(String(id || ""));
+  if (!flow) {
+    const err = new Error("Flow not found");
+    err.statusCode = 404;
+    throw err;
+  }
+  const result = { flow: await serializeMcpFlow(flow, options) };
+  const hints = buildMcpHints(flow, options);
+  if (hints.length > 0) result.hints = hints;
+  return result;
+}
+
+async function mcpSearchFlows(input = {}) {
+  const term = String(input.term || "");
+  const scopes = Array.isArray(input.scopes) && input.scopes.length > 0
+    ? input.scopes
+    : ["url", "requestHeaders", "responseHeaders"];
+  const limit = clampNumber(input.limit, 1, 200, 50);
+  const matcher = { term, regex: !!input.regex };
+  const matched = [];
+  const unsearched = [];
+  const redact = parseBoolean(input.redact, getMcpConfig().redactByDefault);
+  for (const flow of findMcpFlows(input)) {
+    if (matched.length >= limit) break;
+    let ok = false;
+    const matchedScopes = [];
+    const snippets = [];
+    if (scopes.includes("url") && stringMatches(flow.url, matcher)) {
+      ok = true;
+      matchedScopes.push("url");
+    }
+    if (scopes.includes("requestHeaders") && stringMatches(headersToSearchText(flow.req_headers), matcher)) {
+      ok = true;
+      matchedScopes.push("requestHeaders");
+    }
+    if (scopes.includes("responseHeaders") && stringMatches(headersToSearchText(flow.res_headers), matcher)) {
+      ok = true;
+      matchedScopes.push("responseHeaders");
+    }
+    const wantReqBody = scopes.includes("requestBody");
+    const wantResBody = scopes.includes("responseBody");
+    if (wantReqBody || wantResBody) {
+      const result = await fetchFlowBodies(flow, { request: wantReqBody, response: wantResBody });
+      if (wantReqBody && flow._reqBodyFetched) {
+        const text = flowBodySearchText(flow, "request");
+        if (stringMatches(text, matcher)) {
+          ok = true;
+          matchedScopes.push("requestBody");
+          snippets.push({
+            scope: "requestBody",
+            text: makeBodySnippet(text, matcher, redact, flow.req_headers?.["content-type"]),
+          });
+        }
+      } else if (wantReqBody && !result.requestOk && (flow.req_size || 0) > 0) {
+        unsearched.push(flow.id);
+      }
+      if (wantResBody && flow._resBodyFetched) {
+        const text = flowBodySearchText(flow, "response");
+        if (stringMatches(text, matcher)) {
+          ok = true;
+          matchedScopes.push("responseBody");
+          snippets.push({
+            scope: "responseBody",
+            text: makeBodySnippet(text, matcher, redact, flow.content_type || flow.res_headers?.["content-type"]),
+          });
+        }
+      } else if (wantResBody && !result.responseOk && ((flow.res_size || 0) > 0 || !isResponseComplete(flow))) {
+        unsearched.push(flow.id);
+      }
+    }
+    if (ok) {
+      matched.push({
+        ...getMcpFlowSummary(flow),
+        matchedScopes: [...new Set(matchedScopes)],
+        snippets,
+      });
+    }
+  }
+  return { term, matchedCount: matched.length, unsearchedIds: [...new Set(unsearched)], flows: matched };
+}
+
+async function mcpListHosts(options = {}) {
+  const limit = clampNumber(options.limit, 1, 200, 50);
+  const sortBy = String(options.sortBy || "count").toLowerCase();
+  const flows = findMcpFlows({ sinceMs: options.sinceMs });
+  const allHosts = getHostStats(flows, options);
+  const hosts = allHosts
+    .sort((a, b) => (
+      sortBy === "name"
+        ? a.host.localeCompare(b.host)
+        : b.count - a.count || a.host.localeCompare(b.host)
+    ))
+    .slice(0, limit);
+  return {
+    totalFlows: capturedFlows.length,
+    matchedFlows: flows.length,
+    uniqueHosts: allHosts.length,
+    hosts,
+  };
+}
+
+async function mcpStats(options = {}) {
+  const top = clampNumber(options.top, 1, 50, 10);
+  const flows = findMcpFlows({ sinceMs: options.sinceMs });
+  return {
+    totalFlows: capturedFlows.length,
+    matchedFlows: flows.length,
+    ...buildMcpStats(flows, top),
+  };
+}
+
+async function mcpWaitForFlow(filter = {}) {
+  const timeoutMs = clampNumber(filter.timeoutMs, 1, MCP_MAX_WAIT_TIMEOUT_MS, MCP_DEFAULT_WAIT_TIMEOUT_MS);
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() <= deadline) {
+    const matches = findMcpFlows(filter);
+    const flow = matches.length > 0 ? matches[matches.length - 1] : null;
+    if (flow) {
+      return { matched: true, flow: getMcpFlowSummary(flow) };
+    }
+    await delay(100);
+  }
+  return { matched: false, timeoutMs };
+}
+
+function tryParseBodyValue(text, contentType) {
+  const raw = String(text || "");
+  const trimmed = raw.trim();
+  if (!trimmed) return "";
+  const ct = String(contentType || "").toLowerCase();
+  if (ct.includes("json") || trimmed.startsWith("{") || trimmed.startsWith("[")) {
+    try { return JSON.parse(raw); } catch (_) {}
+  }
+  if (ct.includes("x-www-form-urlencoded")) {
+    try {
+      const out = {};
+      const params = new URLSearchParams(raw);
+      for (const [key, value] of params.entries()) out[key] = value;
+      return out;
+    } catch (_) {}
+  }
+  return raw;
+}
+
+function buildAssertionContext(flow) {
+  const reqBody = flow.req_body_base64 ? "" : (flow.req_body || "");
+  const resBody = flow.res_body_base64 ? "" : (flow.res_body || "");
+  return {
+    id: flow.id,
+    url: flow.url,
+    method: flow.method,
+    host: flow.host,
+    scheme: flow.scheme,
+    serverIp: flow.server_ip || "",
+    ipLocation: getMcpIpLocation(flow),
+    status: flow.status_code || 0,
+    status_code: flow.status_code || 0,
+    durationMs: flow.duration_ms || 0,
+    request: {
+      headers: flow.req_headers || {},
+      bodyText: reqBody,
+      body: tryParseBodyValue(reqBody, flow.req_headers?.["content-type"]),
+    },
+    response: {
+      headers: flow.res_headers || {},
+      bodyText: resBody,
+      body: tryParseBodyValue(resBody, flow.content_type || flow.res_headers?.["content-type"]),
+    },
+  };
+}
+
+function getPathValue(source, pathExpr) {
+  const parts = String(pathExpr || "").split(".").filter(Boolean);
+  let current = source;
+  for (const part of parts) {
+    if (current == null) return undefined;
+    const key = Object.prototype.hasOwnProperty.call(current, part)
+      ? part
+      : Object.keys(current).find((name) => name.toLowerCase() === part.toLowerCase());
+    current = key == null ? undefined : current[key];
+  }
+  return current;
+}
+
+function evaluateAssertion(actual, assertion) {
+  const op = String(assertion.op || "");
+  const expected = assertion.value;
+  if (op === "exists") return actual !== undefined && actual !== null && actual !== "";
+  if (op === "notExists") return actual === undefined || actual === null || actual === "";
+  if (op === "eq") return actual === expected;
+  if (op === "ne") return actual !== expected;
+  if (op === "contains") return String(actual ?? "").includes(String(expected ?? ""));
+  if (op === "notContains") return !String(actual ?? "").includes(String(expected ?? ""));
+  if (op === "startsWith") return String(actual ?? "").startsWith(String(expected ?? ""));
+  if (op === "endsWith") return String(actual ?? "").endsWith(String(expected ?? ""));
+  if (op === "matches") {
+    try { return new RegExp(String(expected), "i").test(String(actual ?? "")); } catch (_) { return false; }
+  }
+  if (op === "lt") return Number(actual) < Number(expected);
+  if (op === "lte") return Number(actual) <= Number(expected);
+  if (op === "gt") return Number(actual) > Number(expected);
+  if (op === "gte") return Number(actual) >= Number(expected);
+  if (op === "hasFlag") return String(actual ?? "").toLowerCase().includes(String(expected ?? "").toLowerCase());
+  return false;
+}
+
+function assertionNeedsBody(assertions, side) {
+  const prefix = side === "request" ? "request.body" : "response.body";
+  return (assertions || []).some((assertion) => String(assertion.path || "").startsWith(prefix));
+}
+
+async function mcpAssertFlow(input = {}) {
+  const assertions = Array.isArray(input.assertions) ? input.assertions : [];
+  if (assertions.length === 0) {
+    const err = new Error("assertions must contain at least one assertion");
+    err.statusCode = 400;
+    throw err;
+  }
+  const wait = await mcpWaitForFlow({ ...(input.match || {}), timeoutMs: input.timeoutMs });
+  if (!wait.matched) {
+    return { passed: false, matched: false, failures: [{ message: "No matching flow captured before timeout" }] };
+  }
+  const flow = capturedFlowById.get(wait.flow.id);
+  const includeRequestBody = parseBoolean(input.includeRequestBody, false) || assertionNeedsBody(assertions, "request");
+  const includeResponseBody = parseBoolean(input.includeResponseBody, false) || assertionNeedsBody(assertions, "response");
+  if (includeRequestBody || includeResponseBody) {
+    await fetchFlowBodies(flow, { request: includeRequestBody, response: includeResponseBody });
+  }
+  const context = buildAssertionContext(flow);
+  const failures = [];
+  for (const assertion of assertions) {
+    const actual = getPathValue(context, assertion.path);
+    if (!evaluateAssertion(actual, assertion)) {
+      failures.push({
+        path: assertion.path,
+        op: assertion.op,
+        expected: assertion.value,
+        actual,
+      });
+    }
+  }
+  return {
+    passed: failures.length === 0,
+    matched: true,
+    matchedFlowId: flow.id,
+    flow: await serializeMcpFlow(flow, {
+      includeRequestBody,
+      includeResponseBody,
+      maxBodyBytes: input.maxBodyBytes,
+      redact: input.redact,
+    }),
+    failures,
+  };
+}
+
+async function mcpExportEvidence(input = {}) {
+  const ids = normalizeFlowIds(input.flowIds);
+  const flows = ids.length > 0
+    ? ids.map((id) => capturedFlowById.get(id)).filter(Boolean)
+    : capturedFlows.slice(-100);
+  const serialized = [];
+  for (const flow of flows) {
+    serialized.push(await serializeMcpFlow(flow, {
+      includeBodies: input.includeBodies,
+      maxBodyBytes: input.maxBodyBytes,
+      redact: input.redact,
+    }));
+  }
+  return {
+    exportedAt: new Date().toISOString(),
+    total: serialized.length,
+    flows: serialized,
+  };
+}
+
+function createMcpService() {
+  return {
+    status: mcpStatus,
+    stats: mcpStats,
+    listHosts: mcpListHosts,
+    listFlows: mcpListFlows,
+    getFlow: mcpGetFlow,
+    searchFlows: mcpSearchFlows,
+    waitForFlow: mcpWaitForFlow,
+    assertFlow: mcpAssertFlow,
+    exportEvidence: mcpExportEvidence,
+  };
+}
+
+async function syncMcpBridge() {
+  const config = getMcpConfig();
+  if (!config.enabled) {
+    if (mcpBridge) {
+      await mcpBridge.stop();
+      mcpBridge = null;
+    }
+    return;
+  }
+  if (!mcpBridgeToken) {
+    mcpBridgeToken = crypto.randomBytes(24).toString("hex");
+  }
+  if (!mcpBridge) {
+    mcpBridge = createSecmpMcpBridge({
+      service: createMcpService(),
+      log,
+    });
+  }
+  await mcpBridge.start({
+    port: config.port,
+    token: mcpBridgeToken,
+    stateFile: config.stateFile,
+  });
 }
 
 async function fetchAllFlowBodiesWithProgress(flows) {
@@ -5035,35 +6638,15 @@ function activate(context) {
   });
 
   const pushCertCmd = vscode.commands.registerCommand("secmp.pushCert", async () => {
-    const caPath = path.join(certDir, "mitmproxy-ca-cert.pem");
-    if (!fs.existsSync(caPath)) {
-      vscode.window.showErrorMessage(t("extension.cert.missing"));
-      return;
-    }
-
-    let certManager;
-    try {
-      certManager = await getCertManagerCommand();
-    } catch (err) {
-      vscode.window.showErrorMessage(err.message);
-      return;
-    }
-    const proc = spawn(certManager.command, [...certManager.args, "push", "--cert", caPath], { windowsHide: true });
-    let output = "";
-    proc.stdout.on("data", d => output += d);
-    proc.stderr.on("data", d => log(`cert: ${d}`));
-    proc.on("close", (code) => {
-      try {
-        const result = JSON.parse(output);
-        if (result.success) {
-          vscode.window.showInformationMessage(result.message);
-        } else {
-          vscode.window.showErrorMessage(result.message);
-        }
-      } catch (_) {
-        vscode.window.showInformationMessage(output || t("extension.cert.completed"));
-      }
+    const result = await pushCertificateWithWait({
+      source: "manual",
+      waitMinutes: getCertPushWaitMinutes(),
     });
+    if (result.success) {
+      vscode.window.showInformationMessage(result.message);
+    } else {
+      vscode.window.showErrorMessage(result.message);
+    }
   });
 
   const setupProxyCmd = vscode.commands.registerCommand("secmp.setupProxy", async () => {
@@ -5136,11 +6719,29 @@ function activate(context) {
         fontSize: getConfiguredFontSize(),
       });
     }
+    if (event.affectsConfiguration("secmp.autoPushCertOnDeviceReconnect") ||
+        event.affectsConfiguration("secmp.certPushWaitMinutes")) {
+      postCertAutoPushConfig();
+      if (isAutoPushCertEnabled()) {
+        startAdbMonitor();
+      } else {
+        scheduleAdbMonitor();
+      }
+    }
     if (event.affectsConfiguration("secmp.ipLocation") ||
         event.affectsConfiguration("secmp.ipLocationEnabled") ||
         event.affectsConfiguration("secmp.ipLocationEndpoint")) {
       resetIpLocationRuntimeState({ notify: true });
       scheduleIpLocationForFlows(capturedFlows);
+    }
+    if (event.affectsConfiguration("secmp.mcp")) {
+      (async () => {
+        if (mcpBridge) {
+          await mcpBridge.stop();
+          mcpBridge = null;
+        }
+        await syncMcpBridge();
+      })().catch((err) => log(`[mcp] failed to apply configuration: ${err.message}`));
     }
   });
 
@@ -5155,11 +6756,20 @@ function activate(context) {
   );
 
   log("Commands registered");
+  if (isAutoPushCertEnabled()) {
+    startAdbMonitor();
+  }
+  syncMcpBridge().catch((err) => log(`[mcp] failed to start bridge: ${err.message}`));
   checkInterruptedSession();
 }
 
-function deactivate() {
+async function deactivate() {
   stopFlowPolling();
+  if (mcpBridge) {
+    await mcpBridge.stop();
+    mcpBridge = null;
+  }
+  stopAdbMonitor();
   recordSessionProxyState(!!proxyProcess, {
     port: activeProxyPort,
     reason: "extensionDeactivate",

@@ -87,7 +87,7 @@ npm run l10n:check
 
 - This section records the session-architecture implementation checkpoint. For current release versions, use `package.json`.
 - SecMP 0.3.0 updates `secmp.runtimeVersion` to `0.3.0` so refreshed Windows/macOS runtime icon assets are shipped with matching runtime packages.
-- SecMP 0.3.2 updates `secmp.runtimeVersion` to `0.3.2` so the runtime release includes the `--connect-addr` proxy-engine support required for capture-network binding.
+- SecMP 0.3.3 updates `secmp.runtimeVersion` to `0.3.3` so the runtime release includes the `--connect-addr` proxy-engine support required for capture-network binding.
 
 ## Current Known Limitations
 
@@ -116,7 +116,7 @@ The current Webview still uses the older message editor model for detail bodies.
 
 ### Capture Event Stream Uses WebSocket With Polling Reconciliation
 
-The capture path now consumes mitmweb `/updates` WebSocket events for add/update/reset and keeps `/flows.json` polling as startup/reconnect reconciliation.
+The capture path now consumes mitmweb `/updates` WebSocket flow events for add/update/reset and keeps `/flows.json` polling as startup/reconnect reconciliation. mitmweb 12.x sends update messages as `type/payload` envelopes such as `flows/add` and `flows/update`; `events/add` messages are mitmweb log events and are ignored by the capture list.
 
 ## Recommended Next Implementation Phase
 
@@ -155,7 +155,7 @@ Extension-side body filtering is implemented for the current flow set. Further h
 The WebSocket feed is implemented. Remaining work is operational hardening:
 
 - connect after `WEB_PORT` and `AUTH_TOKEN`
-- process add/update/reset events
+- process `flows/add`, `flows/update`, and `flows/reset` events from mitmweb `type/payload` envelopes
 - use `/flows.json` only for startup and reconnect reconciliation
 - keep `.secmp` metadata writes on the same event path
 

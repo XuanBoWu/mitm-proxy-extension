@@ -27,7 +27,7 @@ Android设备 ──→ mitmproxy ──→ REST API (flows.json) ──→ exte
 - 文件: `extension.js:1703-1784` (pollFlows)
 - 现象: 每秒请求 `/flows.json` 返回**全量**flow 列表（所有已抓包元数据）
 - 大流量时影响: 10000 flows × ~2KB each ≈ 20MB JSON 传输/解析每秒
-- 当前状态: 扩展已使用 mitmweb `/updates` WebSocket endpoint (add/update/reset 事件)，`/flows.json` 仅作为启动和重连后的对账兜底。
+- 当前状态: 扩展已使用 mitmweb `/updates` WebSocket endpoint（mitmweb 12.x `type/payload` 格式的 `flows/add`、`flows/update`、`flows/reset` 事件），`/flows.json` 仅作为启动和重连后的对账兜底。
 
 ### 卡点 2: transformFlow 全量对象重建
 
@@ -171,7 +171,7 @@ Android设备 ──→ mitmproxy ──→ REST API (flows.json) ──→ exte
 **改动**: `extension.js` 新增 WebSocket 连接管理
 **方案**:
 - 连接 mitmweb `/updates` WebSocket（已有 auth token）
-- 只处理 `flows/add`, `flows/update`, `flows/reset` 事件
+- 只处理 `type/payload` envelope 中的 `flows/add`, `flows/update`, `flows/reset` 事件；忽略 `events/add` 日志事件
 - poll 降级为备用/重连时的 snapshot reconciliation
 - flow body 仍通过 REST 按需获取
 

@@ -3,7 +3,7 @@
   "displayName": "SecMP",
   "icon": "media/icon.png",
   "description": "%secmp.description%",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "publisher": "xbowu",
   "license": "MIT",
   "repository": {
@@ -67,7 +67,7 @@
         },
         "secmp.runtimeVersion": {
           "type": "string",
-          "default": "0.3.2",
+          "default": "0.3.3",
           "description": "%secmp.config.runtimeVersion%"
         },
         "secmp.language": {
@@ -109,6 +109,63 @@
           "default": true,
           "description": "%secmp.config.openPanelAfterNewSession%"
         },
+        "secmp.mcp.enabled": {
+          "type": "boolean",
+          "default": false,
+          "order": 60,
+          "description": "%secmp.config.mcp.enabled%"
+        },
+        "secmp.mcp.port": {
+          "type": "number",
+          "default": 39777,
+          "minimum": 0,
+          "maximum": 65535,
+          "order": 61,
+          "description": "%secmp.config.mcp.port%"
+        },
+        "secmp.mcp.stateFile": {
+          "type": "string",
+          "default": "",
+          "order": 62,
+          "description": "%secmp.config.mcp.stateFile%"
+        },
+        "secmp.mcp.redactByDefault": {
+          "type": "boolean",
+          "default": true,
+          "order": 63,
+          "description": "%secmp.config.mcp.redactByDefault%"
+        },
+        "secmp.mcp.maxBodyBytes": {
+          "type": "number",
+          "default": 65536,
+          "minimum": 0,
+          "maximum": 2097152,
+          "order": 64,
+          "description": "%secmp.config.mcp.maxBodyBytes%"
+        },
+        "secmp.certPushWaitMinutes": {
+          "type": "number",
+          "default": 1,
+          "enum": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10
+          ],
+          "description": "%secmp.config.certPushWaitMinutes%"
+        },
+        "secmp.autoPushCertOnDeviceReconnect": {
+          "type": "boolean",
+          "default": false,
+          "description": "%secmp.config.autoPushCertOnDeviceReconnect%"
+        },
         "secmp.ipLocation.enabled": {
           "type": "boolean",
           "default": false,
@@ -143,7 +200,7 @@
         },
         "secmp.windowsRuntimeVersion": {
           "type": "string",
-          "default": "0.3.2",
+          "default": "0.3.3",
           "description": "%secmp.config.windowsRuntimeVersion%"
         },
         "secmp.updateCheckEnabled": {

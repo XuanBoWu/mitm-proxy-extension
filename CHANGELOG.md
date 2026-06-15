@@ -4,9 +4,9 @@ All notable changes to SecMP are documented in this file.
 
 ## Unreleased
 
-- No unreleased changes.
+暂无。
 
-## 0.3.2 - 2026-06-15
+## 0.3.3 - 2026-06-16
 
 ### IP 归属地与采集网络
 
@@ -17,20 +17,29 @@ All notable changes to SecMP are documented in this file.
 - 请求列表 IP 列 tooltip 增加服务端 IP、后向出口、代理监听地址和 `mitmproxy server_conn.peername` 来源说明，方便判断 IP 归属地数据对应的出口条件。
 - 请求列表右键菜单新增“复制 IP”，位于“复制 Host”下方并支持多选。
 
+### 证书管理
+
+- 手动预置 CA 证书时支持等待 ADB 设备上线，默认等待 1 分钟，可通过 `secmp.certPushWaitMinutes` 在 0-10 分钟之间配置，并在 Webview 中显示倒计时。
+- 设备面板新增“设备重连后自动预置”开关，SecMP 会持续监听 ADB 状态，并在设备重新上线后自动预置证书；能读取 boot id 时按启动周期去重，避免同一次开机重复注入。
+- 证书预置流程默认不执行 `adb root`，所有 ADB 操作绑定明确 serial；root 操作优先使用当前 root shell 或设备内 `su`，降低中断用户已有 `adb logcat` / shell / forward 会话的风险。
+- 设备面板新增证书导出入口，支持导出 Android `.0` 证书和 `.cer` 证书，便于外部脚本、手工安装或其他证书安装流程使用。
+- `cert_manager.py` 新增 `--serial` 和 `--root-mode` 参数；extension 会兼容旧 packaged runtime，只用旧 runtime 做证书转换，再由 extension 执行 serial 绑定的推送和注入流程。
+
+### MCP 调试接口
+
+- 新增可选本地 MCP inspection server，可通过 `secmp.mcp.enabled`、`secmp.mcp.port`、`secmp.mcp.stateFile`、`secmp.mcp.redactByDefault` 和 `secmp.mcp.maxBodyBytes` 控制，用于在本机授权调试场景下读取当前会话、flow 摘要、详情和正文片段。
+- 新增 `docs/mcp.md`，说明 MCP server 的启用方式、工具能力、隐私默认值和本地访问边界。
+
+### 修复
+
+- 修复 mitmweb 12.x `/updates` WebSocket 事件解析：兼容 `type/payload` 消息格式和嵌套 flow payload，避免实时流已连接但新增请求仍依赖 `/flows.json` 10 秒对账批量出现。
+- 降低 WebSocket fallback 时的轮询延迟，并为 flow feed 增加连接、重连、对账和新增 flow 状态日志，方便判断当前是否处于实时 WebSocket 路径。
+
 ### 发布与 runtime
 
-- 将 VSIX 版本更新为 `0.3.2`。
-- 将 `secmp.runtimeVersion` 更新为 `0.3.2`，用于发布包含采集网络绑定参数的 Windows/macOS runtime 包；这是从上一个正式 release `v0.3.0` 以来的 runtime 变更。
-- 更新 README、发布说明和 runtime 文档，明确 0.3.2 的 VSIX/runtime 产物、IP 归属地持久化行为和采集网络绑定能力。
-
-## 0.3.1 - 2026-06-15 (staging candidate, superseded by 0.3.2)
-
-### 采集网络绑定
-
-- 启动代理时将 Webview 选择的采集网络同时用于代理监听地址和 mitmproxy 后向出口，runtime 通过 `--connect-addr` 在 `server_connect` 阶段绑定连接目标服务器时使用的本地源地址。
-- 请求列表 IP 列 tooltip 增加服务端 IP、后向出口、代理监听地址和 `mitmproxy server_conn.peername` 来源说明，方便判断 IP 归属地数据对应的出口条件。
-- 请求列表右键菜单新增“复制 IP”，位于“复制 Host”下方并支持多选。
-- 将 `secmp.runtimeVersion` 更新为 `0.3.1`，用于重发支持采集网络绑定参数的 Windows/macOS runtime 包。
+- 将 VSIX 版本更新为 `0.3.3`。
+- 将 `secmp.runtimeVersion` 更新为 `0.3.3`，用于发布包含采集网络绑定参数和新版证书管理入口的 Windows/macOS runtime 包；`runtimeApiVersion` 继续保持兼容的 `1`。
+- 更新 README、发布说明、runtime 文档和 MCP 文档，明确 0.3.3 的 VSIX/runtime 产物、IP 归属地持久化行为、采集网络绑定能力、证书预置流程和本地 MCP 调试接口。
 
 ## 0.3.0 - 2026-06-14
 

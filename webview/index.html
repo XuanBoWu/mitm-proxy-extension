@@ -113,6 +113,14 @@
       <div class="card">
         <div class="card-title" data-i18n="webview.device.certManagement">证书管理</div>
         <button id="pushCertBtn" class="btn btn-block btn-sm" data-i18n="webview.device.pushCert">推送 CA 证书</button>
+        <div class="setting-row compact">
+          <span data-i18n="webview.device.autoPushCert">设备重连后自动预置</span>
+          <label class="switch" title="设备重连后自动预置证书" data-i18n-title="webview.device.autoPushCert">
+            <input type="checkbox" id="autoPushCertToggle">
+            <span class="switch-track"></span>
+          </label>
+        </div>
+        <button id="exportCertBtn" class="btn btn-block btn-sm" data-i18n="webview.device.exportCert">导出证书</button>
         <div id="certStatus" class="status-text" style="display:none;"></div>
       </div>
 
