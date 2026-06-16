@@ -3,7 +3,7 @@
   "displayName": "SecMP",
   "icon": "media/icon.png",
   "description": "%secmp.description%",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "publisher": "xbowu",
   "license": "MIT",
   "repository": {
@@ -67,8 +67,21 @@
         },
         "secmp.runtimeVersion": {
           "type": "string",
-          "default": "0.3.3",
+          "default": "0.3.4",
           "description": "%secmp.config.runtimeVersion%"
+        },
+        "secmp.connectionStrategy": {
+          "type": "string",
+          "default": "lazy",
+          "enum": [
+            "lazy",
+            "eager"
+          ],
+          "enumDescriptions": [
+            "%secmp.config.connectionStrategy.lazy%",
+            "%secmp.config.connectionStrategy.eager%"
+          ],
+          "description": "%secmp.config.connectionStrategy%"
         },
         "secmp.language": {
           "type": "string",
@@ -200,7 +213,7 @@
         },
         "secmp.windowsRuntimeVersion": {
           "type": "string",
-          "default": "0.3.3",
+          "default": "0.3.4",
           "description": "%secmp.config.windowsRuntimeVersion%"
         },
         "secmp.updateCheckEnabled": {

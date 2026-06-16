@@ -52,7 +52,7 @@ let mcpBridge = null;
 let mcpBridgeToken = "";
 
 const TOOLS_DIR = path.join(__dirname, "tools");
-const DEFAULT_RUNTIME_VERSION = "0.1.2";
+const DEFAULT_RUNTIME_VERSION = "0.3.4";
 const DEFAULT_RUNTIME_REPO = "https://github.com/XuanBoWu/mitm-proxy-extension";
 const GITHUB_RELEASE_API_URL = "https://api.github.com/repos/XuanBoWu/mitm-proxy-extension/releases/latest";
 const GITHUB_RELEASE_LATEST_URL = `${DEFAULT_RUNTIME_REPO}/releases/latest`;
@@ -62,6 +62,8 @@ const DEFAULT_UPDATE_CHECK_INTERVAL_HOURS = 24;
 const DEFAULT_CERT_PUSH_WAIT_MINUTES = 1;
 const MIN_CERT_PUSH_WAIT_MINUTES = 0;
 const MAX_CERT_PUSH_WAIT_MINUTES = 10;
+const DEFAULT_CONNECTION_STRATEGY = "lazy";
+const SUPPORTED_CONNECTION_STRATEGIES = new Set(["lazy", "eager"]);
 const DEFAULT_FONT_SIZE = 13;
 const MIN_FONT_SIZE = 12;
 const MAX_FONT_SIZE = 16;
@@ -225,6 +227,12 @@ function getCertPushWaitMinutes() {
   const raw = Number(config.get("certPushWaitMinutes", DEFAULT_CERT_PUSH_WAIT_MINUTES));
   if (!Number.isFinite(raw)) return DEFAULT_CERT_PUSH_WAIT_MINUTES;
   return Math.min(MAX_CERT_PUSH_WAIT_MINUTES, Math.max(MIN_CERT_PUSH_WAIT_MINUTES, Math.round(raw)));
+}
+
+function getConfiguredConnectionStrategy() {
+  const config = vscode.workspace.getConfiguration("secmp");
+  const value = String(config.get("connectionStrategy", DEFAULT_CONNECTION_STRATEGY) || DEFAULT_CONNECTION_STRATEGY).trim().toLowerCase();
+  return SUPPORTED_CONNECTION_STRATEGIES.has(value) ? value : DEFAULT_CONNECTION_STRATEGY;
 }
 
 function isAutoPushCertEnabled() {
@@ -3777,6 +3785,7 @@ async function startProxyEngine(options = {}) {
       "--port", String(port),
       "--web-port", String(wPort),
       "--confdir", certDir,
+      "--connection-strategy", getConfiguredConnectionStrategy(),
     ];
     if (captureNetwork.connectAddr) {
       spawnArgs.push("--connect-addr", captureNetwork.connectAddr);

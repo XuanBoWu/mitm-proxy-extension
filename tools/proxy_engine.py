@@ -82,6 +82,12 @@ def main():
     parser.add_argument("--web-port", type=int, default=8081, help="Web UI port")
     parser.add_argument("--confdir", default=None, help="mitmproxy config directory")
     parser.add_argument("--connect-addr", default=None, help="Local source address for upstream connections")
+    parser.add_argument(
+        "--connection-strategy",
+        choices=("lazy", "eager"),
+        default="lazy",
+        help="When mitmproxy establishes upstream server connections",
+    )
     args = parser.parse_args()
 
     if args.check_deps:
@@ -135,6 +141,7 @@ def main():
             web_port=args.web_port,
             web_password=auth_token,
             web_open_browser=False,
+            connection_strategy=args.connection_strategy,
         )
 
         # Output connection info in parseable format for extension.js
@@ -142,6 +149,7 @@ def main():
         sys.stderr.write(f"AUTH_TOKEN={auth_token}\n")
         sys.stderr.write(f"LISTEN_HOST={args.host}\n")
         sys.stderr.write(f"CONNECT_ADDR={args.connect_addr or ''}\n")
+        sys.stderr.write(f"CONNECTION_STRATEGY={args.connection_strategy}\n")
         sys.stderr.write(f"Proxy server listening on {args.host}:{args.port}\n")
         sys.stderr.flush()
 

@@ -6,6 +6,18 @@ All notable changes to SecMP are documented in this file.
 
 暂无。
 
+## 0.3.4 - 2026-06-16
+
+### 抓包可见性
+
+- 新增 `secmp.connectionStrategy` 设置，可在 `lazy` / `eager` 之间选择 mitmproxy 建立上游连接的时机；默认改为 `lazy`，优先捕获客户端请求，再连接上游，提升 unknown host、上游 DNS 失败和上游 TLS 失败请求的可见性。
+- `proxy_engine.py` 新增 `--connection-strategy` 参数并输出 `CONNECTION_STRATEGY` 启动信息；extension 启动 runtime 时会传入当前设置。
+
+### 发布与 runtime
+
+- 将 VSIX 版本更新为 `0.3.4`。
+- 将 `secmp.runtimeVersion` 更新为 `0.3.4`，用于发布包含 `--connection-strategy` 参数的 Windows/macOS runtime 包；`runtimeApiVersion` 继续保持兼容的 `1`。
+
 ## 0.3.3 - 2026-06-16
 
 ### IP 归属地与采集网络
