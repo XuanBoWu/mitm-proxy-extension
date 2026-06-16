@@ -16,7 +16,7 @@ All notable changes to SecMP are documented in this file.
 ### 发布与 runtime
 
 - 将 VSIX 版本更新为 `0.3.4`。
-- 将 `secmp.runtimeVersion` 更新为 `0.3.4`，用于发布包含 `--connection-strategy` 参数的 Windows/macOS runtime 包；`runtimeApiVersion` 继续保持兼容的 `1`。
+- 将内置 packaged runtime 版本更新为 `0.3.4`，用于发布包含 `--connection-strategy` 参数的 Windows/macOS runtime 包；`runtimeApiVersion` 继续保持兼容的 `1`。
 
 ## 0.3.3 - 2026-06-16
 

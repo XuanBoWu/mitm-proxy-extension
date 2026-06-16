@@ -41,7 +41,7 @@ Webview UI (HTML/CSS/JS) → vscode.postMessage → extension.js (Node.js)
 
 - 产品名是 `SecMP`，扩展包名是 `secmp`。
 - VS Code command ID 前缀统一为 `secmp.*`，例如 `secmp.startProxy`、`secmp.showPanel`。
-- VS Code 配置命名空间统一为 `secmp.*`，例如 `secmp.windowsRuntimeArchivePath`。
+- VS Code 配置命名空间统一为 `secmp.*`，例如 `secmp.runtimeArchivePath`。
 - Webview panel type 是 `secmpPanel`，输出通道名称是 `SecMP`。
 - 新增 UI 或文档时不要再使用旧的 `MITM Proxy` / `mitmProxy` / `mitm-proxy` 品牌命名；GitHub 仓库 URL 保持原仓库名不变。
 
@@ -92,18 +92,19 @@ Webview UI (HTML/CSS/JS) → vscode.postMessage → extension.js (Node.js)
   - `README.zh-CN.md`
   - 相关 `docs/`
 
-### runtimeVersion 独立规则
+### packaged runtime version 独立规则
 
 - VSIX/package 版本可以随着每个可测试阶段递增。
-- `secmp.runtimeVersion` 与 VSIX 版本独立，只有 runtime 产物实际变化时才更新。
-- 需要更新 `secmp.runtimeVersion` 的情况：
+- packaged runtime 版本与 VSIX 版本独立，只有 runtime 产物实际变化时才更新。
+- 0.3.4 起 runtime 版本不再作为用户可配置的 `secmp.runtimeVersion` 暴露；扩展内置期望版本由 `extension.js` 的 `DEFAULT_RUNTIME_VERSION` 管理，runtime 包内仍通过 `runtime/manifest.json` 的 `runtimeVersion` 声明。
+- 需要更新 packaged runtime 版本的情况：
   - 修改 `tools/proxy_engine.py`
   - 修改 `tools/cert_manager.py`
   - 修改 `requirements-runtime.txt`
   - 修改 `media/secmp.ico` 或 `media/secmp.icns` 并需要发布/交付新 runtime 二进制
   - 修改 runtime package layout
   - 修改 extension ↔ runtime 命令、参数或输出协议
-- 只修改 Webview、extension 侧逻辑、文档或发布流程时，默认不更新 `secmp.runtimeVersion`。
+- 只修改 Webview、extension 侧逻辑、文档或发布流程时，默认不更新 packaged runtime 版本。
 - 例如只修复清空按钮这类 extension/Webview 问题时，VSIX 可从 `0.1.2` bump 到 `0.1.3`，runtime 继续使用 `0.1.2`。
 
 ### 提交规范
@@ -113,7 +114,7 @@ Webview UI (HTML/CSS/JS) → vscode.postMessage → extension.js (Node.js)
   - `git status --short`
   - 本次改动摘要
   - 已运行的验证命令
-  - 是否涉及 `package.json` 版本、`secmp.runtimeVersion`、CHANGELOG 或发布文档更新
+  - 是否涉及 `package.json` 版本、`DEFAULT_RUNTIME_VERSION` / runtime manifest 版本、CHANGELOG 或发布文档更新
 - commit message 使用 Conventional Commits，例如 `fix: ...`、`feat: ...`、`docs: ...`、`chore: ...`、`test: ...`、`refactor: ...`。
 - 一个提交只做一类事情；bugfix、版本发布、文档整理尽量分开。
 - 创建 Git commits 时，不添加 agent/AI co-author trailer，不添加 agent attribution。
@@ -123,37 +124,37 @@ Webview UI (HTML/CSS/JS) → vscode.postMessage → extension.js (Node.js)
 Windows 和 macOS 用户默认走打包 runtime，不要求本机安装 Python 或 mitmproxy：
 
 1. 扩展检查 VS Code global storage 中的缓存 runtime。
-2. 如果缓存不存在，依次尝试 `secmp.runtimePath`、`secmp.runtimeArchivePath`、`secmp.runtimeUrl`；旧的 `secmp.windowsRuntime*` 仍作为兼容别名生效。
-3. 如果用户没有配置 runtime 来源，扩展会根据 `secmp.runtimeVersion`、平台和架构自动拼出 GitHub Release 下载 URL：`https://github.com/XuanBoWu/mitm-proxy-extension/releases/download/v<version>/secmp-runtime-<platform>-<arch>-<version>.zip`。
+2. 如果缓存不存在，依次尝试 `secmp.runtimePath`、`secmp.runtimeArchivePath`、`secmp.runtimeUrl`。
+3. 如果用户没有配置 runtime 来源，扩展会根据内置 `DEFAULT_RUNTIME_VERSION`、平台和架构自动拼出 GitHub Release 下载 URL：`https://github.com/XuanBoWu/mitm-proxy-extension/releases/download/v<version>/secmp-runtime-<platform>-<arch>-<version>.zip`。
 4. 默认下载源集中维护在 `DEFAULT_WINDOWS_RUNTIME_SOURCES`，key 为 `<runtimeVersion>:<platform>:<arch>`；当前保留首个 Windows runtime 的内置 URL 和 SHA-256 校验值，其他平台/版本可通过 `secmp.runtimeSha256` 固定校验。
 5. 如果默认下载失败，提示用户下载 runtime zip 并设置 `secmp.runtimeArchivePath`，或配置 `secmp.runtimeUrl`。
 6. runtime 解压后必须包含 `runtime/manifest.json` 和两个 entrypoint：
    - Windows: `bin/proxy_engine/proxy_engine.exe`、`bin/cert_manager/cert_manager.exe`
    - macOS: `bin/proxy_engine/proxy_engine`、`bin/cert_manager/cert_manager`
-7. `runtimeVersion` 与 VSIX 版本独立；仅 Webview/文档/extension 侧变更可继续复用旧 runtime。
+7. packaged runtime 版本与 VSIX 版本独立；仅 Webview/文档/extension 侧变更可继续复用旧 runtime。
 8. `runtimeApiVersion` 表示 extension ↔ runtime 命令/输出协议版本；缺失时按 `1` 兼容首个 `0.1.0` runtime，协议不兼容时才升级。
-9. `SecMP: Clean Runtime Cache` 只清理当前平台在 VS Code global storage 下的 runtime 缓存，代理运行中拒绝执行；默认保留当前 runtime 版本和最新的上一个版本，删除更旧 runtime、`_staging` 和旧下载 zip，不删除 `mitmproxy-conf`。
+9. `SecMP: Clean Runtime Cache` 只清理当前平台在 VS Code global storage 下的 runtime 缓存，代理运行中拒绝执行；默认保留当前 runtime 版本，删除更旧 runtime、`_staging` 和旧下载 zip，不删除 `mitmproxy-conf`。
 
 构建命令：
 
 ```powershell
-npm run runtime:windows -- -RuntimeVersion 0.3.0 -OutputDir dist
+npm run runtime:windows -- -RuntimeVersion 0.3.4 -OutputDir dist
 ```
 
 ```bash
-npm run runtime:macos -- --runtime-version 0.3.0 --output-dir dist
+npm run runtime:macos -- --runtime-version 0.3.4 --output-dir dist
 ```
 
 验证命令：
 
 ```powershell
-.\scripts\test-windows-runtime.ps1 -RuntimeZip .\dist\secmp-runtime-win32-x64-0.3.0.zip -RuntimeVersion 0.3.0
-npm run runtime:windows:test-install -- --runtime-zip .\dist\secmp-runtime-win32-x64-0.3.0.zip --runtime-version 0.3.0
+.\scripts\test-windows-runtime.ps1 -RuntimeZip .\dist\secmp-runtime-win32-x64-0.3.4.zip -RuntimeVersion 0.3.4
+npm run runtime:windows:test-install -- --runtime-zip .\dist\secmp-runtime-win32-x64-0.3.4.zip --runtime-version 0.3.4
 npx --yes @vscode/vsce package
 ```
 
 ```bash
-node scripts/test-extension-runtime-install.js --runtime-zip dist/secmp-runtime-darwin-arm64-0.3.0.zip --runtime-version 0.3.0
+node scripts/test-extension-runtime-install.js --runtime-zip dist/secmp-runtime-darwin-arm64-0.3.4.zip --runtime-version 0.3.4
 ```
 
 注意：

@@ -69,8 +69,27 @@ async function main() {
   const storageDir = fs.mkdtempSync(path.join(os.tmpdir(), "secmp-extension-runtime-"));
   const registeredCommands = new Map();
   const logs = [];
+  const globalStateStore = new Map();
+  const settings = {
+    runtimePath: "",
+    runtimeArchivePath: args.runtimeZip,
+    runtimeUrl: "",
+    runtimeSha256: "",
+    runtimeVersion: args.runtimeVersion,
+    windowsRuntimePath: "",
+    windowsRuntimeArchivePath: args.runtimeZip,
+    windowsRuntimeUrl: "",
+    windowsRuntimeSha256: "",
+    windowsRuntimeVersion: args.runtimeVersion,
+    updateCheckEnabled: false,
+  };
 
   const vscodeMock = {
+    ConfigurationTarget: {
+      Global: 1,
+      Workspace: 2,
+      WorkspaceFolder: 3,
+    },
     EventEmitter: class {
       constructor() {
         this.listeners = new Set();
@@ -115,19 +134,18 @@ async function main() {
       onDidChangeConfiguration: () => ({ dispose() {} }),
       getConfiguration: () => ({
         get: (name, defaultValue) => {
-          const values = {
-            runtimePath: "",
-            runtimeArchivePath: args.runtimeZip,
-            runtimeUrl: "",
-            runtimeSha256: "",
-            runtimeVersion: args.runtimeVersion,
-            windowsRuntimePath: "",
-            windowsRuntimeArchivePath: args.runtimeZip,
-            windowsRuntimeUrl: "",
-            windowsRuntimeSha256: "",
-            windowsRuntimeVersion: args.runtimeVersion,
-          };
-          return Object.prototype.hasOwnProperty.call(values, name) ? values[name] : defaultValue;
+          return Object.prototype.hasOwnProperty.call(settings, name) ? settings[name] : defaultValue;
+        },
+        inspect: (name) => {
+          if (!Object.prototype.hasOwnProperty.call(settings, name)) return undefined;
+          return { globalValue: settings[name] };
+        },
+        update: async (name, value) => {
+          if (value === undefined) {
+            delete settings[name];
+          } else {
+            settings[name] = value;
+          }
         },
       }),
     },
@@ -179,6 +197,16 @@ async function main() {
 
   sandbox.module.exports.activate({
     globalStorageUri: { fsPath: storageDir },
+    globalState: {
+      get: (key, defaultValue) => globalStateStore.has(key) ? globalStateStore.get(key) : defaultValue,
+      update: async (key, value) => {
+        if (value === undefined) {
+          globalStateStore.delete(key);
+        } else {
+          globalStateStore.set(key, value);
+        }
+      },
+    },
     subscriptions: [],
   });
 
