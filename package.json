@@ -117,7 +117,7 @@
         },
         "secmp.mcp.port": {
           "type": "number",
-          "default": 39777,
+          "default": 0,
           "minimum": 0,
           "maximum": 65535,
           "order": 61,
@@ -265,6 +265,10 @@
       {
         "command": "secmp.testIpLocationEndpoint",
         "title": "%secmp.command.testIpLocationEndpoint%"
+      },
+      {
+        "command": "secmp.copyMcpClientConfig",
+        "title": "%secmp.command.copyMcpClientConfig%"
       },
       {
         "command": "secmp.exportHar",

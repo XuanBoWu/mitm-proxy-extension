@@ -3777,6 +3777,11 @@ $("envDownloadUpdateBtn").addEventListener("click", () => {
   vscode.postMessage({ command: "installEnvironmentUpdate" });
 });
 
+$("envCopyMcpConfigBtn").addEventListener("click", () => {
+  showEnvironmentActionStatus(t("webview.about.action.copyingMcpConfig"), true);
+  vscode.postMessage({ command: "copyMcpClientConfig" });
+});
+
 $("envOpenReleaseBtn").addEventListener("click", () => {
   vscode.postMessage({ command: "openLatestRelease" });
 });

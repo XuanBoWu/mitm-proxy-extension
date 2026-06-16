@@ -90,7 +90,7 @@ const IP_LOCATION_DEBOUNCE_MS = 600;
 const IP_LOCATION_REQUEST_TIMEOUT_MS = 10000;
 const ADB_MONITOR_IDLE_MS = 2000;
 const ADB_MONITOR_ACTIVE_MS = 1000;
-const MCP_DEFAULT_PORT = 39777;
+const MCP_DEFAULT_PORT = 0;
 const MCP_DEFAULT_MAX_BODY_BYTES = 64 * 1024;
 const MCP_MAX_BODY_BYTES = 2 * 1024 * 1024;
 const MCP_DEFAULT_WAIT_TIMEOUT_MS = 10000;
@@ -4286,6 +4286,27 @@ async function createPanel() {
         break;
       }
 
+      case "copyMcpClientConfig": {
+        try {
+          await copyMcpClientConfigToClipboard();
+          panel.webview.postMessage({
+            command: "environmentActionResult",
+            action: "copyMcpClientConfig",
+            running: false,
+            message: t("extension.mcp.configCopied"),
+          });
+          await postEnvironmentStatus(context);
+        } catch (err) {
+          panel.webview.postMessage({
+            command: "environmentActionResult",
+            action: "copyMcpClientConfig",
+            running: false,
+            message: t("extension.mcp.configCopyFailed", { message: err.message }),
+          });
+        }
+        break;
+      }
+
       case "startProxy": {
         const port = message.port || 8080;
         try {
@@ -4968,11 +4989,55 @@ function getMcpConfig() {
   return {
     enabled: Boolean(config.get("mcp.enabled", false)),
     port: Number.isInteger(rawPort) && rawPort >= 0 && rawPort <= 65535 ? rawPort : MCP_DEFAULT_PORT,
-    stateFile: String(config.get("mcp.stateFile", "") || "").trim() ||
-      path.join(os.homedir(), ".secmp", "mcp-bridge.json"),
+    stateFile: String(config.get("mcp.stateFile", "") || "").trim() || getDefaultMcpStateFilePath(),
     redactByDefault: config.get("mcp.redactByDefault", true) !== false,
     maxBodyBytes: clampNumber(rawMaxBodyBytes, 0, MCP_MAX_BODY_BYTES, MCP_DEFAULT_MAX_BODY_BYTES),
   };
+}
+
+function getDefaultMcpStateFilePath() {
+  return path.join(os.homedir(), ".secmp", "mcp-bridge.json");
+}
+
+function getMcpServerScriptPath() {
+  return path.join(__dirname, "mcp", "secmp-mcp-server.js");
+}
+
+function hasCustomMcpStateFile() {
+  const config = vscode.workspace.getConfiguration("secmp");
+  return String(config.get("mcp.stateFile", "") || "").trim() !== "";
+}
+
+function buildMcpClientConfig() {
+  const args = [getMcpServerScriptPath()];
+  const config = getMcpConfig();
+  if (hasCustomMcpStateFile()) {
+    args.push("--state-file", config.stateFile);
+  }
+  return {
+    mcpServers: {
+      secmp: {
+        type: "stdio",
+        command: "node",
+        args,
+      },
+    },
+  };
+}
+
+async function ensureMcpBridgeEnabled() {
+  const config = vscode.workspace.getConfiguration("secmp");
+  if (!getMcpConfig().enabled) {
+    await config.update("mcp.enabled", true, vscode.ConfigurationTarget.Global);
+  }
+  await syncMcpBridge();
+}
+
+async function copyMcpClientConfigToClipboard() {
+  await ensureMcpBridgeEnabled();
+  const text = JSON.stringify(buildMcpClientConfig(), null, 2);
+  await vscode.env.clipboard.writeText(text);
+  return text;
 }
 
 function clampNumber(value, min, max, fallback) {
@@ -6703,6 +6768,16 @@ function activate(context) {
     await testIpLocationEndpoint();
   });
 
+  const copyMcpClientConfigCmd = vscode.commands.registerCommand("secmp.copyMcpClientConfig", async () => {
+    try {
+      await copyMcpClientConfigToClipboard();
+      vscode.window.showInformationMessage(t("extension.mcp.configCopied"));
+      await postEnvironmentStatus(context);
+    } catch (err) {
+      vscode.window.showErrorMessage(t("extension.mcp.configCopyFailed", { message: err.message }));
+    }
+  });
+
   const exportHarCmd = vscode.commands.registerCommand("secmp.exportHar", () => exportHar());
   const exportJsonCmd = vscode.commands.registerCommand("secmp.exportJson", () => exportJson());
   const languageConfigListener = vscode.workspace.onDidChangeConfiguration((event) => {
@@ -6749,7 +6824,8 @@ function activate(context) {
     showPanelCmd, startProxyCmd, stopProxyCmd, pushCertCmd,
     openCapturePanelCmd, newTemporarySessionCmd, newPersistentSessionCmd, openSessionCmd, openRecentSessionCmd,
     revealRecentSessionCmd, removeRecentSessionCmd,
-    setupProxyCmd, clearProxyCmd, cleanRuntimeCacheCmd, checkForUpdatesCmd, testIpLocationEndpointCmd, exportHarCmd, exportJsonCmd,
+    setupProxyCmd, clearProxyCmd, cleanRuntimeCacheCmd, checkForUpdatesCmd, testIpLocationEndpointCmd, copyMcpClientConfigCmd,
+    exportHarCmd, exportJsonCmd,
     languageConfigListener,
     sidebarView,
     outputChannel
