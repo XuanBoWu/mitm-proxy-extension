@@ -111,6 +111,7 @@ const DEFAULT_RUNTIME_SOURCES = {
 let extensionStorageDir = null;
 let certDir = path.join(__dirname, "certificate");
 let packagedRuntimeReadyPromise = null;
+let runtimeConfigMigrationPromise = null;
 let latestExtensionReleaseStatus = null;
 let l10nBundles = new Map();
 
@@ -1482,6 +1483,9 @@ async function postEnvironmentStatus(context) {
 async function ensurePackagedRuntime() {
   if (!isPackagedRuntimePlatform()) {
     return;
+  }
+  if (runtimeConfigMigrationPromise) {
+    await runtimeConfigMigrationPromise;
   }
   if (isPackagedRuntimeReady(getActivePackagedRuntimeDir())) {
     return;
@@ -6775,7 +6779,8 @@ function activate(context) {
   outputChannel = vscode.window.createOutputChannel("SecMP");
   log("SecMP extension activated");
   initializeRuntimeStorage(context);
-  migrateRuntimeConfiguration(context).catch((err) => log(`Runtime configuration migration failed: ${err.message}`));
+  runtimeConfigMigrationPromise = migrateRuntimeConfiguration(context)
+    .catch((err) => log(`Runtime configuration migration failed: ${err.message}`));
   checkForExtensionUpdate(context, { manual: false });
   sidebarProvider = new SecmpSidebarProvider();
   const sidebarView = vscode.window.createTreeView("secmp.sidebar", {

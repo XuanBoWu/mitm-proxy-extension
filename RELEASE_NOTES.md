@@ -10,6 +10,7 @@ SecMP 0.3.4 improves capture visibility for upstream connection failures, fixes 
 - Improved GitHub Release update checks and VSIX installation from the SecMP UI, including clearer status reporting and update controls in the environment panel.
 - Simplified packaged runtime configuration for users. SecMP now manages the expected runtime version internally and migrates away from deprecated `secmp.runtimeVersion` and `secmp.windowsRuntime*` settings.
 - Tightened runtime cache cleanup and runtime installation behavior so stale downloads and older runtime directories are removed more predictably during migration and cleanup.
+- Fixed a first-start runtime migration race where cleanup could remove the `_staging` directory while the packaged runtime was being extracted.
 
 ## Runtime
 

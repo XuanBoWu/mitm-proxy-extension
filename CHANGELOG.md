@@ -17,6 +17,7 @@ All notable changes to SecMP are documented in this file.
 
 - 将 VSIX 版本更新为 `0.3.4`。
 - 将内置 packaged runtime 版本更新为 `0.3.4`，用于发布包含 `--connection-strategy` 参数的 Windows/macOS runtime 包；`runtimeApiVersion` 继续保持兼容的 `1`。
+- 修复首次启动或 runtime 安装烟测中配置迁移清理 `_staging` 与 runtime 解压并发执行的竞态，避免 macOS runtime 安装出现 staging 目录缺失。
 
 ## 0.3.3 - 2026-06-16
 
