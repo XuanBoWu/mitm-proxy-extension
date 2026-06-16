@@ -40,6 +40,7 @@ let proxyPortEditing = false;
 let proxyPortBeforeEdit = currentProxyPort;
 let environmentStatus = null;
 let aboutPopoverOpen = false;
+let mcpPopoverOpen = false;
 const EXTENSION_VERSION = window.__SECMP_EXTENSION_VERSION__ || document.getElementById("footerVersion")?.textContent?.trim() || "-";
 
 function t(key, values = {}, fallback = "") {
@@ -529,7 +530,11 @@ window.addEventListener("message", (event) => {
       renderEnvironmentStatus();
       break;
     case "environmentActionResult":
-      showEnvironmentActionStatus(msg.message || "", !!msg.running);
+      if (msg.action === "copyMcpClientConfig" || msg.action === "setMcpConfig") {
+        showMcpActionStatus(msg.message || "", !!msg.running);
+      } else {
+        showEnvironmentActionStatus(msg.message || "", !!msg.running);
+      }
       break;
     case "flowActionStatus":
       if (msg.message) footerStatus.textContent = msg.message;
@@ -707,6 +712,7 @@ function renderEnvironmentStatus() {
   setText("envUpdateLastChecked", formatEnvTime(updates.lastCheckedAt || updates.latest?.checkedAt));
   setText("envUpdateLatest", latestDisplayText(updates));
   $("envDownloadUpdateBtn").style.display = updates.latest?.status === "updateAvailable" ? "" : "none";
+  renderMcpStatus(status.mcp);
 }
 
 function versionDisplayText(status) {
@@ -736,12 +742,52 @@ function toggleAboutPopover(open = !aboutPopoverOpen) {
   $("aboutPopover").hidden = !open;
   $("footerVersionBtn").setAttribute("aria-expanded", open ? "true" : "false");
   if (open) {
+    toggleMcpPopover(false);
+  }
+  if (open) {
+    vscode.postMessage({ command: "getEnvironmentStatus" });
+  }
+}
+
+function renderMcpStatus(mcp) {
+  if (!mcp) return;
+  const enabled = !!mcp.enabled;
+  const running = !!mcp.running;
+  $("mcpEnabledToggle").checked = enabled;
+  $("mcpRedactToggle").checked = mcp.redactByDefault !== false;
+  $("mcpPortInput").value = String(mcp.configuredPort ?? 0);
+  $("mcpMaxBodyBytesInput").value = String(mcp.maxBodyBytes ?? 65536);
+  $("mcpStateFileInput").value = mcp.stateFileConfigured ? (mcp.stateFile || "") : "";
+  $("mcpStateFileInput").placeholder = mcp.stateFile || "";
+  setText("mcpSummary", enabled ? (running ? t("common.running") : t("common.notRunning")) : t("webview.mcp.disabled"));
+  setText("mcpStatusText", enabled ? (running ? t("common.running") : t("common.notRunning")) : t("webview.mcp.disabled"));
+  setText("mcpActivePort", running && mcp.port ? String(mcp.port) : "-");
+  setText("mcpConfiguredPort", String(mcp.configuredPort ?? 0));
+}
+
+function toggleMcpPopover(open = !mcpPopoverOpen) {
+  mcpPopoverOpen = open;
+  $("mcpPopover").hidden = !open;
+  $("footerMcpBtn").setAttribute("aria-expanded", open ? "true" : "false");
+  if (open) {
+    toggleAboutPopover(false);
     vscode.postMessage({ command: "getEnvironmentStatus" });
   }
 }
 
 function showEnvironmentActionStatus(message, running = false) {
   const el = $("environmentActionStatus");
+  if (!message) {
+    el.hidden = true;
+    el.textContent = "";
+    return;
+  }
+  el.hidden = false;
+  el.textContent = running ? message : message;
+}
+
+function showMcpActionStatus(message, running = false) {
+  const el = $("mcpActionStatus");
   if (!message) {
     el.hidden = true;
     el.textContent = "";
@@ -3763,8 +3809,16 @@ $("footerVersionBtn").addEventListener("click", () => {
   toggleAboutPopover();
 });
 
+$("footerMcpBtn").addEventListener("click", () => {
+  toggleMcpPopover();
+});
+
 $("aboutCloseBtn").addEventListener("click", () => {
   toggleAboutPopover(false);
+});
+
+$("mcpCloseBtn").addEventListener("click", () => {
+  toggleMcpPopover(false);
 });
 
 $("envCheckUpdateBtn").addEventListener("click", () => {
@@ -3777,9 +3831,21 @@ $("envDownloadUpdateBtn").addEventListener("click", () => {
   vscode.postMessage({ command: "installEnvironmentUpdate" });
 });
 
-$("envCopyMcpConfigBtn").addEventListener("click", () => {
-  showEnvironmentActionStatus(t("webview.about.action.copyingMcpConfig"), true);
+$("mcpCopyConfigBtn").addEventListener("click", () => {
+  showMcpActionStatus(t("webview.mcp.action.copyingConfig"), true);
   vscode.postMessage({ command: "copyMcpClientConfig" });
+});
+
+$("mcpSaveBtn").addEventListener("click", () => {
+  showMcpActionStatus(t("webview.mcp.action.saving"), true);
+  vscode.postMessage({
+    command: "setMcpConfig",
+    enabled: $("mcpEnabledToggle").checked,
+    port: Number($("mcpPortInput").value),
+    redactByDefault: $("mcpRedactToggle").checked,
+    maxBodyBytes: Number($("mcpMaxBodyBytesInput").value),
+    stateFile: $("mcpStateFileInput").value,
+  });
 });
 
 $("envOpenReleaseBtn").addEventListener("click", () => {

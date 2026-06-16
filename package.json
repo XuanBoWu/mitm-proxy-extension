@@ -65,11 +65,6 @@
           "default": "",
           "description": "%secmp.config.runtimeSha256%"
         },
-        "secmp.runtimeVersion": {
-          "type": "string",
-          "default": "0.3.4",
-          "description": "%secmp.config.runtimeVersion%"
-        },
         "secmp.connectionStrategy": {
           "type": "string",
           "default": "lazy",
@@ -190,31 +185,6 @@
           "default": "",
           "order": 71,
           "markdownDescription": "%secmp.config.ipLocation.endpoint.markdown%"
-        },
-        "secmp.windowsRuntimePath": {
-          "type": "string",
-          "default": "",
-          "description": "%secmp.config.windowsRuntimePath%"
-        },
-        "secmp.windowsRuntimeArchivePath": {
-          "type": "string",
-          "default": "",
-          "description": "%secmp.config.windowsRuntimeArchivePath%"
-        },
-        "secmp.windowsRuntimeUrl": {
-          "type": "string",
-          "default": "",
-          "description": "%secmp.config.windowsRuntimeUrl%"
-        },
-        "secmp.windowsRuntimeSha256": {
-          "type": "string",
-          "default": "",
-          "description": "%secmp.config.windowsRuntimeSha256%"
-        },
-        "secmp.windowsRuntimeVersion": {
-          "type": "string",
-          "default": "0.3.4",
-          "description": "%secmp.config.windowsRuntimeVersion%"
         },
         "secmp.updateCheckEnabled": {
           "type": "boolean",
