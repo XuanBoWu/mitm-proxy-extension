@@ -52,20 +52,23 @@ let mcpBridge = null;
 let mcpBridgeToken = "";
 
 const TOOLS_DIR = path.join(__dirname, "tools");
-const DEFAULT_RUNTIME_VERSION = "0.1.2";
+const DEFAULT_RUNTIME_VERSION = "0.3.4";
 const DEFAULT_RUNTIME_REPO = "https://github.com/XuanBoWu/mitm-proxy-extension";
 const GITHUB_RELEASE_API_URL = "https://api.github.com/repos/XuanBoWu/mitm-proxy-extension/releases/latest";
 const GITHUB_RELEASE_LATEST_URL = `${DEFAULT_RUNTIME_REPO}/releases/latest`;
-const WINDOWS_RUNTIME_API_VERSION = 1;
-const WINDOWS_RUNTIME_RETAIN_PREVIOUS_COUNT = 1;
+const PACKAGED_RUNTIME_API_VERSION = 1;
+const PACKAGED_RUNTIME_RETAIN_PREVIOUS_COUNT = 0;
 const DEFAULT_UPDATE_CHECK_INTERVAL_HOURS = 24;
 const DEFAULT_CERT_PUSH_WAIT_MINUTES = 1;
 const MIN_CERT_PUSH_WAIT_MINUTES = 0;
 const MAX_CERT_PUSH_WAIT_MINUTES = 10;
+const DEFAULT_CONNECTION_STRATEGY = "lazy";
+const SUPPORTED_CONNECTION_STRATEGIES = new Set(["lazy", "eager"]);
 const DEFAULT_FONT_SIZE = 13;
 const MIN_FONT_SIZE = 12;
 const MAX_FONT_SIZE = 16;
 const UPDATE_LAST_CHECK_KEY = "secmp.lastUpdateCheckAt";
+const CONFIG_MIGRATION_VERSION_KEY = "secmp.configMigrationVersion";
 const RECENT_SESSIONS_KEY = "secmp.recentSessions";
 const LAST_FILE_DIALOG_DIR_KEY = "secmp.lastFileDialogDir";
 const extensionPackage = loadExtensionPackage();
@@ -90,7 +93,7 @@ const IP_LOCATION_DEBOUNCE_MS = 600;
 const IP_LOCATION_REQUEST_TIMEOUT_MS = 10000;
 const ADB_MONITOR_IDLE_MS = 2000;
 const ADB_MONITOR_ACTIVE_MS = 1000;
-const MCP_DEFAULT_PORT = 39777;
+const MCP_DEFAULT_PORT = 0;
 const MCP_DEFAULT_MAX_BODY_BYTES = 64 * 1024;
 const MCP_MAX_BODY_BYTES = 2 * 1024 * 1024;
 const MCP_DEFAULT_WAIT_TIMEOUT_MS = 10000;
@@ -107,7 +110,8 @@ const DEFAULT_RUNTIME_SOURCES = {
 };
 let extensionStorageDir = null;
 let certDir = path.join(__dirname, "certificate");
-let windowsRuntimeReadyPromise = null;
+let packagedRuntimeReadyPromise = null;
+let runtimeConfigMigrationPromise = null;
 let latestExtensionReleaseStatus = null;
 let l10nBundles = new Map();
 
@@ -189,23 +193,17 @@ function getPythonCmd() {
 
 function getRuntimeConfig() {
   const config = vscode.workspace.getConfiguration("secmp");
-  const runtimePath = String(config.get("runtimePath", "") || config.get("windowsRuntimePath", "") || "").trim();
-  const runtimeArchivePath = String(config.get("runtimeArchivePath", "") || config.get("windowsRuntimeArchivePath", "") || "").trim();
-  const runtimeUrl = String(config.get("runtimeUrl", "") || config.get("windowsRuntimeUrl", "") || "").trim();
-  const runtimeSha256 = String(config.get("runtimeSha256", "") || config.get("windowsRuntimeSha256", "") || "").trim().toLowerCase();
-  const runtimeVersion = String(config.get("runtimeVersion", "") || config.get("windowsRuntimeVersion", DEFAULT_RUNTIME_VERSION) || DEFAULT_RUNTIME_VERSION).trim();
+  const runtimePath = String(config.get("runtimePath", "") || "").trim();
+  const runtimeArchivePath = String(config.get("runtimeArchivePath", "") || "").trim();
+  const runtimeUrl = String(config.get("runtimeUrl", "") || "").trim();
+  const runtimeSha256 = String(config.get("runtimeSha256", "") || "").trim().toLowerCase();
+  const runtimeVersion = DEFAULT_RUNTIME_VERSION;
   return {
     runtimePath,
     runtimeArchivePath,
     runtimeUrl,
     runtimeSha256,
     runtimeVersion,
-    // Backward-compatible aliases for older Windows settings.
-    windowsRuntimePath: runtimePath,
-    windowsRuntimeArchivePath: runtimeArchivePath,
-    windowsRuntimeUrl: runtimeUrl,
-    windowsRuntimeSha256: runtimeSha256,
-    windowsRuntimeVersion: runtimeVersion,
   };
 }
 
@@ -220,11 +218,73 @@ function getUpdateConfig() {
   };
 }
 
+async function clearConfigValue(config, key, target) {
+  try {
+    await config.update(key, undefined, target);
+    return true;
+  } catch (err) {
+    log(`Failed to clear secmp.${key} for ${target}: ${err.message}`);
+    return false;
+  }
+}
+
+async function clearConfiguredSetting(config, key) {
+  const inspected = config.inspect(key);
+  if (!inspected) return false;
+  let changed = false;
+  if (inspected.globalValue !== undefined) {
+    changed = await clearConfigValue(config, key, vscode.ConfigurationTarget.Global) || changed;
+  }
+  if (inspected.workspaceValue !== undefined) {
+    changed = await clearConfigValue(config, key, vscode.ConfigurationTarget.Workspace) || changed;
+  }
+  if (inspected.workspaceFolderValue !== undefined && vscode.workspace.workspaceFolders?.length) {
+    changed = await clearConfigValue(config, key, vscode.ConfigurationTarget.WorkspaceFolder) || changed;
+  }
+  return changed;
+}
+
+async function migrateRuntimeConfiguration(context) {
+  const config = vscode.workspace.getConfiguration("secmp");
+  const staleKeys = [
+    "runtimeVersion",
+    "windowsRuntimePath",
+    "windowsRuntimeArchivePath",
+    "windowsRuntimeUrl",
+    "windowsRuntimeSha256",
+    "windowsRuntimeVersion",
+  ];
+  const removed = [];
+  for (const key of staleKeys) {
+    if (await clearConfiguredSetting(config, key)) {
+      removed.push(`secmp.${key}`);
+    }
+  }
+  const cacheResult = cleanPackagedRuntimeCache();
+  if (cacheResult.runtimeDirsRemoved || cacheResult.downloadFilesRemoved || cacheResult.stagingDirsRemoved) {
+    log(
+      `Runtime cache migrated: removed ${cacheResult.runtimeDirsRemoved} runtime directories, ` +
+      `${cacheResult.downloadFilesRemoved} downloads, ${cacheResult.stagingDirsRemoved} staging directories`
+    );
+  }
+  await context.globalState.update(CONFIG_MIGRATION_VERSION_KEY, extensionPackage.version);
+  if (removed.length > 0) {
+    log(`Runtime configuration migrated: removed ${removed.join(", ")}`);
+    vscode.window.showInformationMessage(t("extension.runtimeConfig.migrated"));
+  }
+}
+
 function getCertPushWaitMinutes() {
   const config = vscode.workspace.getConfiguration("secmp");
   const raw = Number(config.get("certPushWaitMinutes", DEFAULT_CERT_PUSH_WAIT_MINUTES));
   if (!Number.isFinite(raw)) return DEFAULT_CERT_PUSH_WAIT_MINUTES;
   return Math.min(MAX_CERT_PUSH_WAIT_MINUTES, Math.max(MIN_CERT_PUSH_WAIT_MINUTES, Math.round(raw)));
+}
+
+function getConfiguredConnectionStrategy() {
+  const config = vscode.workspace.getConfiguration("secmp");
+  const value = String(config.get("connectionStrategy", DEFAULT_CONNECTION_STRATEGY) || DEFAULT_CONNECTION_STRATEGY).trim().toLowerCase();
+  return SUPPORTED_CONNECTION_STRATEGIES.has(value) ? value : DEFAULT_CONNECTION_STRATEGY;
 }
 
 function isAutoPushCertEnabled() {
@@ -258,35 +318,50 @@ function getRuntimePackageName(version, platform = getRuntimePlatform(), arch = 
   return `secmp-runtime-${platform}-${arch}-${version}.zip`;
 }
 
-function getWindowsRuntimeSourceKey(version, platform = getRuntimePlatform(), arch = process.arch) {
+function getRuntimeSourceKey(version, platform = getRuntimePlatform(), arch = process.arch) {
   return `${version}:${platform}:${arch}`;
 }
 
-function buildDefaultWindowsRuntimeUrl(version, arch = process.arch, platform = getRuntimePlatform()) {
+function buildDefaultRuntimeUrl(version, arch = process.arch, platform = getRuntimePlatform()) {
   const fileName = getRuntimePackageName(version, platform, arch);
   return `${DEFAULT_RUNTIME_REPO}/releases/download/v${version}/${fileName}`;
 }
 
-function getDefaultWindowsRuntimeSource() {
+function getDefaultRuntimeSource() {
   const config = getRuntimeConfig();
   const version = config.runtimeVersion;
-  const key = getWindowsRuntimeSourceKey(version);
+  const key = getRuntimeSourceKey(version);
   return DEFAULT_RUNTIME_SOURCES[key] || {
-    url: buildDefaultWindowsRuntimeUrl(version),
+    url: buildDefaultRuntimeUrl(version),
     sha256: "",
   };
 }
 
-function getDefaultWindowsRuntimeUrl() {
-  return getDefaultWindowsRuntimeSource().url;
+function getDefaultRuntimeUrl() {
+  return getDefaultRuntimeSource().url;
 }
 
-function getExpectedWindowsRuntimeSha256() {
+function getExpectedRuntimeSha256() {
   const config = getRuntimeConfig();
   if (config.runtimeSha256) {
     return config.runtimeSha256;
   }
-  return getDefaultWindowsRuntimeSource().sha256 || "";
+  return getDefaultRuntimeSource().sha256 || "";
+}
+
+function getPackagedRuntimeRoot() {
+  return path.join(extensionStorageDir, "runtime", getRuntimePlatform(), process.arch);
+}
+
+function getPackagedRuntimeDownloadDir() {
+  return path.join(getPackagedRuntimeRoot(), "_downloads");
+}
+
+function getPackagedRuntimeSourceLabel(config = getRuntimeConfig()) {
+  if (config.runtimePath) return "Configured path";
+  if (config.runtimeArchivePath) return "Configured archive";
+  if (config.runtimeUrl) return "Configured URL";
+  return "VS Code global storage";
 }
 
 function compareRuntimeVersions(a, b) {
@@ -319,11 +394,6 @@ function isRuntimeVersionDir(entry) {
   return entry.isDirectory() && !entry.name.startsWith("_");
 }
 
-function getRuntimeVersionFromDownloadName(fileName) {
-  const match = String(fileName).match(/^secmp-runtime-[^-]+-[^-]+-(.+)\.zip(?:\.sha256)?$/i);
-  return match ? match[1] : null;
-}
-
 function getRuntimeCacheKeepVersions(runtimeRoot, currentVersion) {
   const versions = new Set([currentVersion]);
   if (!fs.existsSync(runtimeRoot)) {
@@ -336,15 +406,15 @@ function getRuntimeCacheKeepVersions(runtimeRoot, currentVersion) {
     .filter(version => version !== currentVersion)
     .sort((a, b) => compareRuntimeVersions(b, a));
 
-  for (const version of cachedVersions.slice(0, WINDOWS_RUNTIME_RETAIN_PREVIOUS_COUNT)) {
+  for (const version of cachedVersions.slice(0, PACKAGED_RUNTIME_RETAIN_PREVIOUS_COUNT)) {
     versions.add(version);
   }
   return versions;
 }
 
-function cleanWindowsRuntimeCache() {
+function cleanPackagedRuntimeCache() {
   const config = getRuntimeConfig();
-  const runtimeRoot = path.join(extensionStorageDir, "runtime", getRuntimePlatform(), process.arch);
+  const runtimeRoot = getPackagedRuntimeRoot();
   const keepVersions = getRuntimeCacheKeepVersions(runtimeRoot, config.runtimeVersion);
   const result = {
     runtimeDirsRemoved: 0,
@@ -398,10 +468,7 @@ function cleanWindowsRuntimeCache() {
   if (fs.existsSync(downloadDir)) {
     for (const entry of fs.readdirSync(downloadDir, { withFileTypes: true })) {
       if (!entry.isFile()) continue;
-      const version = getRuntimeVersionFromDownloadName(entry.name);
-      if (version && !keepVersions.has(version)) {
-        removePath(path.join(downloadDir, entry.name), "downloadFilesRemoved");
-      }
+      removePath(path.join(downloadDir, entry.name), "downloadFilesRemoved");
     }
   }
 
@@ -501,12 +568,38 @@ function runProcess(command, args, options = {}) {
   });
 }
 
-function getWindowsRuntimeDir() {
-  const config = getRuntimeConfig();
-  return path.join(extensionStorageDir, "runtime", getRuntimePlatform(), process.arch, config.runtimeVersion);
+function checkListenPortAvailable(host, port) {
+  return new Promise((resolve) => {
+    const server = net.createServer();
+    let settled = false;
+
+    function finish(result) {
+      if (settled) return;
+      settled = true;
+      server.removeAllListeners();
+      resolve(result);
+    }
+
+    server.once("error", (err) => {
+      finish({
+        available: false,
+        code: err.code || "",
+        message: err.message,
+      });
+    });
+    server.once("listening", () => {
+      server.close(() => finish({ available: true, code: "", message: "" }));
+    });
+    server.listen({ host, port, exclusive: true });
+  });
 }
 
-function getWindowsRuntimeManifestPath(runtimeDir = getWindowsRuntimeDir()) {
+function getPackagedRuntimeDir() {
+  const config = getRuntimeConfig();
+  return path.join(getPackagedRuntimeRoot(), config.runtimeVersion);
+}
+
+function getPackagedRuntimeManifestPath(runtimeDir = getPackagedRuntimeDir()) {
   return path.join(runtimeDir, "manifest.json");
 }
 
@@ -514,8 +607,8 @@ function readJsonFile(filePath) {
   return JSON.parse(fs.readFileSync(filePath, "utf-8").replace(/^\uFEFF/, ""));
 }
 
-function getWindowsRuntimeEntrypoint(name, runtimeDir = getWindowsRuntimeDir()) {
-  const manifestPath = getWindowsRuntimeManifestPath(runtimeDir);
+function getPackagedRuntimeEntrypoint(name, runtimeDir = getPackagedRuntimeDir()) {
+  const manifestPath = getPackagedRuntimeManifestPath(runtimeDir);
   if (!fs.existsSync(manifestPath)) {
     return null;
   }
@@ -532,8 +625,8 @@ function getManifestRuntimeApiVersion(manifest) {
   return manifest.runtimeApiVersion == null ? 1 : Number(manifest.runtimeApiVersion);
 }
 
-function isWindowsRuntimeReady(runtimeDir = getWindowsRuntimeDir()) {
-  const manifestPath = getWindowsRuntimeManifestPath(runtimeDir);
+function isPackagedRuntimeReady(runtimeDir = getPackagedRuntimeDir()) {
+  const manifestPath = getPackagedRuntimeManifestPath(runtimeDir);
   if (!fs.existsSync(manifestPath)) {
     return false;
   }
@@ -544,16 +637,16 @@ function isWindowsRuntimeReady(runtimeDir = getWindowsRuntimeDir()) {
     return manifest.platform === getRuntimePlatform() &&
       manifest.arch === process.arch &&
       manifest.runtimeVersion === config.runtimeVersion &&
-      getManifestRuntimeApiVersion(manifest) === WINDOWS_RUNTIME_API_VERSION &&
-      !!getWindowsRuntimeEntrypoint("proxyEngine", runtimeDir) &&
-      !!getWindowsRuntimeEntrypoint("certManager", runtimeDir);
+      getManifestRuntimeApiVersion(manifest) === PACKAGED_RUNTIME_API_VERSION &&
+      !!getPackagedRuntimeEntrypoint("proxyEngine", runtimeDir) &&
+      !!getPackagedRuntimeEntrypoint("certManager", runtimeDir);
   } catch (err) {
     log(`Invalid SecMP runtime manifest: ${err.message}`);
     return false;
   }
 }
 
-function getConfiguredWindowsRuntimePath() {
+function getConfiguredPackagedRuntimePath() {
   const config = getRuntimeConfig();
   if (!config.runtimePath) {
     return null;
@@ -565,12 +658,12 @@ function getConfiguredWindowsRuntimePath() {
   return runtimeDir;
 }
 
-function getActiveWindowsRuntimeDir() {
-  const configuredRuntimeDir = getConfiguredWindowsRuntimePath();
+function getActivePackagedRuntimeDir() {
+  const configuredRuntimeDir = getConfiguredPackagedRuntimePath();
   if (configuredRuntimeDir) {
     return configuredRuntimeDir;
   }
-  return getWindowsRuntimeDir();
+  return getPackagedRuntimeDir();
 }
 
 function findNestedRuntimeArchive(searchDir) {
@@ -596,7 +689,7 @@ function findNestedRuntimeArchive(searchDir) {
     null;
 }
 
-async function promptForWindowsRuntimeArchive() {
+async function promptForPackagedRuntimeArchive() {
   const selected = await vscode.window.showOpenDialog({
     title: "Select SecMP runtime package",
     openLabel: "Use Runtime Package",
@@ -803,7 +896,7 @@ function downloadFile(url, destinationPath, expectedSha256, progress, label = "D
   });
 }
 
-async function expandZipWindows(zipPath, destinationDir, progress) {
+async function expandRuntimeZip(zipPath, destinationDir, progress) {
   progress?.report({ message: t("extension.progress.extractRuntime") });
   fs.rmSync(destinationDir, { recursive: true, force: true });
   fs.mkdirSync(destinationDir, { recursive: true });
@@ -822,24 +915,24 @@ async function expandZipWindows(zipPath, destinationDir, progress) {
   }
 }
 
-async function installWindowsRuntimeFromZip(zipPath, progress) {
+async function installPackagedRuntimeFromZip(zipPath, progress) {
   const config = getRuntimeConfig();
-  const runtimeRoot = path.join(extensionStorageDir, "runtime", getRuntimePlatform(), process.arch);
-  const runtimeDir = getWindowsRuntimeDir();
+  const runtimeRoot = getPackagedRuntimeRoot();
+  const runtimeDir = getPackagedRuntimeDir();
   const stagingDir = path.join(runtimeRoot, "_staging", config.runtimeVersion);
-  await expandZipWindows(zipPath, stagingDir, progress);
+  await expandRuntimeZip(zipPath, stagingDir, progress);
 
   let extractedRuntimeDir = path.join(stagingDir, "runtime");
-  if (!fs.existsSync(getWindowsRuntimeManifestPath(extractedRuntimeDir))) {
+  if (!fs.existsSync(getPackagedRuntimeManifestPath(extractedRuntimeDir))) {
     const nestedArchivePath = findNestedRuntimeArchive(stagingDir);
     if (nestedArchivePath) {
       const nestedStagingDir = path.join(stagingDir, "_runtime");
-      await expandZipWindows(nestedArchivePath, nestedStagingDir, progress);
+      await expandRuntimeZip(nestedArchivePath, nestedStagingDir, progress);
       extractedRuntimeDir = path.join(nestedStagingDir, "runtime");
     }
   }
 
-  if (!fs.existsSync(getWindowsRuntimeManifestPath(extractedRuntimeDir))) {
+  if (!fs.existsSync(getPackagedRuntimeManifestPath(extractedRuntimeDir))) {
     throw new Error("Runtime archive must contain runtime/manifest.json or a nested secmp-runtime zip");
   }
 
@@ -848,17 +941,17 @@ async function installWindowsRuntimeFromZip(zipPath, progress) {
   fs.renameSync(extractedRuntimeDir, runtimeDir);
   fs.rmSync(stagingDir, { recursive: true, force: true });
 
-  if (!isWindowsRuntimeReady(runtimeDir)) {
+  if (!isPackagedRuntimeReady(runtimeDir)) {
     throw new Error("SecMP runtime installation completed but validation failed");
   }
 }
 
-async function installWindowsRuntime(progress, selectedArchivePath = null) {
+async function installPackagedRuntime(progress, selectedArchivePath = null) {
   const config = getRuntimeConfig();
-  const configuredRuntimeDir = getConfiguredWindowsRuntimePath();
+  const configuredRuntimeDir = getConfiguredPackagedRuntimePath();
   if (configuredRuntimeDir) {
     progress?.report({ message: t("extension.progress.useConfiguredRuntime") });
-    if (!isWindowsRuntimeReady(configuredRuntimeDir)) {
+    if (!isPackagedRuntimeReady(configuredRuntimeDir)) {
       throw new Error(`Configured SecMP runtime path is invalid: ${configuredRuntimeDir}`);
     }
     return;
@@ -870,36 +963,35 @@ async function installWindowsRuntime(progress, selectedArchivePath = null) {
       throw new Error(`SecMP runtime archive not found: ${archivePath}`);
     }
     progress?.report({ message: t("extension.progress.installRuntimeArchive") });
-    await installWindowsRuntimeFromZip(archivePath, progress);
+    await installPackagedRuntimeFromZip(archivePath, progress);
     return;
   }
 
   if (selectedArchivePath) {
     progress?.report({ message: t("extension.progress.installRuntimeSelected") });
-    await installWindowsRuntimeFromZip(selectedArchivePath, progress);
+    await installPackagedRuntimeFromZip(selectedArchivePath, progress);
     return;
   }
 
-  const runtimeUrl = config.runtimeUrl || getDefaultWindowsRuntimeUrl();
+  const runtimeUrl = config.runtimeUrl || getDefaultRuntimeUrl();
   if (!runtimeUrl) {
     throw new Error("SecMP runtime package was not selected.");
   }
   const usingDefaultRuntimeUrl = !config.runtimeUrl;
 
-  const runtimeRoot = path.join(extensionStorageDir, "runtime", getRuntimePlatform(), process.arch);
-  const downloadDir = path.join(runtimeRoot, "_downloads");
+  const downloadDir = getPackagedRuntimeDownloadDir();
   const zipPath = path.join(downloadDir, getRuntimePackageName(config.runtimeVersion));
 
   fs.mkdirSync(downloadDir, { recursive: true });
   try {
-    await downloadFile(runtimeUrl, zipPath, getExpectedWindowsRuntimeSha256(), progress, "Downloading SecMP runtime");
+    await downloadFile(runtimeUrl, zipPath, getExpectedRuntimeSha256(), progress, "Downloading SecMP runtime");
   } catch (err) {
     if (usingDefaultRuntimeUrl) {
       progress?.report({ message: t("extension.progress.runtimeDownloadFailed") });
-      const archivePath = await promptForWindowsRuntimeArchive();
+      const archivePath = await promptForPackagedRuntimeArchive();
       if (archivePath) {
         progress?.report({ message: t("extension.progress.installRuntimeSelected") });
-        await installWindowsRuntimeFromZip(archivePath, progress);
+        await installPackagedRuntimeFromZip(archivePath, progress);
         return;
       }
       throw new Error(
@@ -909,7 +1001,8 @@ async function installWindowsRuntime(progress, selectedArchivePath = null) {
     }
     throw err;
   }
-  await installWindowsRuntimeFromZip(zipPath, progress);
+  await installPackagedRuntimeFromZip(zipPath, progress);
+  fs.rmSync(zipPath, { force: true });
 }
 
 function getVsixAsset(release, version) {
@@ -1018,7 +1111,16 @@ async function openUpdateFolder(updateDir) {
 async function installDownloadedVsix(vsixPath, update) {
   try {
     await vscode.commands.executeCommand("workbench.extensions.installExtension", vscode.Uri.file(vsixPath));
-    vscode.window.showInformationMessage(t("extension.update.installStarted"));
+    const reload = t("extension.update.reloadNow");
+    const later = t("extension.update.reloadLater");
+    const action = await vscode.window.showInformationMessage(
+      t("extension.update.installStarted", { version: update.version }),
+      reload,
+      later
+    );
+    if (action === reload) {
+      await vscode.commands.executeCommand("workbench.action.reloadWindow");
+    }
   } catch (err) {
     const openFolder = getConfiguredLocale() === "zh-CN" ? "打开文件夹" : "Open Folder";
     const copyPath = t("extension.update.copyPath");
@@ -1144,31 +1246,23 @@ function getLastUpdateCheckAt(context) {
 
 function getRuntimeEnvironmentInfo() {
   const config = getRuntimeConfig();
-  const runtimeDir = getActiveWindowsRuntimeDir();
-  const manifestPath = getWindowsRuntimeManifestPath(runtimeDir);
+  const runtimeDir = getActivePackagedRuntimeDir();
+  const manifestPath = getPackagedRuntimeManifestPath(runtimeDir);
   const packagedRuntime = isPackagedRuntimePlatform();
   const info = {
     status: "notRequired",
     valid: !packagedRuntime,
     version: packagedRuntime ? config.runtimeVersion : "source",
-    apiVersion: packagedRuntime ? WINDOWS_RUNTIME_API_VERSION : null,
+    apiVersion: packagedRuntime ? PACKAGED_RUNTIME_API_VERSION : null,
     platform: process.platform,
     arch: process.arch,
-    source: packagedRuntime ? "VS Code global storage" : "Source/dev",
+    source: packagedRuntime ? getPackagedRuntimeSourceLabel(config) : "Source/dev",
     path: packagedRuntime ? runtimeDir : TOOLS_DIR,
     error: "",
   };
 
   if (!packagedRuntime) {
     return info;
-  }
-
-  if (config.runtimePath) {
-    info.source = "Configured path";
-  } else if (config.runtimeArchivePath) {
-    info.source = "Configured archive";
-  } else if (config.runtimeUrl) {
-    info.source = "Configured URL";
   }
 
   if (!fs.existsSync(manifestPath)) {
@@ -1181,7 +1275,7 @@ function getRuntimeEnvironmentInfo() {
     const manifest = readJsonFile(manifestPath);
     info.version = manifest.runtimeVersion || config.runtimeVersion;
     info.apiVersion = getManifestRuntimeApiVersion(manifest);
-    info.valid = isWindowsRuntimeReady(runtimeDir);
+    info.valid = isPackagedRuntimeReady(runtimeDir);
     info.status = info.valid ? "ready" : "invalid";
     if (!info.valid) {
       info.error = "Runtime manifest or entrypoints do not match the current extension requirements.";
@@ -1257,6 +1351,20 @@ function getUpdateEnvironmentInfo(context) {
   };
 }
 
+function getMcpEnvironmentInfo() {
+  const config = getMcpConfig();
+  return {
+    enabled: config.enabled,
+    running: !!mcpBridge,
+    port: mcpBridge?.port || 0,
+    configuredPort: config.port,
+    stateFile: config.stateFile,
+    stateFileConfigured: hasCustomMcpStateFile(),
+    redactByDefault: config.redactByDefault,
+    maxBodyBytes: config.maxBodyBytes,
+  };
+}
+
 function getUpdateActionMessage(status) {
   if (!status || status.status === "unknown") {
     return t("extension.update.checkFinished");
@@ -1298,6 +1406,7 @@ function getFallbackEnvironmentStatus(context, error) {
       node: process.version,
     },
     updates: getUpdateEnvironmentInfo(context),
+    mcp: getMcpEnvironmentInfo(),
   };
 }
 
@@ -1320,6 +1429,7 @@ async function getEnvironmentStatus(context) {
       node: process.version,
     },
     updates: getUpdateEnvironmentInfo(context),
+    mcp: getMcpEnvironmentInfo(),
   };
 }
 
@@ -1370,47 +1480,50 @@ async function postEnvironmentStatus(context) {
   });
 }
 
-async function ensureWindowsRuntime() {
+async function ensurePackagedRuntime() {
   if (!isPackagedRuntimePlatform()) {
     return;
   }
-  if (isWindowsRuntimeReady(getActiveWindowsRuntimeDir())) {
+  if (runtimeConfigMigrationPromise) {
+    await runtimeConfigMigrationPromise;
+  }
+  if (isPackagedRuntimeReady(getActivePackagedRuntimeDir())) {
     return;
   }
   const config = getRuntimeConfig();
   const hasRuntimeSource = !!(
-    getConfiguredWindowsRuntimePath() ||
+    getConfiguredPackagedRuntimePath() ||
     config.runtimeArchivePath ||
     config.runtimeUrl ||
-    getDefaultWindowsRuntimeUrl()
+    getDefaultRuntimeUrl()
   );
-  const selectedArchivePath = hasRuntimeSource ? null : await promptForWindowsRuntimeArchive();
+  const selectedArchivePath = hasRuntimeSource ? null : await promptForPackagedRuntimeArchive();
   if (!hasRuntimeSource && !selectedArchivePath) {
     throw new Error("SecMP runtime is required to start the proxy. Select a runtime package and try again.");
   }
-  if (!windowsRuntimeReadyPromise) {
-    windowsRuntimeReadyPromise = vscode.window.withProgress({
+  if (!packagedRuntimeReadyPromise) {
+    packagedRuntimeReadyPromise = vscode.window.withProgress({
       location: vscode.ProgressLocation.Notification,
       title: "Preparing SecMP runtime",
       cancellable: false,
     }, async (progress) => {
       try {
-        await installWindowsRuntime(progress, selectedArchivePath);
+        await installPackagedRuntime(progress, selectedArchivePath);
       } catch (err) {
-        windowsRuntimeReadyPromise = null;
+        packagedRuntimeReadyPromise = null;
         throw err;
       }
     });
   }
-  return windowsRuntimeReadyPromise;
+  return packagedRuntimeReadyPromise;
 }
 
 async function getProxyEngineCommand() {
   if (isPackagedRuntimePlatform()) {
-    await ensureWindowsRuntime();
-    const runtimeDir = getActiveWindowsRuntimeDir();
+    await ensurePackagedRuntime();
+    const runtimeDir = getActivePackagedRuntimeDir();
     return {
-      command: getWindowsRuntimeEntrypoint("proxyEngine", runtimeDir),
+      command: getPackagedRuntimeEntrypoint("proxyEngine", runtimeDir),
       args: [],
     };
   }
@@ -1422,10 +1535,10 @@ async function getProxyEngineCommand() {
 
 async function getCertManagerCommand() {
   if (isPackagedRuntimePlatform()) {
-    await ensureWindowsRuntime();
-    const runtimeDir = getActiveWindowsRuntimeDir();
+    await ensurePackagedRuntime();
+    const runtimeDir = getActivePackagedRuntimeDir();
     return {
-      command: getWindowsRuntimeEntrypoint("certManager", runtimeDir),
+      command: getPackagedRuntimeEntrypoint("certManager", runtimeDir),
       args: [],
     };
   }
@@ -3764,6 +3877,17 @@ async function startProxyEngine(options = {}) {
     typeof options === "object" ? options.network : null,
     port
   );
+  const portAvailability = await checkListenPortAvailable(captureNetwork.listenHost, port);
+  if (!portAvailability.available) {
+    if (portAvailability.code === "EADDRINUSE") {
+      throw new Error(t("extension.proxy.portInUse", { host: captureNetwork.listenHost, port }));
+    }
+    throw new Error(t("extension.proxy.portUnavailable", {
+      host: captureNetwork.listenHost,
+      port,
+      message: portAvailability.message || portAvailability.code || t("common.unknown"),
+    }));
+  }
 
   return new Promise((resolve, reject) => {
     log(`Starting proxy engine on ${captureNetwork.listenHost}:${port}...`);
@@ -3777,6 +3901,7 @@ async function startProxyEngine(options = {}) {
       "--port", String(port),
       "--web-port", String(wPort),
       "--confdir", certDir,
+      "--connection-strategy", getConfiguredConnectionStrategy(),
     ];
     if (captureNetwork.connectAddr) {
       spawnArgs.push("--connect-addr", captureNetwork.connectAddr);
@@ -4227,6 +4352,38 @@ async function createPanel() {
         break;
       }
 
+      case "setMcpConfig": {
+        const config = vscode.workspace.getConfiguration("secmp");
+        if (typeof message.enabled === "boolean") {
+          await config.update("mcp.enabled", message.enabled, vscode.ConfigurationTarget.Global);
+        }
+        if (message.port != null) {
+          const port = Number(message.port);
+          if (Number.isInteger(port) && port >= 0 && port <= 65535) {
+            await config.update("mcp.port", port, vscode.ConfigurationTarget.Global);
+          }
+        }
+        if (typeof message.redactByDefault === "boolean") {
+          await config.update("mcp.redactByDefault", message.redactByDefault, vscode.ConfigurationTarget.Global);
+        }
+        if (message.maxBodyBytes != null) {
+          const maxBodyBytes = clampNumber(message.maxBodyBytes, 0, MCP_MAX_BODY_BYTES, MCP_DEFAULT_MAX_BODY_BYTES);
+          await config.update("mcp.maxBodyBytes", maxBodyBytes, vscode.ConfigurationTarget.Global);
+        }
+        if (typeof message.stateFile === "string") {
+          await config.update("mcp.stateFile", message.stateFile.trim(), vscode.ConfigurationTarget.Global);
+        }
+        await syncMcpBridge();
+        panel.webview.postMessage({
+          command: "environmentActionResult",
+          action: "setMcpConfig",
+          running: false,
+          message: t("extension.mcp.configSaved"),
+        });
+        await postEnvironmentStatus(context);
+        break;
+      }
+
       case "setAutoPushCert": {
         const config = vscode.workspace.getConfiguration("secmp");
         await config.update("autoPushCertOnDeviceReconnect", !!message.enabled, vscode.ConfigurationTarget.Global);
@@ -4250,7 +4407,7 @@ async function createPanel() {
           break;
         }
         try {
-          const result = cleanWindowsRuntimeCache();
+          const result = cleanPackagedRuntimeCache();
           panel.webview.postMessage({
             command: "environmentActionResult",
             action: "cleanRuntimeCache",
@@ -4283,6 +4440,28 @@ async function createPanel() {
           running: false,
           message: t("webview.about.action.copied"),
         });
+        break;
+      }
+
+      case "copyMcpClientConfig": {
+        try {
+          await copyMcpClientConfigToClipboard();
+          await postEnvironmentStatus(context);
+          panel.webview.postMessage({
+            command: "environmentActionResult",
+            action: "copyMcpClientConfig",
+            running: false,
+            message: t("extension.mcp.configCopied"),
+          });
+          await postEnvironmentStatus(context);
+        } catch (err) {
+          panel.webview.postMessage({
+            command: "environmentActionResult",
+            action: "copyMcpClientConfig",
+            running: false,
+            message: t("extension.mcp.configCopyFailed", { message: err.message }),
+          });
+        }
         break;
       }
 
@@ -4968,11 +5147,55 @@ function getMcpConfig() {
   return {
     enabled: Boolean(config.get("mcp.enabled", false)),
     port: Number.isInteger(rawPort) && rawPort >= 0 && rawPort <= 65535 ? rawPort : MCP_DEFAULT_PORT,
-    stateFile: String(config.get("mcp.stateFile", "") || "").trim() ||
-      path.join(os.homedir(), ".secmp", "mcp-bridge.json"),
+    stateFile: String(config.get("mcp.stateFile", "") || "").trim() || getDefaultMcpStateFilePath(),
     redactByDefault: config.get("mcp.redactByDefault", true) !== false,
     maxBodyBytes: clampNumber(rawMaxBodyBytes, 0, MCP_MAX_BODY_BYTES, MCP_DEFAULT_MAX_BODY_BYTES),
   };
+}
+
+function getDefaultMcpStateFilePath() {
+  return path.join(os.homedir(), ".secmp", "mcp-bridge.json");
+}
+
+function getMcpServerScriptPath() {
+  return path.join(__dirname, "mcp", "secmp-mcp-server.js");
+}
+
+function hasCustomMcpStateFile() {
+  const config = vscode.workspace.getConfiguration("secmp");
+  return String(config.get("mcp.stateFile", "") || "").trim() !== "";
+}
+
+function buildMcpClientConfig() {
+  const args = [getMcpServerScriptPath()];
+  const config = getMcpConfig();
+  if (hasCustomMcpStateFile()) {
+    args.push("--state-file", config.stateFile);
+  }
+  return {
+    mcpServers: {
+      secmp: {
+        type: "stdio",
+        command: "node",
+        args,
+      },
+    },
+  };
+}
+
+async function ensureMcpBridgeEnabled() {
+  const config = vscode.workspace.getConfiguration("secmp");
+  if (!getMcpConfig().enabled) {
+    await config.update("mcp.enabled", true, vscode.ConfigurationTarget.Global);
+  }
+  await syncMcpBridge();
+}
+
+async function copyMcpClientConfigToClipboard() {
+  await ensureMcpBridgeEnabled();
+  const text = JSON.stringify(buildMcpClientConfig(), null, 2);
+  await vscode.env.clipboard.writeText(text);
+  return text;
 }
 
 function clampNumber(value, min, max, fallback) {
@@ -5397,7 +5620,6 @@ function buildMcpHints(flow, options = {}) {
 }
 
 async function mcpStatus() {
-  const config = getMcpConfig();
   const ipLocationConfig = getIpLocationConfig();
   const stats = buildMcpStats(capturedFlows, 5);
   return {
@@ -5430,13 +5652,7 @@ async function mcpStatus() {
       configured: !!(ipLocationConfig.enabled && ipLocationConfig.endpoint),
       endpointConfigured: !!ipLocationConfig.endpoint,
     },
-    mcp: {
-      enabled: config.enabled,
-      port: mcpBridge?.port || 0,
-      stateFile: config.stateFile,
-      redactByDefault: config.redactByDefault,
-      maxBodyBytes: config.maxBodyBytes,
-    },
+    mcp: getMcpEnvironmentInfo(),
   };
 }
 
@@ -6563,6 +6779,8 @@ function activate(context) {
   outputChannel = vscode.window.createOutputChannel("SecMP");
   log("SecMP extension activated");
   initializeRuntimeStorage(context);
+  runtimeConfigMigrationPromise = migrateRuntimeConfiguration(context)
+    .catch((err) => log(`Runtime configuration migration failed: ${err.message}`));
   checkForExtensionUpdate(context, { manual: false });
   sidebarProvider = new SecmpSidebarProvider();
   const sidebarView = vscode.window.createTreeView("secmp.sidebar", {
@@ -6680,7 +6898,7 @@ function activate(context) {
       return;
     }
     try {
-      const result = cleanWindowsRuntimeCache();
+      const result = cleanPackagedRuntimeCache();
       vscode.window.showInformationMessage(
         t("extension.cache.cleaned", {
           versions: result.keptVersions.join(", ") || "none",
@@ -6701,6 +6919,16 @@ function activate(context) {
 
   const testIpLocationEndpointCmd = vscode.commands.registerCommand("secmp.testIpLocationEndpoint", async () => {
     await testIpLocationEndpoint();
+  });
+
+  const copyMcpClientConfigCmd = vscode.commands.registerCommand("secmp.copyMcpClientConfig", async () => {
+    try {
+      await copyMcpClientConfigToClipboard();
+      vscode.window.showInformationMessage(t("extension.mcp.configCopied"));
+      await postEnvironmentStatus(context);
+    } catch (err) {
+      vscode.window.showErrorMessage(t("extension.mcp.configCopyFailed", { message: err.message }));
+    }
   });
 
   const exportHarCmd = vscode.commands.registerCommand("secmp.exportHar", () => exportHar());
@@ -6749,7 +6977,8 @@ function activate(context) {
     showPanelCmd, startProxyCmd, stopProxyCmd, pushCertCmd,
     openCapturePanelCmd, newTemporarySessionCmd, newPersistentSessionCmd, openSessionCmd, openRecentSessionCmd,
     revealRecentSessionCmd, removeRecentSessionCmd,
-    setupProxyCmd, clearProxyCmd, cleanRuntimeCacheCmd, checkForUpdatesCmd, testIpLocationEndpointCmd, exportHarCmd, exportJsonCmd,
+    setupProxyCmd, clearProxyCmd, cleanRuntimeCacheCmd, checkForUpdatesCmd, testIpLocationEndpointCmd, copyMcpClientConfigCmd,
+    exportHarCmd, exportJsonCmd,
     languageConfigListener,
     sidebarView,
     outputChannel

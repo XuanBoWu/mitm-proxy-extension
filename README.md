@@ -90,8 +90,8 @@ Settings are optional for normal manual installation.
 
 ```json
 {
-  "secmp.runtimeVersion": "0.3.3",
   "secmp.language": "auto",
+  "secmp.connectionStrategy": "lazy",
   "secmp.openPanelAfterNewSession": true,
   "secmp.ipLocation.enabled": false,
   "secmp.ipLocation.endpoint": "",
@@ -104,19 +104,21 @@ By default, SecMP downloads the matching runtime from the GitHub Release and val
 
 `secmp.language` controls Webview and extension runtime messages. Use `auto` to follow the VS Code display language, `zh-CN` to force Simplified Chinese, or `en-US` to force English. Command Palette titles and Settings descriptions follow VS Code's `package.nls*` localization and the editor display language.
 
-The runtime version is separate from the VSIX version. SecMP reuses a cached runtime while `secmp.runtimeVersion` stays the same, and installs a new runtime when that setting changes.
+`secmp.connectionStrategy` controls when mitmproxy connects to upstream servers. The default `lazy` mode captures the client request before connecting upstream, improving visibility for unknown hosts, DNS failures, and upstream TLS failures. Use `eager` to keep mitmproxy's default upstream-first behavior.
 
-The update checker only checks the extension VSIX version. Runtime upgrades are still controlled by `secmp.runtimeVersion`, so an extension update can reuse the existing runtime when the runtime API and version have not changed.
+The packaged runtime version is managed by the installed SecMP extension. Normal users no longer need to configure a runtime version. Advanced runtime overrides should provide a runtime package that matches the runtime version expected by the installed VSIX.
+
+The update checker only checks the extension VSIX version. After an extension update, SecMP installs the runtime version expected by that VSIX when the cached runtime is missing or no longer matches.
 
 IP location lookup is disabled by default. When enabled, `secmp.ipLocation.endpoint` must point to an HTTP or HTTPS endpoint that accepts `POST { "ips": ["8.8.8.8"] }` and returns `{"ips":[{"8.8.8.8":{"country":"...","registered_country":"..."}}]}`. Successful lookup results are written into the active `.secmp` session so reopened historical captures keep the original location snapshot.
 
-Use `SecMP: Clean Runtime Cache` to remove old cached runtimes for the current platform. The command keeps the current runtime version and the newest previous version, deletes older runtime directories and stale downloaded runtime zips, and does not delete the mitmproxy CA/config directory.
+Use `SecMP: Clean Runtime Cache` to remove old cached runtimes for the current platform. The command keeps the current runtime version, deletes older runtime directories and stale downloaded runtime zips, and does not delete the mitmproxy CA/config directory.
 
 For offline installation, configure a local runtime archive path:
 
 ```json
 {
-  "secmp.runtimeArchivePath": "C:\\Users\\me\\Downloads\\secmp-runtime-win32-x64-0.3.3.zip"
+  "secmp.runtimeArchivePath": "C:\\Users\\me\\Downloads\\secmp-runtime-win32-x64-0.3.4.zip"
 }
 ```
 
@@ -137,7 +139,7 @@ Runtime source priority:
 5. Matching GitHub Release runtime.
 6. File picker prompt.
 
-The older `secmp.windowsRuntime*` settings still work as compatibility aliases, but new installations should use `secmp.runtime*`.
+SecMP 0.3.4 migrates away from the deprecated `secmp.windowsRuntime*` settings and the old user-configurable `secmp.runtimeVersion` setting. Use `secmp.runtimePath`, `secmp.runtimeArchivePath`, `secmp.runtimeUrl`, and `secmp.runtimeSha256` for advanced runtime source overrides.
 
 ## Android Certificate Notes
 
@@ -192,13 +194,13 @@ python -m venv .venv
 Build the Windows runtime:
 
 ```powershell
-npm run runtime:windows -- -RuntimeVersion 0.3.3 -OutputDir dist
+npm run runtime:windows -- -RuntimeVersion 0.3.4 -OutputDir dist
 ```
 
 Build the macOS runtime:
 
 ```bash
-npm run runtime:macos -- --runtime-version 0.3.3 --output-dir dist
+npm run runtime:macos -- --runtime-version 0.3.4 --output-dir dist
 ```
 
 Runtime builds embed platform icon assets from `media/secmp.ico` on Windows and `media/secmp.icns` on macOS. Updating those files changes the packaged runtime output.
@@ -215,7 +217,7 @@ A GitHub Release always contains:
 
 - `secmp-<version>.vsix`
 
-When `secmp.runtimeVersion` changes, the release also contains the matching runtime packages:
+When the packaged runtime version matches the release version, the release also contains the matching runtime packages:
 
 - `secmp-runtime-win32-x64-<version>.zip`
 - `secmp-runtime-win32-x64-<version>.zip.sha256`

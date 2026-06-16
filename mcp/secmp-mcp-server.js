@@ -187,14 +187,21 @@ function loadBridgeConfig() {
     } catch (_) {}
   }
   return {
-    url: args.bridgeUrl || process.env.SECMP_MCP_BRIDGE_URL || state.url || "http://127.0.0.1:39777",
+    url: args.bridgeUrl || process.env.SECMP_MCP_BRIDGE_URL || state.url || "",
     token: args.token || process.env.SECMP_MCP_TOKEN || state.token || "",
     stateFile,
   };
 }
 
+let outputFormat = "content-length";
+
 function sendMessage(message) {
   const json = Buffer.from(JSON.stringify(message), "utf8");
+  if (outputFormat === "newline") {
+    process.stdout.write(json);
+    process.stdout.write("\n");
+    return;
+  }
   process.stdout.write(`Content-Length: ${json.length}\r\n\r\n`);
   process.stdout.write(json);
 }
@@ -209,6 +216,9 @@ function error(id, code, message, data) {
 
 function requestBridge(method, route, body) {
   const config = loadBridgeConfig();
+  if (!config.url) {
+    throw new Error(`SecMP MCP bridge state was not found. Enable MCP in SecMP or run "SecMP: Copy MCP Client Config" first. State file: ${config.stateFile}`);
+  }
   const base = new URL(config.url);
   const url = new URL(route, base);
   const payload = body == null ? null : Buffer.from(JSON.stringify(body), "utf8");
@@ -338,27 +348,46 @@ async function handleMessage(message) {
 
 let input = Buffer.alloc(0);
 
+function startsWithContentLengthHeader(buffer) {
+  const prefix = buffer.subarray(0, Math.min(buffer.length, 32)).toString("utf8");
+  return /^\s*content-length\s*:/i.test(prefix);
+}
+
+function handlePayload(payload, format) {
+  outputFormat = format;
+  try {
+    handleMessage(JSON.parse(payload));
+  } catch (err) {
+    error(null, -32700, err.message);
+  }
+}
+
 function pump() {
   while (true) {
     const headerEnd = input.indexOf("\r\n\r\n");
-    if (headerEnd < 0) return;
-    const header = input.subarray(0, headerEnd).toString("utf8");
-    const match = header.match(/content-length:\s*(\d+)/i);
-    if (!match) {
-      input = input.subarray(headerEnd + 4);
+    if (headerEnd >= 0) {
+      const header = input.subarray(0, headerEnd).toString("utf8");
+      const match = header.match(/content-length:\s*(\d+)/i);
+      if (!match) {
+        input = input.subarray(headerEnd + 4);
+        continue;
+      }
+      const length = Number(match[1]);
+      const start = headerEnd + 4;
+      const end = start + length;
+      if (input.length < end) return;
+      const payload = input.subarray(start, end).toString("utf8");
+      input = input.subarray(end);
+      handlePayload(payload, "content-length");
       continue;
     }
-    const length = Number(match[1]);
-    const start = headerEnd + 4;
-    const end = start + length;
-    if (input.length < end) return;
-    const payload = input.subarray(start, end).toString("utf8");
-    input = input.subarray(end);
-    try {
-      handleMessage(JSON.parse(payload));
-    } catch (err) {
-      error(null, -32700, err.message);
-    }
+    if (startsWithContentLengthHeader(input)) return;
+    const nl = input.indexOf("\n");
+    if (nl < 0) return;
+    const line = input.subarray(0, nl).toString("utf8").trim();
+    input = input.subarray(nl + 1);
+    if (!line) continue;
+    handlePayload(line, "newline");
   }
 }
 

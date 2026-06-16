@@ -6,7 +6,7 @@ on:
       runtime_version:
         description: "Runtime package version"
         required: true
-        default: "0.3.3"
+        default: "0.3.4"
       publish:
         description: "Publish a GitHub Release after build and tests pass"
         required: true
@@ -66,7 +66,7 @@ jobs:
         run: |
           $version = "${{ github.event.inputs.runtime_version }}"
           if (-not $version) {
-            $version = node -p "require('./package.json').contributes.configuration.properties['secmp.runtimeVersion'].default || require('./package.json').version"
+            $version = node -p "require('./package.json').contributes.configuration.properties['secmp.runtimeVersion']?.default || require('./package.json').version"
           }
           "runtime_version=$version" >> $env:GITHUB_OUTPUT
 
@@ -148,7 +148,7 @@ jobs:
         run: |
           version="${{ github.event.inputs.runtime_version }}"
           if [[ -z "$version" ]]; then
-            version="$(node -p "require('./package.json').contributes.configuration.properties['secmp.runtimeVersion'].default || require('./package.json').version")"
+            version="$(node -p "require('./package.json').contributes.configuration.properties['secmp.runtimeVersion']?.default || require('./package.json').version")"
           fi
           echo "runtime_version=$version" >> "$GITHUB_OUTPUT"
 

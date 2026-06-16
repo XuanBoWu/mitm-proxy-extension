@@ -3,7 +3,7 @@
   "displayName": "SecMP",
   "icon": "media/icon.png",
   "description": "%secmp.description%",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "publisher": "xbowu",
   "license": "MIT",
   "repository": {
@@ -65,10 +65,18 @@
           "default": "",
           "description": "%secmp.config.runtimeSha256%"
         },
-        "secmp.runtimeVersion": {
+        "secmp.connectionStrategy": {
           "type": "string",
-          "default": "0.3.3",
-          "description": "%secmp.config.runtimeVersion%"
+          "default": "lazy",
+          "enum": [
+            "lazy",
+            "eager"
+          ],
+          "enumDescriptions": [
+            "%secmp.config.connectionStrategy.lazy%",
+            "%secmp.config.connectionStrategy.eager%"
+          ],
+          "description": "%secmp.config.connectionStrategy%"
         },
         "secmp.language": {
           "type": "string",
@@ -117,7 +125,7 @@
         },
         "secmp.mcp.port": {
           "type": "number",
-          "default": 39777,
+          "default": 0,
           "minimum": 0,
           "maximum": 65535,
           "order": 61,
@@ -177,31 +185,6 @@
           "default": "",
           "order": 71,
           "markdownDescription": "%secmp.config.ipLocation.endpoint.markdown%"
-        },
-        "secmp.windowsRuntimePath": {
-          "type": "string",
-          "default": "",
-          "description": "%secmp.config.windowsRuntimePath%"
-        },
-        "secmp.windowsRuntimeArchivePath": {
-          "type": "string",
-          "default": "",
-          "description": "%secmp.config.windowsRuntimeArchivePath%"
-        },
-        "secmp.windowsRuntimeUrl": {
-          "type": "string",
-          "default": "",
-          "description": "%secmp.config.windowsRuntimeUrl%"
-        },
-        "secmp.windowsRuntimeSha256": {
-          "type": "string",
-          "default": "",
-          "description": "%secmp.config.windowsRuntimeSha256%"
-        },
-        "secmp.windowsRuntimeVersion": {
-          "type": "string",
-          "default": "0.3.3",
-          "description": "%secmp.config.windowsRuntimeVersion%"
         },
         "secmp.updateCheckEnabled": {
           "type": "boolean",
@@ -265,6 +248,10 @@
       {
         "command": "secmp.testIpLocationEndpoint",
         "title": "%secmp.command.testIpLocationEndpoint%"
+      },
+      {
+        "command": "secmp.copyMcpClientConfig",
+        "title": "%secmp.command.copyMcpClientConfig%"
       },
       {
         "command": "secmp.exportHar",

@@ -28,9 +28,9 @@ Runtime icon assets are shared with the package build:
 
 - Windows PyInstaller builds embed `media/secmp.ico` into `proxy_engine.exe` and `cert_manager.exe`.
 - macOS PyInstaller builds embed `media/secmp.icns` into `proxy_engine` and `cert_manager`.
-- Updating either runtime icon changes the packaged runtime output. Bump `secmp.runtimeVersion` when a release or test candidate needs those new runtime binaries.
+- Updating either runtime icon changes the packaged runtime output. Bump the extension's built-in packaged runtime version when a release or test candidate needs those new runtime binaries.
 
-For tag releases, `<runtimeVersion>` is resolved from `secmp.runtimeVersion` in `package.json` unless a manual workflow dispatch provides `runtime_version`. VSIX-only patch releases can therefore publish a new `secmp-<extensionVersion>.vsix` while reusing an older runtime release.
+For tag releases, `<runtimeVersion>` is resolved from the extension's expected packaged runtime version unless a manual workflow dispatch provides `runtime_version`. VSIX-only patch releases can publish a new `secmp-<extensionVersion>.vsix` while reusing an older runtime release, but the extension's expected packaged runtime version must stay on that older runtime version.
 
 Before release, CI smoke-tests the runtime by:
 
@@ -42,7 +42,7 @@ Before release, CI smoke-tests the runtime by:
 - installing the runtime through the extension runtime path and requesting mitmweb `/state.json`
 - packaging the VSIX and checking it does not contain build/runtime directories
 
-The VSIX is always attached to the GitHub Release. Runtime zips are attached only when the runtime version matches the extension version; otherwise the extension continues to download the runtime from the release matching `secmp.runtimeVersion`. Before making a VSIX-only release, confirm that release already exists and contains the matching runtime assets.
+The VSIX is always attached to the GitHub Release. Runtime zips are attached only when the runtime version matches the extension version; otherwise the extension continues to download the runtime from the release matching its expected packaged runtime version. Before making a VSIX-only release, confirm that release already exists and contains the matching runtime assets.
 
 ## Manual Installation
 
@@ -64,11 +64,10 @@ Use `SecMP: Clean Runtime Cache` to remove stale runtime files for the current p
 The command:
 
 - refuses to run while the SecMP proxy is running
-- keeps the current `secmp.runtimeVersion`
-- keeps the newest previous cached runtime version
+- keeps the current expected packaged runtime version
 - removes older runtime version directories
 - removes `_staging`
-- removes downloaded runtime zip and checksum files for removed versions
+- removes downloaded runtime zip and checksum files
 - does not remove `mitmproxy-conf`, CA certificates, captures, or user exports
 
 This keeps rollback and troubleshooting practical while preventing old runtime packages from accumulating indefinitely.
@@ -77,7 +76,7 @@ This keeps rollback and troubleshooting practical while preventing old runtime p
 
 Settings are not required for normal online installation. They are available for offline installation, managed distribution, or development.
 
-By default, SecMP builds the runtime URL from `secmp.runtimeVersion`:
+By default, SecMP builds the runtime URL from the expected packaged runtime version:
 
 ```text
 https://github.com/XuanBoWu/mitm-proxy-extension/releases/download/v<version>/secmp-runtime-<platform>-<arch>-<version>.zip
@@ -85,7 +84,7 @@ https://github.com/XuanBoWu/mitm-proxy-extension/releases/download/v<version>/se
 
 For `0.1.0` on `win32-x64`, the extension also includes the release SHA-256 checksum. Other platform/version combinations use the matching GitHub Release URL and can optionally be pinned with `secmp.runtimeSha256`.
 
-`secmp.runtimeVersion` is intentionally separate from the VSIX version. Patch releases that only change Webview, documentation, or extension-side behavior can keep using the previous runtime. Bump the runtime version when `tools/proxy_engine.py`, `tools/cert_manager.py`, `requirements-runtime.txt`, runtime icon assets, the runtime package layout, or the extension/runtime command protocol changes.
+The packaged runtime version is intentionally separate from the VSIX version, but it is managed by the extension rather than exposed as a user setting. Patch releases that only change Webview, documentation, or extension-side behavior can keep using the previous runtime. Bump the expected packaged runtime version when `tools/proxy_engine.py`, `tools/cert_manager.py`, `requirements-runtime.txt`, runtime icon assets, the runtime package layout, or the extension/runtime command protocol changes.
 
 The runtime manifest also has `runtimeApiVersion`. It guards the extension-to-runtime command/output contract. Missing `runtimeApiVersion` is treated as `1` for compatibility with the first `0.1.0` runtime package. Bump it only for incompatible protocol changes.
 
@@ -93,8 +92,7 @@ Configure a local runtime archive path for offline installation:
 
 ```json
 {
-  "secmp.runtimeVersion": "0.3.3",
-  "secmp.runtimeArchivePath": "C:\\Users\\me\\Downloads\\secmp-runtime-win32-x64-0.3.3.zip"
+  "secmp.runtimeArchivePath": "C:\\Users\\me\\Downloads\\secmp-runtime-win32-x64-0.3.4.zip"
 }
 ```
 
@@ -102,7 +100,6 @@ You can also point directly to an extracted runtime directory:
 
 ```json
 {
-  "secmp.runtimeVersion": "0.3.3",
   "secmp.runtimePath": "C:\\tools\\secmp-runtime\\runtime"
 }
 ```
@@ -111,15 +108,14 @@ For hosted distribution, configure the runtime URL:
 
 ```json
 {
-  "secmp.runtimeVersion": "0.3.3",
-  "secmp.runtimeUrl": "https://github.com/XuanBoWu/mitm-proxy-extension/releases/download/v0.3.3/secmp-runtime-win32-x64-0.3.3.zip",
+  "secmp.runtimeUrl": "https://github.com/XuanBoWu/mitm-proxy-extension/releases/download/v0.3.4/secmp-runtime-win32-x64-0.3.4.zip",
   "secmp.runtimeSha256": "<sha256-from-ci>"
 }
 ```
 
 `secmp.runtimeSha256` is optional for local testing. Leave it empty to use the built-in checksum for the default GitHub Release runtime when available. Set it explicitly for managed distribution or custom runtime URLs.
 
-The older `secmp.windowsRuntime*` settings still work as compatibility aliases. New configuration should use `secmp.runtime*`.
+SecMP 0.3.4 migrates away from the deprecated `secmp.windowsRuntime*` settings and the old user-configurable `secmp.runtimeVersion` setting. New configuration should use `secmp.runtimePath`, `secmp.runtimeArchivePath`, `secmp.runtimeUrl`, and `secmp.runtimeSha256`.
 
 Runtime source priority:
 
@@ -157,13 +153,13 @@ cert_manager convert --cert <mitmproxy-ca-cert.pem> --output-dir <dir>
 
 `--root-mode su` uses device-side `su` and never runs `adb root`. `--root-mode auto` uses an already-root ADB shell when available and otherwise falls back to `su`; it also does not run `adb root`.
 
-SecMP keeps a compatibility path for older packaged runtimes whose `cert_manager push` command only accepts `--cert`: the extension uses the packaged `convert` command to create the Android `.0` certificate, then performs `adb -s <serial> push` and the root injection steps itself. This lets a VSIX-side certificate workflow fix run before the matching refreshed runtime package is published, but release candidates that modify `tools/cert_manager.py` should still bump `secmp.runtimeVersion` and ship new runtime assets.
+SecMP keeps a compatibility path for older packaged runtimes whose `cert_manager push` command only accepts `--cert`: the extension uses the packaged `convert` command to create the Android `.0` certificate, then performs `adb -s <serial> push` and the root injection steps itself. This lets a VSIX-side certificate workflow fix run before the matching refreshed runtime package is published, but release candidates that modify `tools/cert_manager.py` should still bump the expected packaged runtime version and ship new runtime assets.
 
 `manifest.json` must include:
 
 ```json
 {
-  "runtimeVersion": "0.3.3",
+  "runtimeVersion": "0.3.4",
   "runtimeApiVersion": 1,
   "platform": "darwin",
   "arch": "arm64",

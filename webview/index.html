@@ -309,9 +309,63 @@
   <!-- Footer -->
   <footer id="footer">
     <span id="footerStatus" data-i18n="common.ready">就绪</span>
-    <button id="footerVersionBtn" class="footer-version" type="button" aria-expanded="false">
-      SecMP v<span id="footerVersion">__EXTENSION_VERSION__</span>
-    </button>
+    <div class="footer-actions">
+      <button id="footerMcpBtn" class="footer-version" type="button" aria-expanded="false" title="MCP">MCP</button>
+      <button id="footerVersionBtn" class="footer-version" type="button" aria-expanded="false">
+        SecMP v<span id="footerVersion">__EXTENSION_VERSION__</span>
+      </button>
+    </div>
+    <div id="mcpPopover" class="about-popover mcp-popover" hidden>
+      <div class="about-header">
+        <div>
+          <div class="about-title" data-i18n="webview.mcp.title">MCP</div>
+          <div id="mcpSummary" class="about-summary" data-i18n="common.checking">Checking</div>
+        </div>
+        <button id="mcpCloseBtn" class="collapse-btn" title="关闭" data-i18n-title="common.close">×</button>
+      </div>
+      <div class="about-body">
+        <section class="about-section">
+          <div class="about-setting-row">
+            <label for="mcpEnabledToggle" data-i18n="webview.mcp.enabled">Enable MCP bridge</label>
+            <label class="switch">
+              <input type="checkbox" id="mcpEnabledToggle">
+              <span class="switch-track"></span>
+            </label>
+          </div>
+          <div class="about-setting-row">
+            <label for="mcpRedactToggle" data-i18n="webview.mcp.redact">Redact by default</label>
+            <label class="switch">
+              <input type="checkbox" id="mcpRedactToggle">
+              <span class="switch-track"></span>
+            </label>
+          </div>
+          <label class="mcp-field">
+            <span data-i18n="webview.mcp.port">Port</span>
+            <input id="mcpPortInput" type="number" min="0" max="65535" step="1">
+          </label>
+          <label class="mcp-field">
+            <span data-i18n="webview.mcp.maxBodyBytes">Max body bytes</span>
+            <input id="mcpMaxBodyBytesInput" type="number" min="0" max="2097152" step="1024">
+          </label>
+          <label class="mcp-field">
+            <span data-i18n="webview.mcp.stateFile">State file</span>
+            <input id="mcpStateFileInput" type="text">
+          </label>
+        </section>
+        <section class="about-section">
+          <dl class="about-dl">
+            <dt data-i18n="webview.mcp.status">Status</dt><dd id="mcpStatusText">-</dd>
+            <dt data-i18n="webview.mcp.activePort">Active port</dt><dd id="mcpActivePort">-</dd>
+            <dt data-i18n="webview.mcp.configuredPort">Configured port</dt><dd id="mcpConfiguredPort">-</dd>
+          </dl>
+        </section>
+        <div id="mcpActionStatus" class="about-action-status" hidden></div>
+      </div>
+      <div class="about-actions">
+        <button id="mcpSaveBtn" class="btn btn-sm btn-primary" data-i18n="webview.mcp.save">Save MCP Settings</button>
+        <button id="mcpCopyConfigBtn" class="btn btn-sm" data-i18n="webview.mcp.copyConfig">Copy Client Config</button>
+      </div>
+    </div>
     <div id="aboutPopover" class="about-popover" hidden>
       <div class="about-header">
         <div>

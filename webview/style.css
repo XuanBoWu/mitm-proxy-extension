@@ -1235,6 +1235,12 @@ dd { color: var(--text-primary); }
 .footer-version:hover { background: rgba(0, 0, 0, 0.22); }
 .footer-version:focus { outline: 1px solid #fff; outline-offset: -1px; }
 
+.footer-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .about-popover {
   position: absolute;
   right: 8px;
@@ -1251,6 +1257,10 @@ dd { color: var(--text-primary); }
   color: var(--text-primary);
 }
 .about-popover[hidden] { display: none; }
+.mcp-popover {
+  right: 118px;
+  width: 340px;
+}
 .about-header {
   display: flex;
   align-items: flex-start;
@@ -1346,6 +1356,25 @@ dd { color: var(--text-primary); }
 .about-actions .btn {
   flex: 1 1 calc(50% - 4px);
   min-width: 104px;
+}
+
+.mcp-field {
+  display: grid;
+  gap: 4px;
+  margin-bottom: 8px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.mcp-field input {
+  width: 100%;
+  height: 24px;
+  padding: 2px 6px;
+  background: var(--input-bg);
+  border: 1px solid var(--border);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: 12px;
 }
 
 /* ===== Scrollbar ===== */
