@@ -140,7 +140,16 @@ class SecmpSessionFile {
 
   close() {
     if (this.fd) {
-      try { this.flushBuffer(); } catch (_) {}
+      // Best-effort drain before closing. We swallow the error so close()
+      // itself always runs, but surface it to the host log so issues like
+      // ENOSPC don't disappear silently.
+      try {
+        this.flushBuffer();
+      } catch (err) {
+        try {
+          console.error(`[secmp-session] flushBuffer on close failed for ${this.filePath}: ${err && err.message ? err.message : err}`);
+        } catch (_) {}
+      }
       fs.closeSync(this.fd);
       this.fd = null;
     }

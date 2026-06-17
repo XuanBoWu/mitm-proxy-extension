@@ -6837,7 +6837,13 @@ async function openSessionFile(filePath) {
   }
 
   if (panel) {
-    flushPendingFlowBatch();
+    // Drop any flow events queued by the previous session — they belong to
+    // the just-closed CaptureSession, and feeding them through
+    // flushPendingFlowBatch() would (a) trigger body autofetch / IP geo
+    // lookups whose async callbacks would land on the freshly opened
+    // session, and (b) post an addFlows/updateFlows that the immediately
+    // following sessionLoaded would overwrite anyway.
+    discardPendingFlowBatch();
     panel.webview.postMessage({
       command: "sessionLoaded",
       flows: capturedFlows.map(toListFlow),
