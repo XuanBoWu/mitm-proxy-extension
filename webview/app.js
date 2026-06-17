@@ -33,6 +33,18 @@ let detailContextMenuEl = null;
 let detailContextSide = null;
 let detailContextSelectionText = "";
 let imageContextMenuEl = null;
+// Tracks the wall-clock time of the most recent flow burst delivered by
+// extension.js. Used to (a) defer column auto-fit while traffic is busy
+// (avoids 80×12 DOM measurements competing with each render) and (b) delay
+// scroll-driven re-renders right after a burst, where new rows would
+// otherwise jitter the visible window.
+let lastFlowBurstAt = 0;
+// Tracks the wall-clock time of the latest scroll event in the flow table
+// so we can throttle automatic re-renders when the user is actively
+// scrolling. The render still happens — just deferred a couple hundred ms
+// to a calmer moment.
+let lastFlowListScrollAt = 0;
+let deferredFlowListRenderTimer = null;
 let proxyRunning = false;
 let proxyPhase = "stopped";
 let currentProxyPort = 8080;
@@ -129,6 +141,11 @@ let currentFontSize = normalizeFontSize(readInitialFontSize());
 let flowRowHeight = computeFlowRowHeight(currentFontSize);
 const FLOW_RENDER_BUFFER_ROWS = 24;
 const FLOW_AUTOFIT_SAMPLE_ROWS = 80;
+// While flows are streaming in faster than the user can read, defer column
+// width re-measurement and scroll-driven re-renders for this long after the
+// most recent burst. Cleared once traffic quiets down.
+const FLOW_BUSY_QUIET_MS = 600;
+const FLOW_SCROLL_DEFER_MS = 220;
 
 // Detail panel state — bodies live only here (list flows are body-less)
 let currentDetailFlow = null;
@@ -297,10 +314,49 @@ function rebuildFlowIndex() {
   });
 }
 
+// Push one or more flows to the tail of `flows` while keeping `flowIndexById`
+// in sync. Avoids the O(N) `flows.concat` + full `rebuildFlowIndex` pass that
+// the previous code took on every batch — at 2k+ rows this becomes the
+// dominant cost for high-frequency captures.
+function appendFlowsIncremental(newFlows) {
+  if (!newFlows || newFlows.length === 0) return;
+  for (const flow of newFlows) {
+    if (!flow?.id) continue;
+    flowIndexById.set(flow.id, flows.length);
+    flows.push(flow);
+  }
+}
+
 function getFlowIndex(flowOrId) {
   const id = typeof flowOrId === "string" ? flowOrId : flowOrId?.id;
   const index = flowIndexById.get(id);
   return Number.isInteger(index) ? index : -1;
+}
+
+function isFlowCaptureBusy() {
+  return lastFlowBurstAt !== 0 && (performance.now() - lastFlowBurstAt) < FLOW_BUSY_QUIET_MS;
+}
+
+// Track whether we deferred at least one auto-fit run because traffic was
+// busy. Once the capture quiets down we schedule a single catch-up
+// auto-fit so column widths still settle on the actual content.
+let autoFitDeferredDuringBusy = false;
+let busyQuietAutoFitTimer = null;
+
+function noteBusyAutoFitDeferred() {
+  autoFitDeferredDuringBusy = true;
+  if (busyQuietAutoFitTimer) clearTimeout(busyQuietAutoFitTimer);
+  busyQuietAutoFitTimer = setTimeout(() => {
+    busyQuietAutoFitTimer = null;
+    if (!autoFitDeferredDuringBusy) return;
+    if (isFlowCaptureBusy()) {
+      // Still busy — try again after the next quiet window.
+      noteBusyAutoFitDeferred();
+      return;
+    }
+    autoFitDeferredDuringBusy = false;
+    autoFitContentColumns();
+  }, FLOW_BUSY_QUIET_MS + 50);
 }
 
 function scheduleFlowListRender(scrollOnly = false) {
@@ -315,6 +371,18 @@ function scheduleFlowListRender(scrollOnly = false) {
   });
 }
 
+// During an active capture burst we postpone scroll-driven re-renders for
+// FLOW_SCROLL_DEFER_MS so newly arriving rows don't yank the visible window.
+// The deferred render runs even if the user keeps scrolling, just bumped to
+// the latest scroll instant; it always fires at most once per timer cycle.
+function scheduleDeferredScrollRender() {
+  if (deferredFlowListRenderTimer) return;
+  deferredFlowListRenderTimer = setTimeout(() => {
+    deferredFlowListRenderTimer = null;
+    scheduleFlowListRender(true);
+  }, FLOW_SCROLL_DEFER_MS);
+}
+
 // ===== Message Handlers =====
 
 window.addEventListener("message", (event) => {
@@ -324,11 +392,14 @@ window.addEventListener("message", (event) => {
       applyFontSize(msg.fontSize, { rerender: true });
       break;
     case "addFlows":
+      lastFlowBurstAt = performance.now();
       for (const f of msg.flows || []) {
         f._seq = nextSeq++;
       }
-      flows = flows.concat(msg.flows || []);
-      rebuildFlowIndex();
+      // O(1) per flow: push + index update only. The previous
+      // `flows.concat` + `rebuildFlowIndex` pair was O(N) per batch and
+      // dominated CPU at 2k+ rows under sustained traffic.
+      appendFlowsIncremental(msg.flows);
       // Incrementally update filter cache with matching new flows
       if (cachedFilteredFlows) {
         for (const f of msg.flows || []) {
@@ -351,12 +422,12 @@ window.addEventListener("message", (event) => {
       break;
     case "addFlow": // kept for backwards compat, not used by current extension.js
       msg.flow._seq = nextSeq++;
-      flows.push(msg.flow);
-      rebuildFlowIndex();
+      appendFlowsIncremental([msg.flow]);
       handleFlowsChanged();
       scheduleFlowListRender();
       break;
     case "updateFlows":
+      lastFlowBurstAt = performance.now();
       for (const f of msg.flows) {
         const idx = flowIndexById.get(f.id);
         if (!Number.isInteger(idx)) continue;
@@ -460,6 +531,19 @@ window.addEventListener("message", (event) => {
       ipLocationByIp = new Map();
       rebuildFlowIndex();
       nextSeq = 1;
+      // Reset busy/scroll-defer state so the empty list renders immediately
+      // and the next user interaction isn't penalized by stale timers.
+      lastFlowBurstAt = 0;
+      lastFlowListScrollAt = 0;
+      autoFitDeferredDuringBusy = false;
+      if (busyQuietAutoFitTimer) {
+        clearTimeout(busyQuietAutoFitTimer);
+        busyQuietAutoFitTimer = null;
+      }
+      if (deferredFlowListRenderTimer) {
+        clearTimeout(deferredFlowListRenderTimer);
+        deferredFlowListRenderTimer = null;
+      }
       invalidateFilterCache();
       clearFlowSelection();
       currentDetailFlow = null;
@@ -475,6 +559,19 @@ window.addEventListener("message", (event) => {
       flows.forEach((f, i) => { if (f._seq == null) f._seq = i + 1; });
       rebuildFlowIndex();
       nextSeq = flows.reduce((max, flow) => Math.max(max, Number(flow._seq) || 0), 0) + 1;
+      // Loading a session is a static event — clear any deferred-render
+      // timers so the user sees the loaded list immediately.
+      lastFlowBurstAt = 0;
+      lastFlowListScrollAt = 0;
+      autoFitDeferredDuringBusy = false;
+      if (busyQuietAutoFitTimer) {
+        clearTimeout(busyQuietAutoFitTimer);
+        busyQuietAutoFitTimer = null;
+      }
+      if (deferredFlowListRenderTimer) {
+        clearTimeout(deferredFlowListRenderTimer);
+        deferredFlowListRenderTimer = null;
+      }
       invalidateFilterCache();
       if (msg.uiState) applySessionUiState(msg.uiState);
       clearFlowSelection();
@@ -1260,7 +1357,18 @@ function renderFlowList(options = {}) {
   renderFlowRows(filtered, scrollOnly);
 
   if (!scrollOnly) {
-    autoFitContentColumns();
+    // Auto-fit measures up to FLOW_AUTOFIT_SAMPLE_ROWS rows × visible
+    // content columns. During a high-traffic capture this can take 100ms+
+    // and shows up as a column-width "jitter" that competes with the
+    // RAF-driven flow render. We skip it while traffic is busy and queue
+    // a catch-up via `noteBusyAutoFitDeferred` so column widths still
+    // settle once the capture quiets down. Manual user resizes are
+    // unaffected — `userResizedCols` already pins those columns.
+    if (isFlowCaptureBusy()) {
+      noteBusyAutoFitDeferred();
+    } else {
+      autoFitContentColumns();
+    }
   }
 }
 
@@ -2006,17 +2114,25 @@ function matchesKeywordFilter(flow) {
   if (!term) return true;
 
   const scopes = filterState.scopes.size > 0 ? filterState.scopes : new Set(["url"]);
-  if (scopes.has("url") && [
-    flow.url,
-    flow.host,
-    flow.path,
-    flow.method,
-    String(flow.status_code || ""),
-    flow.content_type,
-    flow.server_ip,
-    String(flow.port || ""),
-  ].some((value) => includesLower(value, term))) {
-    return true;
+  if (scopes.has("url")) {
+    // Hot path: a single substring check against the precomputed search
+    // index covers url/host/path/method/status/contentType/serverIp/port.
+    // Falls back to per-field checks for legacy flows (e.g. loaded from
+    // sessions saved before the index was added).
+    if (typeof flow._urlSearch === "string") {
+      if (flow._urlSearch.indexOf(term) !== -1) return true;
+    } else if ([
+      flow.url,
+      flow.host,
+      flow.path,
+      flow.method,
+      String(flow.status_code || ""),
+      flow.content_type,
+      flow.server_ip,
+      String(flow.port || ""),
+    ].some((value) => includesLower(value, term))) {
+      return true;
+    }
   }
   if (scopes.has("reqHeaders") && includesLower(formatRequestHeaders(flow), term)) return true;
   if (scopes.has("resHeaders") && includesLower(formatHeaders(flow.res_headers), term)) return true;
@@ -2035,6 +2151,7 @@ function includesLower(value, term) {
 }
 
 function getStatusBucket(flow) {
+  if (typeof flow._statusBucket === "string") return flow._statusBucket;
   const code = flow.status_code || 0;
   if (code === 0 && flow.error) return "err";
   if (code === 0) return "pending";
@@ -2046,11 +2163,13 @@ function getStatusBucket(flow) {
 }
 
 function getMethodBucket(flow) {
+  if (typeof flow._methodBucket === "string") return flow._methodBucket;
   const method = (flow.method || "").toUpperCase();
   return ["GET", "POST", "PUT", "DELETE", "PATCH"].includes(method) ? method : "other";
 }
 
 function getTypeBucket(flow) {
+  if (typeof flow._typeBucket === "string") return flow._typeBucket;
   const ct = (flow.content_type || "").toLowerCase();
   if (ct.includes("json")) return "json";
   if (ct.includes("html")) return "html";
@@ -2062,6 +2181,7 @@ function getTypeBucket(flow) {
 }
 
 function getProtocolBucket(flow) {
+  if (typeof flow._protoBucket === "string") return flow._protoBucket;
   return (flow.scheme || (flow.url || "").split("://")[0] || "https").toLowerCase() === "http"
     ? "http"
     : "https";
@@ -4437,6 +4557,15 @@ window.addEventListener("resize", () => {
 if (flowTableWrapper) {
   flowTableWrapper.addEventListener("scroll", () => {
     closeAllContextMenus();
+    lastFlowListScrollAt = performance.now();
+    if (isFlowCaptureBusy()) {
+      // While the user scrolls during a busy capture, don't immediately
+      // rebuild the visible window (which would compete with the next
+      // incoming RAF). Schedule a deferred render so we still catch up
+      // once scrolling pauses.
+      scheduleDeferredScrollRender();
+      return;
+    }
     scheduleFlowListRender(true);
   }, { passive: true });
 }
