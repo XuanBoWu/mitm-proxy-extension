@@ -1830,6 +1830,9 @@ async function saveActiveSessionAs() {
   });
   if (!result) return null;
   await rememberFileDialogDir(result.fsPath);
+  // saveAs duplicates the underlying .secmp file. Drain the in-memory write
+  // buffer first so the saved copy contains every captured flow up to "now".
+  if (typeof activeSession.flushBuffer === "function") activeSession.flushBuffer();
   activeSession.saveAs(result.fsPath, path.basename(result.fsPath, ".secmp"));
   writeResumeMarker({ running: !!proxyProcess });
   rememberSession(activeSession);
@@ -1848,7 +1851,7 @@ function recordSessionFlows(flows) {
 }
 
 function markSessionLoadedFlows(flows) {
-  return (flows || []).map((flow) => ({
+  return (flows || []).map((flow) => decorateFlowDerivedFields({
     ...flow,
     _fromSession: true,
   }));
@@ -1907,6 +1910,7 @@ async function stopProxyForSessionExit() {
     port: activeProxyPort,
     reason: "sessionExit",
   });
+  flushPendingFlowBatch();
   flushActiveSession();
   if (wasRunning) {
     await stopProxyEngine({
@@ -1920,6 +1924,7 @@ async function stopProxyForSessionExit() {
 async function closeActiveSessionForExit(options = {}) {
   await stopProxyForSessionExit();
   closeActiveSession({ deleteTemporary: !!options.deleteTemporary });
+  discardPendingFlowBatch();
   resetCapturedFlows();
   knownFlowIds.clear();
   ignoredFlowIdsAfterClear.clear();
@@ -2513,6 +2518,78 @@ async function testIpLocationEndpoint() {
 
 // ===== Flow transformation =====
 
+// Pre-computed bucket helpers — keep behavior identical to webview/app.js
+// `getStatusBucket` / `getMethodBucket` / `getTypeBucket` / `getProtocolBucket`.
+// Webview reads `_statusBucket` etc. directly when present, falling back to
+// recomputing for legacy flows loaded from older sessions.
+const FLOW_METHOD_BUCKET_SET = new Set(["GET", "POST", "PUT", "DELETE", "PATCH"]);
+
+function computeStatusBucket(statusCode, hasError) {
+  const code = statusCode || 0;
+  if (code === 0 && hasError) return "err";
+  if (code === 0) return "pending";
+  if (code >= 200 && code < 300) return "2xx";
+  if (code >= 300 && code < 400) return "3xx";
+  if (code >= 400 && code < 500) return "4xx";
+  if (code >= 500 && code < 600) return "5xx";
+  return "other";
+}
+
+function computeMethodBucket(method) {
+  const upper = String(method || "").toUpperCase();
+  return FLOW_METHOD_BUCKET_SET.has(upper) ? upper : "other";
+}
+
+function computeTypeBucket(contentType) {
+  const ct = String(contentType || "").toLowerCase();
+  if (ct.includes("json")) return "json";
+  if (ct.includes("html")) return "html";
+  if (ct.includes("javascript") || ct.includes("ecmascript") || ct.includes("/js")) return "js";
+  if (ct.includes("css")) return "css";
+  if (ct.startsWith("image/")) return "image";
+  if (ct.includes("octet-stream") || ct.includes("protobuf") || ct.includes("binary")) return "binary";
+  return "other";
+}
+
+function computeProtocolBucket(scheme, url) {
+  const value = String(scheme || (String(url || "").split("://")[0]) || "https").toLowerCase();
+  return value === "http" ? "http" : "https";
+}
+
+// Concatenate the URL-scope filter fields once per flow so the webview can do
+// a single substring check instead of 8 toLowerCase() calls per row.
+function computeUrlSearchIndex(url, host, reqPath, method, statusCode, contentType, serverIp, port) {
+  return [
+    url || "",
+    host || "",
+    reqPath || "",
+    method || "",
+    statusCode ? String(statusCode) : "",
+    contentType || "",
+    serverIp || "",
+    port ? String(port) : "",
+  ].join("\n").toLowerCase();
+}
+
+function decorateFlowDerivedFields(flow) {
+  if (!flow) return flow;
+  flow._statusBucket = computeStatusBucket(flow.status_code, !!flow.error);
+  flow._methodBucket = computeMethodBucket(flow.method);
+  flow._typeBucket = computeTypeBucket(flow.content_type);
+  flow._protoBucket = computeProtocolBucket(flow.scheme, flow.url);
+  flow._urlSearch = computeUrlSearchIndex(
+    flow.url,
+    flow.host,
+    flow.path,
+    flow.method,
+    flow.status_code,
+    flow.content_type,
+    flow.server_ip,
+    flow.port
+  );
+  return flow;
+}
+
 function transformFlow(f) {
   const req = f.request || {};
   const res = f.response || {};
@@ -2565,7 +2642,7 @@ function transformFlow(f) {
   const reqTs = req.timestamp_start || 0;
   const resTs = res.timestamp_start || 0;
 
-  return {
+  const transformed = {
     id: f.id,
     type: f.type || "http",
     scheme: scheme,
@@ -2602,6 +2679,7 @@ function transformFlow(f) {
     res_size: res.contentLength || 0,
     error: f.error ? (f.error.msg || "Connection error") : "",
   };
+  return decorateFlowDerivedFields(transformed);
 }
 
 // ===== WebSocket flow feed =====
@@ -2716,6 +2794,12 @@ function connectFlowWebSocket() {
           // Text frame (or continuation) — parse as JSON event
           try {
             const text = payload.toString("utf8");
+            // Fast-path: mitmweb 推送大量 events/* 日志事件，handleWebSocketFlowEvent
+            // 也只是丢弃它们；提前跳过可省下 JSON.parse 开销，对高流量场景显著
+            // 减轻主线程压力。文本帧若不是 events 事件再走完整 JSON 解析。
+            if (text.length > 8 && text.indexOf('"type":"events/') !== -1) {
+              continue;
+            }
             const msg = JSON.parse(text);
             handleWebSocketFlowEvent(msg);
           } catch (err) {
@@ -2845,6 +2929,7 @@ function handleWebSocketFlowEvent(msg) {
   }
 
   if (cmd === "reset") {
+    discardPendingFlowBatch();
     resetCapturedFlows();
     resetBodyFetchQueue();
     resetIpLocationRuntimeState({ notify: true });
@@ -2877,14 +2962,7 @@ function handleWebSocketFlowEvent(msg) {
     const transformed = transformFlow(data);
     addCapturedFlow(transformed);
     recordSessionFlows([transformed]);
-    enqueueBodyAutoFetch(transformed);
-    scheduleIpLocationForFlows([transformed]);
-    if (panel) {
-      panel.webview.postMessage({
-        command: "addFlows",
-        flows: [toListFlow(transformed)],
-      });
-    }
+    enqueueAddFlowForBatch(transformed);
     log(`[flow-feed] websocket add flow id=${data.id} method=${transformed.method || "-"} host=${transformed.host || "-"}`);
     idlePollCount = 0;
   } else if (cmd === "update") {
@@ -2899,16 +2977,116 @@ function handleWebSocketFlowEvent(msg) {
     copyPersistedFlowAnnotations(existing, transformed);
     if (replaceCapturedFlow(data.id, transformed)) {
       recordSessionFlows([transformed]);
-      enqueueBodyAutoFetch(transformed);
-      scheduleIpLocationForFlows([transformed]);
-      if (panel) {
-        panel.webview.postMessage({
-          command: "updateFlows",
-          flows: [toListFlow(transformed)],
-        });
-      }
+      enqueueUpdateFlowForBatch(transformed);
     }
     idlePollCount = 0;
+  }
+}
+
+const FLOW_BATCH_FLUSH_MS = 30;
+
+// ===== Webview flow message microbatch =====
+//
+// In high-traffic scenarios mitmweb may push 100+ events per second. Sending
+// each captured flow through `panel.webview.postMessage` individually forces
+// the webview to do a full filter/render pass for every single row. We batch
+// `addFlows` / `updateFlows` into a short (~30ms) flush window so the webview
+// processes one combined message per frame.
+//
+// Notes:
+//   * Non-flow messages (proxyStatus, deviceStatus, showDetail, …) bypass this
+//     batch entirely — they keep their original immediacy.
+//   * `flushFlowBatch()` MUST be called before any message that observes
+//     "the latest list state" reaches the webview. That includes
+//     flowsCleared / sessionLoaded as well as proxy stop sequences.
+//   * `update` entries for the same id collapse to the most recent transformed
+//     flow, so a burst of header→body chunk→end events ends up as a single
+//     webview update.
+//   * IP location queueing and body autofetch enqueue happen at flush time
+//     (batched) so they avoid per-flow function-call overhead too.
+let pendingAddFlows = []; // transformed flows awaiting addFlows postMessage
+let pendingUpdateFlowsById = new Map(); // id -> latest transformed flow
+let pendingBatchTimer = null;
+
+function ensurePendingFlowBatchTimer() {
+  if (pendingBatchTimer) return;
+  pendingBatchTimer = setTimeout(() => {
+    pendingBatchTimer = null;
+    flushPendingFlowBatch();
+  }, FLOW_BATCH_FLUSH_MS);
+}
+
+function cancelPendingFlowBatchTimer() {
+  if (pendingBatchTimer) {
+    clearTimeout(pendingBatchTimer);
+    pendingBatchTimer = null;
+  }
+}
+
+function enqueueAddFlowForBatch(flow) {
+  pendingAddFlows.push(flow);
+  // If a previous update for the same id is queued, drop it — the add wins
+  // and carries the freshest state.
+  if (pendingUpdateFlowsById.has(flow.id)) {
+    pendingUpdateFlowsById.delete(flow.id);
+  }
+  ensurePendingFlowBatchTimer();
+}
+
+function enqueueUpdateFlowForBatch(flow) {
+  // If this id is still queued in the add buffer (rare race), the add post
+  // already conveys the latest state — replace it in-place.
+  for (let i = 0; i < pendingAddFlows.length; i += 1) {
+    if (pendingAddFlows[i].id === flow.id) {
+      pendingAddFlows[i] = flow;
+      ensurePendingFlowBatchTimer();
+      return;
+    }
+  }
+  pendingUpdateFlowsById.set(flow.id, flow);
+  ensurePendingFlowBatchTimer();
+}
+
+// Drop any queued flow events. Called when the captured-flows store is
+// cleared (clearFlows / WS reset / poll-detected reset) so we never deliver a
+// stale add/update after the webview has been told the list is empty.
+function discardPendingFlowBatch() {
+  pendingAddFlows = [];
+  pendingUpdateFlowsById.clear();
+  cancelPendingFlowBatchTimer();
+}
+
+function flushPendingFlowBatch() {
+  cancelPendingFlowBatchTimer();
+  if (pendingAddFlows.length === 0 && pendingUpdateFlowsById.size === 0) return;
+  const adds = pendingAddFlows;
+  const updates = [...pendingUpdateFlowsById.values()];
+  pendingAddFlows = [];
+  pendingUpdateFlowsById = new Map();
+
+  // Side effects (IP geo lookup + body autofetch + session record) are run in
+  // bulk so they amortize their per-call overhead over the whole batch.
+  if (adds.length > 0) {
+    scheduleIpLocationForFlows(adds);
+    for (const flow of adds) enqueueBodyAutoFetch(flow);
+  }
+  if (updates.length > 0) {
+    scheduleIpLocationForFlows(updates);
+    for (const flow of updates) enqueueBodyAutoFetch(flow);
+  }
+
+  if (!panel) return;
+  if (adds.length > 0) {
+    panel.webview.postMessage({
+      command: "addFlows",
+      flows: adds.map(toListFlow),
+    });
+  }
+  if (updates.length > 0) {
+    panel.webview.postMessage({
+      command: "updateFlows",
+      flows: updates.map(toListFlow),
+    });
   }
 }
 
@@ -2936,6 +3114,7 @@ async function pollFlows() {
 
     // Detect if flows were cleared (e.g., via clearFlows command)
     if (flows.length === 0 && mitmwebHadFlows && capturedFlows.length > 0) {
+      discardPendingFlowBatch();
       resetCapturedFlows();
       resetBodyFetchQueue();
       resetIpLocationRuntimeState({ notify: true });
@@ -2967,17 +3146,13 @@ async function pollFlows() {
       }
     }
 
-    // Add new flows (in order from mitmproxy) — batch into single message
-    if (newFlows.length > 0 && panel) {
-      const transformedFlows = newFlows.map(f => transformFlow(f));
+    // Add new flows (in order from mitmproxy) — feed the microbatch so we
+    // share the same flush window as the WebSocket path.
+    if (newFlows.length > 0) {
+      const transformedFlows = newFlows.map((f) => transformFlow(f));
       transformedFlows.forEach(addCapturedFlow);
       recordSessionFlows(transformedFlows);
-      transformedFlows.forEach(enqueueBodyAutoFetch);
-      scheduleIpLocationForFlows(transformedFlows);
-      panel.webview.postMessage({
-        command: "addFlows",
-        flows: transformedFlows.map(toListFlow),
-      });
+      for (const flow of transformedFlows) enqueueAddFlowForBatch(flow);
     }
 
     // Check for updates to known flows (e.g. response arrived after initial display)
@@ -2999,17 +3174,10 @@ async function pollFlows() {
         copyPersistedFlowAnnotations(existing, transformed);
         if (replaceCapturedFlow(f.id, transformed)) {
           recordSessionFlows([transformed]);
-          enqueueBodyAutoFetch(transformed);
-          scheduleIpLocationForFlows([transformed]);
+          enqueueUpdateFlowForBatch(transformed);
           updatedFlows.push(transformed);
         }
       }
-    }
-    if (updatedFlows.length > 0 && panel) {
-      panel.webview.postMessage({
-        command: "updateFlows",
-        flows: updatedFlows.map(toListFlow),
-      });
     }
     // Track activity for adaptive polling
     if (newFlows.length > 0 || updatedFlows.length > 0) {
@@ -4044,6 +4212,7 @@ async function stopProxyEngine(options = {}) {
     if (recordStoppedState) {
       recordSessionProxyState(false, { reason: options.reason || "proxyStopped" });
     }
+    flushPendingFlowBatch();
     flushActiveSession();
     return { success: true, message: t("extension.proxy.notRunning") };
   }
@@ -4061,6 +4230,7 @@ async function stopProxyEngine(options = {}) {
       if (recordStoppedState) {
         recordSessionProxyState(false, { reason: options.reason || "proxyStopped" });
       }
+      flushPendingFlowBatch();
       flushActiveSession();
       resolve({ success: true, message: t("extension.proxy.notRunning") });
       return;
@@ -4078,6 +4248,10 @@ async function stopProxyEngine(options = {}) {
     }
     stopFlowPolling();
     resetBodyFetchQueue();
+    // Make sure any flow events queued during the final drain reach the
+    // webview before the proxy is gone — otherwise the user could lose the
+    // last burst of captured rows.
+    flushPendingFlowBatch();
     flushActiveSession();
 
     stoppingProcess.on("close", () => {
@@ -4088,6 +4262,7 @@ async function stopProxyEngine(options = {}) {
         activeProxyPort = null;
         activeCaptureNetwork = null;
       }
+      flushPendingFlowBatch();
       flushActiveSession();
       resolve({ success: true, message: t("extension.proxy.stopped") });
     });
@@ -4231,6 +4406,10 @@ async function createPanel() {
           captureNetwork: activeCaptureNetwork,
         });
         if (capturedFlows.length > 0) {
+          // sessionLoaded reseeds the webview's list state — drain any
+          // queued add/update first so they don't arrive after and re-add
+          // already-included rows.
+          flushPendingFlowBatch();
           panel.webview.postMessage({
             command: "sessionLoaded",
             flows: capturedFlows.map(toListFlow),
@@ -4575,6 +4754,10 @@ async function createPanel() {
         if (choice !== clearAction) {
           break;
         }
+        // Discard any pending batched flows before broadcasting flowsCleared,
+        // otherwise the batch flush could deliver stale add/update messages
+        // after the webview has already reset its list.
+        discardPendingFlowBatch();
         for (const id of knownFlowIds) {
           ignoredFlowIdsAfterClear.add(id);
         }
@@ -6583,6 +6766,7 @@ async function newTemporarySession() {
   if (activeSession && !(await confirmAndCloseActiveSession({ restorePanelOnCancel: !!panel }))) return;
   activeSession = CaptureSession.createTemporary(getSessionCacheDir(), extensionPackage.version);
   writeResumeMarker({ running: false });
+  discardPendingFlowBatch();
   resetCapturedFlows();
   resetIpLocationRuntimeState({ notify: true });
   knownFlowIds.clear();
@@ -6610,6 +6794,7 @@ async function newPersistentSession() {
   activeSession = CaptureSession.createNamed(result.fsPath, sessionName, extensionPackage.version);
   flushActiveSession();
   rememberSession(activeSession);
+  discardPendingFlowBatch();
   resetCapturedFlows();
   resetIpLocationRuntimeState({ notify: true });
   knownFlowIds.clear();
@@ -6652,6 +6837,7 @@ async function openSessionFile(filePath) {
   }
 
   if (panel) {
+    flushPendingFlowBatch();
     panel.webview.postMessage({
       command: "sessionLoaded",
       flows: capturedFlows.map(toListFlow),
@@ -7003,6 +7189,7 @@ async function deactivate() {
     port: activeProxyPort,
     reason: "extensionDeactivate",
   });
+  flushPendingFlowBatch();
   flushActiveSession();
   writeResumeMarker({ shutdownAt: new Date().toISOString(), proxyRunning: !!proxyProcess });
   try {

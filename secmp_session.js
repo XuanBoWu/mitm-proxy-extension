@@ -6,6 +6,11 @@ const FILE_MAGIC = Buffer.from("SECMP2\0", "ascii");
 const RECORD_MAGIC = Buffer.from("SR2\0", "ascii");
 const FORMAT_VERSION = 1;
 const ZERO_HASH = Buffer.alloc(32, 0);
+// Drain the in-memory append buffer when it grows past this threshold so a
+// runaway capture can't pin large amounts of memory; chosen to align with the
+// proxy_engine body autofetch ceiling (8 MiB) plus headroom for record
+// overhead so a single body record never blocks a flush.
+const APPEND_BUFFER_FLUSH_BYTES = 256 * 1024;
 
 function sha256(data) {
   return crypto.createHash("sha256").update(data).digest();
@@ -24,6 +29,18 @@ function stripBodies(flow) {
   delete copy._bodyFetched;
   delete copy._reqBodyFetched;
   delete copy._resBodyFetched;
+  delete copy._reqBodyState;
+  delete copy._resBodyState;
+  delete copy._reqBodyError;
+  delete copy._resBodyError;
+  // Derived/cached fields recomputed on demand by extension.js
+  // (`decorateFlowDerivedFields`); keep them out of persisted records so
+  // session files stay lean and tolerate algorithm changes.
+  delete copy._statusBucket;
+  delete copy._methodBucket;
+  delete copy._typeBucket;
+  delete copy._protoBucket;
+  delete copy._urlSearch;
   return copy;
 }
 
@@ -51,6 +68,18 @@ class SecmpSessionFile {
     this.recordCount = 0;
     this.latestHash = Buffer.from(options.latestHash || ZERO_HASH);
     this.offsets = [];
+    // In-memory append buffer. Records pushed by `appendRecord` accumulate
+    // here and reach disk when `flushBuffer` runs (either because we hit the
+    // size threshold, an explicit caller drains the file, or `flush()` /
+    // `close()` finalize the session). This keeps high-frequency captures
+    // (~100 flows/s) from doing one `fs.writeSync` per record without
+    // changing the on-disk format or the file-offset semantics callers rely
+    // on for `offsets[]`.
+    this.pendingBuffers = [];
+    this.pendingBytes = 0;
+    // Byte count already flushed to the underlying fd. Used to compute
+    // `fileOffset` for new records without restating the file on every call.
+    this.appendedBytes = 0;
   }
 
   static create(filePath, header = {}) {
@@ -102,11 +131,16 @@ class SecmpSessionFile {
   openAppend() {
     if (!this.fd) {
       this.fd = fs.openSync(this.filePath, "a");
+      // The file may already contain prior records (e.g. when reopening an
+      // existing session); seed `appendedBytes` so future record offsets
+      // remain accurate without a per-call fstatSync.
+      this.appendedBytes = fs.fstatSync(this.fd).size;
     }
   }
 
   close() {
     if (this.fd) {
+      try { this.flushBuffer(); } catch (_) {}
       fs.closeSync(this.fd);
       this.fd = null;
     }
@@ -134,11 +168,19 @@ class SecmpSessionFile {
     this.latestHash.copy(header, offset);
     offset += 32;
     recordHash.copy(header, offset);
-    const fileOffset = fs.fstatSync(this.fd).size;
-    fs.writeSync(this.fd, Buffer.concat([header, typeBuf, metaBuf, dataBuf]));
+    const recordBuf = Buffer.concat([header, typeBuf, metaBuf, dataBuf]);
+    const fileOffset = this.appendedBytes + this.pendingBytes;
+    this.pendingBuffers.push(recordBuf);
+    this.pendingBytes += recordBuf.length;
     this.latestHash = recordHash;
     this.recordCount += 1;
     this.offsets.push({ offset: fileOffset, type, hash: hashHex(recordHash) });
+    // Cap the in-memory buffer so a single body record (up to 8MB) cannot
+    // dominate memory and so we still get periodic disk progress under
+    // sustained traffic.
+    if (this.pendingBytes >= APPEND_BUFFER_FLUSH_BYTES) {
+      this.flushBuffer();
+    }
     return { offset: fileOffset, hash: hashHex(recordHash) };
   }
 
@@ -150,7 +192,21 @@ class SecmpSessionFile {
     });
   }
 
+  // Drain buffered records to the fd in a single writeSync without forcing a
+  // fsync. Callers that need durability should follow up with `flush()`.
+  flushBuffer() {
+    if (!this.fd || this.pendingBytes === 0) return;
+    const combined = this.pendingBuffers.length === 1
+      ? this.pendingBuffers[0]
+      : Buffer.concat(this.pendingBuffers, this.pendingBytes);
+    fs.writeSync(this.fd, combined);
+    this.appendedBytes += combined.length;
+    this.pendingBuffers = [];
+    this.pendingBytes = 0;
+  }
+
   flush() {
+    this.flushBuffer();
     if (this.fd) fs.fsyncSync(this.fd);
   }
 
@@ -414,6 +470,13 @@ class CaptureSession {
 
   sync() {
     this.file.flush();
+  }
+
+  // Drain the in-memory append buffer to disk without fsync. Cheap path used
+  // by callers (e.g. saveAs/exporters) that need the bytes to be visible to
+  // a subsequent `fs.copyFileSync` but don't require durability.
+  flushBuffer() {
+    this.file.flushBuffer();
   }
 
   flush() {
