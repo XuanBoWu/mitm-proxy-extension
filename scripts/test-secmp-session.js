@@ -60,6 +60,30 @@ function main() {
   assert.strictEqual(session.file.offsets[session.file.offsets.length - 1].type, "indexSnapshot");
   session.file.close();
 
+  const bufferedBodyPath = path.join(root, "buffered-body.secmp");
+  const bufferedBodySession = CaptureSession.createNamed(bufferedBodyPath, "Buffered Body", "0.2.0-test");
+  bufferedBodySession.putFlow({
+    id: "buffered-flow",
+    url: "https://example.test/buffered",
+    method: "POST",
+    host: "example.test",
+    path: "/buffered",
+    status_code: 200,
+    req_headers: { "content-type": "text/plain" },
+    res_headers: { "content-type": "text/plain" },
+  });
+  bufferedBodySession.appendBody("buffered-flow", "request", Buffer.from("visible-after-buffer-flush", "utf8"), {
+    contentType: "text/plain",
+  });
+  bufferedBodySession.flushBuffer();
+  const bufferedFile = SecmpSessionFile.open(bufferedBodyPath, { readOnly: true });
+  const bufferedLoaded = new CaptureSession(bufferedFile);
+  bufferedFile.onRecord = (record) => bufferedLoaded.applyRecord(record);
+  bufferedFile.replay();
+  assert.strictEqual(bufferedLoaded.getFlow("buffered-flow", { includeBodies: true }).req_body, "visible-after-buffer-flush");
+  bufferedFile.close();
+  bufferedBodySession.file.close();
+
   const loaded = CaptureSession.open(filePath);
   const flows = loaded.getFlows({ includeBodies: true });
   assert.strictEqual(flows.length, 1);

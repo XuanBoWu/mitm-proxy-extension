@@ -31,7 +31,7 @@ SecMP is intended for authorized testing of devices and applications you own or 
 - ADB available on `PATH`.
 - A rooted Android device with USB debugging enabled.
 - The SecMP VSIX package.
-- Internet access on first proxy start, or the SecMP runtime zip from the same GitHub Release for offline installation.
+- Internet access on first proxy start, or the SecMP runtime zip that matches the runtime version expected by the installed VSIX for offline installation.
 
 ### Linux
 
@@ -43,21 +43,21 @@ Linux can still run from source, but the packaged runtime flow currently targets
 2. In VS Code or VSCodium, run `Extensions: Install from VSIX...`.
 3. Select the downloaded VSIX.
 4. Click the SecMP icon in the Activity Bar and create a temporary session, create a persistent session, or open an existing `.secmp` file.
-5. SecMP downloads the matching runtime from the GitHub Release and caches it in VS Code global storage.
+5. SecMP downloads the runtime version expected by the installed VSIX and caches it in VS Code global storage.
 6. If the OS asks for network access, allow local network/private network access.
 
 The runtime is extracted into VS Code global storage and reused on later starts.
 
 SecMP can also check GitHub Releases for a newer VSIX without using the VS Code Marketplace. Run `SecMP: Check for Updates`, or keep the default automatic check enabled. When an update is available, SecMP downloads the VSIX from the release and starts VS Code's VSIX installation flow after you confirm.
 
-For offline installation, download the matching `secmp-runtime-<platform>-<arch>-<version>.zip` from the same release and configure `secmp.runtimeArchivePath`, or select the zip if prompted.
+For offline installation, download the matching `secmp-runtime-<platform>-<arch>-<runtimeVersion>.zip` from the release that contains the expected runtime version and configure `secmp.runtimeArchivePath`, or select the zip if prompted. VSIX-only patch releases may reuse runtime assets from an earlier release.
 
 ## Quick Start
 
 1. Connect the Android device with USB debugging enabled.
 2. Click the SecMP icon in the Activity Bar.
 3. Create a temporary session, create a persistent `.secmp` session, or open an existing session file.
-4. SecMP opens the capture panel automatically by default.
+4. SecMP opens the capture panel automatically.
 5. Click refresh in the device panel and confirm that the device is visible.
 6. Start the proxy, usually on port `8080`.
 7. Push the CA certificate after the proxy has generated it.
@@ -92,7 +92,6 @@ Settings are optional for normal manual installation.
 {
   "secmp.language": "auto",
   "secmp.connectionStrategy": "lazy",
-  "secmp.openPanelAfterNewSession": true,
   "secmp.ipLocation.enabled": false,
   "secmp.ipLocation.endpoint": "",
   "secmp.updateCheckEnabled": true,

@@ -6,6 +6,27 @@ All notable changes to SecMP are documented in this file.
 
 暂无。
 
+## 0.3.5 - 2026-06-22
+
+### 正文可靠性
+
+- 修复请求体/响应体拉取失败后被 `error` 状态永久跳过的问题；后台自动拉取现在会按退避策略重试，停止代理前和导出前会强制重试仍缺失的正文。
+- 停止代理前会先 flush 批处理中的最新 flow，再扫描并补齐 mitmproxy 中仍可读取的正文，避免最后一批请求受列表批处理影响。
+- body 写入 `.secmp` 后新增轻量 buffer flush，降低“已拉取但尚未落盘”的窗口，同时保留会话写入缓冲带来的性能收益。
+- 新增 body 拉取策略测试和 `.secmp` buffer flush 回归测试，覆盖 error 重试、pending 响应完成后补拉、大正文后台跳过/强制路径拉取，以及 body record 可重新打开读取。
+
+### Webview 设置体验
+
+- 新增统一偏好设置弹窗，可在 Webview 内配置显示语言、字号、连接策略、IP 归属地、证书等待和 MCP 常用设置。
+- 设备卡片新增代理与证书相关的轻量设置入口，减少进入 `settings.json` 的频率。
+- 新建临时/持久会话后始终进入抓包面板；持久会话名称改为从保存文件名推导，移除 `secmp.openPanelAfterNewSession` 设置。
+
+### CI 与发布
+
+- GitHub Actions 改为 `Build and Package SecMP` 流程：默认执行 extension/VSIX 检查和打包，只有 runtime 相关文件、runtime 常量或手动 `build_runtime=true` 时才构建 Windows/macOS runtime。
+- runtime 版本解析改为读取 `extension.js` 的 `DEFAULT_RUNTIME_VERSION`，不再跟随 `package.json` 版本，避免 VSIX-only patch release 误生成 runtime。
+- 发布 `0.3.5` VSIX，packaged runtime 继续复用 `0.3.4`；`runtimeApiVersion` 继续保持兼容的 `1`。
+
 ## 0.3.4 - 2026-06-16
 
 ### 抓包可见性

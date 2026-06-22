@@ -3,7 +3,7 @@
   "displayName": "SecMP",
   "icon": "media/icon.png",
   "description": "%secmp.description%",
-  "version": "0.3.4",
+  "version": "0.3.5",
   "publisher": "xbowu",
   "license": "MIT",
   "repository": {
@@ -111,11 +111,6 @@
             "%secmp.config.fontSize.maximum%"
           ],
           "description": "%secmp.config.fontSize%"
-        },
-        "secmp.openPanelAfterNewSession": {
-          "type": "boolean",
-          "default": true,
-          "description": "%secmp.config.openPanelAfterNewSession%"
         },
         "secmp.mcp.enabled": {
           "type": "boolean",

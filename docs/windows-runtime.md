@@ -6,16 +6,17 @@ The document path is kept for compatibility with existing links, but the runtime
 
 ## Build and Release Gates
 
-The `Build Runtime Packages` workflow is gated:
+The `Build and Package SecMP` workflow is gated:
 
-- Pull requests and normal branch pushes build and test only.
+- Pull requests and normal branch pushes always run extension checks and VSIX packaging when relevant extension files change.
+- Runtime packages are built only when runtime-related files change, `DEFAULT_RUNTIME_VERSION` / `PACKAGED_RUNTIME_API_VERSION` changes, a tag release has `runtimeVersion == extensionVersion`, or a manual workflow run sets `build_runtime=true`.
 - Runtime packages are uploaded as short-lived workflow artifacts for debugging.
 - GitHub Releases are created only when:
   - a `v*` tag is pushed, or
   - the workflow is manually triggered with `publish=true`.
 - The release job uses the `release` environment. Configure this environment in GitHub repository settings with required reviewers so release publication requires manual approval.
 
-The workflow builds:
+When runtime build is enabled, the workflow builds:
 
 ```text
 secmp-runtime-win32-x64-<runtimeVersion>.zip
@@ -30,9 +31,9 @@ Runtime icon assets are shared with the package build:
 - macOS PyInstaller builds embed `media/secmp.icns` into `proxy_engine` and `cert_manager`.
 - Updating either runtime icon changes the packaged runtime output. Bump the extension's built-in packaged runtime version when a release or test candidate needs those new runtime binaries.
 
-For tag releases, `<runtimeVersion>` is resolved from the extension's expected packaged runtime version unless a manual workflow dispatch provides `runtime_version`. VSIX-only patch releases can publish a new `secmp-<extensionVersion>.vsix` while reusing an older runtime release, but the extension's expected packaged runtime version must stay on that older runtime version.
+For tag releases, `<runtimeVersion>` is resolved from the extension's expected packaged runtime version in `extension.js` unless a manual workflow dispatch provides `runtime_version`. VSIX-only patch releases can publish a new `secmp-<extensionVersion>.vsix` while reusing an older runtime release, but the extension's expected packaged runtime version must stay on that older runtime version.
 
-Before release, CI smoke-tests the runtime by:
+Before release, CI always runs extension checks and VSIX packaging. When runtime build is enabled, CI also smoke-tests the runtime by:
 
 - validating `runtime/manifest.json`
 - running the proxy engine dependency check
@@ -42,7 +43,7 @@ Before release, CI smoke-tests the runtime by:
 - installing the runtime through the extension runtime path and requesting mitmweb `/state.json`
 - packaging the VSIX and checking it does not contain build/runtime directories
 
-The VSIX is always attached to the GitHub Release. Runtime zips are attached only when the runtime version matches the extension version; otherwise the extension continues to download the runtime from the release matching its expected packaged runtime version. Before making a VSIX-only release, confirm that release already exists and contains the matching runtime assets.
+The VSIX is always attached to the GitHub Release. Runtime zips are attached only when runtime packages are built for that release; otherwise the extension continues to download the runtime from the release matching its expected packaged runtime version. Before making a VSIX-only release, confirm that release already exists and contains the matching runtime assets.
 
 ## Manual Installation
 

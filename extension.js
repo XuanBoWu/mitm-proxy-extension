@@ -29,6 +29,7 @@ let ignoredFlowIdsAfterClear = new Set();
 let extensionContext = null;
 let activeSession = null;
 let activeSessionSyncTimer = null;
+let activeSessionBufferFlushTimer = null;
 let allowPanelDispose = false;
 let sidebarProvider = null;
 let activeProxyPort = null;
@@ -74,6 +75,7 @@ const LAST_FILE_DIALOG_DIR_KEY = "secmp.lastFileDialogDir";
 const extensionPackage = loadExtensionPackage();
 const SUPPORTED_RUNTIME_PLATFORMS = new Set(["win32", "darwin"]);
 const SUPPORTED_LOCALES = new Set(["zh-CN", "en-US"]);
+const SUPPORTED_LANGUAGE_OPTIONS = new Set(["auto", "zh-CN", "en-US"]);
 const DEFAULT_LOCALE = "zh-CN";
 const FLOW_POLL_INTERVAL_MS = 1000;
 const FLOW_POLL_ACTIVE_MS = 150;
@@ -81,10 +83,13 @@ const FLOW_POLL_IDLE_MS = 1000;
 const FLOW_POLL_IDLE_THRESHOLD = 3;
 const MITMWEB_REQUEST_TIMEOUT_MS = 5000;
 const SESSION_SYNC_DELAY_MS = 3000;
+const SESSION_BUFFER_FLUSH_DELAY_MS = 750;
 const SESSION_FLUSH_DIRTY_BYTES = 2 * 1024 * 1024;
 const FILTER_BODY_FETCH_CONCURRENCY = 4;
 const BODY_AUTOFETCH_CONCURRENCY = 2;
 const BODY_AUTOFETCH_MAX_BYTES = 8 * 1024 * 1024;
+const BODY_AUTOFETCH_MAX_ATTEMPTS = 5;
+const BODY_AUTOFETCH_RETRY_DELAYS_MS = [1000, 5000, 30000];
 const BODY_DRAIN_CONCURRENCY = 6;
 const COPY_BODY_CONFIRM_BYTES = 1 * 1024 * 1024;
 const COPY_BODY_MAX_BYTES = BODY_AUTOFETCH_MAX_BYTES;
@@ -137,11 +142,6 @@ function getConfiguredLocale() {
     return language;
   }
   return normalizeLocale(vscode.env?.language);
-}
-
-function shouldOpenPanelAfterNewSession() {
-  const config = vscode.workspace.getConfiguration("secmp");
-  return config.get("openPanelAfterNewSession", true) !== false;
 }
 
 function getConfiguredFontSize() {
@@ -290,6 +290,60 @@ function getConfiguredConnectionStrategy() {
 function isAutoPushCertEnabled() {
   const config = vscode.workspace.getConfiguration("secmp");
   return Boolean(config.get("autoPushCertOnDeviceReconnect", false));
+}
+
+function collectPreferences() {
+  const config = vscode.workspace.getConfiguration("secmp");
+  const ipLocation = getIpLocationConfig();
+  const language = String(config.get("language", "auto") || "auto");
+  return {
+    language: SUPPORTED_LANGUAGE_OPTIONS.has(language) ? language : "auto",
+    fontSize: getConfiguredFontSize(),
+    connectionStrategy: getConfiguredConnectionStrategy(),
+    certPushWaitMinutes: getCertPushWaitMinutes(),
+    ipLocationEnabled: !!ipLocation.enabled,
+    ipLocationEndpoint: ipLocation.endpoint || "",
+  };
+}
+
+function postPreferences() {
+  if (!panel) return;
+  panel.webview.postMessage({
+    command: "preferences",
+    preferences: collectPreferences(),
+  });
+}
+
+async function applyPreferencePatch(patch) {
+  if (!patch || typeof patch !== "object") return;
+  const config = vscode.workspace.getConfiguration("secmp");
+  if (typeof patch.language === "string") {
+    const value = SUPPORTED_LANGUAGE_OPTIONS.has(patch.language) ? patch.language : "auto";
+    await config.update("language", value, vscode.ConfigurationTarget.Global);
+  }
+  if (patch.fontSize != null) {
+    const value = Math.min(MAX_FONT_SIZE, Math.max(MIN_FONT_SIZE, Math.round(Number(patch.fontSize) || DEFAULT_FONT_SIZE)));
+    await config.update("fontSize", value, vscode.ConfigurationTarget.Global);
+  }
+  if (typeof patch.connectionStrategy === "string") {
+    const value = SUPPORTED_CONNECTION_STRATEGIES.has(patch.connectionStrategy)
+      ? patch.connectionStrategy
+      : DEFAULT_CONNECTION_STRATEGY;
+    await config.update("connectionStrategy", value, vscode.ConfigurationTarget.Global);
+  }
+  if (patch.certPushWaitMinutes != null) {
+    const raw = Number(patch.certPushWaitMinutes);
+    const value = Number.isFinite(raw)
+      ? Math.min(MAX_CERT_PUSH_WAIT_MINUTES, Math.max(MIN_CERT_PUSH_WAIT_MINUTES, Math.round(raw)))
+      : DEFAULT_CERT_PUSH_WAIT_MINUTES;
+    await config.update("certPushWaitMinutes", value, vscode.ConfigurationTarget.Global);
+  }
+  if (typeof patch.ipLocationEnabled === "boolean") {
+    await config.update("ipLocation.enabled", patch.ipLocationEnabled, vscode.ConfigurationTarget.Global);
+  }
+  if (typeof patch.ipLocationEndpoint === "string") {
+    await config.update("ipLocation.endpoint", patch.ipLocationEndpoint.trim(), vscode.ConfigurationTarget.Global);
+  }
 }
 
 function getIpLocationConfig() {
@@ -1604,9 +1658,27 @@ function cancelActiveSessionSync() {
   }
 }
 
+function cancelActiveSessionBufferFlush() {
+  if (activeSessionBufferFlushTimer) {
+    clearTimeout(activeSessionBufferFlushTimer);
+    activeSessionBufferFlushTimer = null;
+  }
+}
+
+function flushActiveSessionBuffer() {
+  if (!activeSession || typeof activeSession.flushBuffer !== "function") return;
+  cancelActiveSessionBufferFlush();
+  try {
+    activeSession.flushBuffer();
+  } catch (err) {
+    log(`Failed to flush SecMP session buffer: ${err.message}`);
+  }
+}
+
 function syncActiveSession() {
   if (!activeSession) return;
   cancelActiveSessionSync();
+  cancelActiveSessionBufferFlush();
   try {
     activeSession.sync();
     writeResumeMarker({ running: !!proxyProcess });
@@ -1618,6 +1690,7 @@ function syncActiveSession() {
 function flushActiveSession() {
   if (!activeSession) return;
   cancelActiveSessionSync();
+  cancelActiveSessionBufferFlush();
   try {
     activeSession.flush();
     writeResumeMarker({ running: !!proxyProcess });
@@ -1639,6 +1712,15 @@ function scheduleActiveSessionSync() {
   }, SESSION_SYNC_DELAY_MS);
 }
 
+function scheduleActiveSessionBufferFlush() {
+  if (!activeSession || typeof activeSession.flushBuffer !== "function") return;
+  if (activeSessionBufferFlushTimer) return;
+  activeSessionBufferFlushTimer = setTimeout(() => {
+    activeSessionBufferFlushTimer = null;
+    flushActiveSessionBuffer();
+  }, SESSION_BUFFER_FLUSH_DELAY_MS);
+}
+
 function closeActiveSession(options = {}) {
   if (!activeSession) return;
   const session = activeSession;
@@ -1657,6 +1739,7 @@ function closeActiveSession(options = {}) {
   }
   activeSession = null;
   cancelActiveSessionSync();
+  cancelActiveSessionBufferFlush();
   clearResumeMarker();
   refreshSidebar();
 }
@@ -2043,6 +2126,12 @@ function copyBodyCache(from, to) {
     to._reqBodyState = from._reqBodyState;
     to._reqBodyError = from._reqBodyError || "";
   }
+  if (from._reqBodyAttempts != null) {
+    to._reqBodyAttempts = from._reqBodyAttempts;
+  }
+  if (from._reqBodyLastErrorAt != null) {
+    to._reqBodyLastErrorAt = from._reqBodyLastErrorAt;
+  }
   if (from._resBodyFetched) {
     to._resBodyFetched = true;
     to.res_body = from.res_body;
@@ -2051,6 +2140,12 @@ function copyBodyCache(from, to) {
   if (from._resBodyState) {
     to._resBodyState = from._resBodyState;
     to._resBodyError = from._resBodyError || "";
+  }
+  if (from._resBodyAttempts != null) {
+    to._resBodyAttempts = from._resBodyAttempts;
+  }
+  if (from._resBodyLastErrorAt != null) {
+    to._resBodyLastErrorAt = from._resBodyLastErrorAt;
   }
   to._bodyFetched = !!(to._reqBodyFetched && to._resBodyFetched);
 }
@@ -2493,9 +2588,18 @@ async function processIpLocationQueue() {
   }
 }
 
-async function testIpLocationEndpoint() {
+async function testIpLocationEndpoint(options = {}) {
   const config = getIpLocationConfig();
+  const reportToPanel = options.reportToPanel === true;
   if (!config.endpoint) {
+    if (reportToPanel && panel) {
+      panel.webview.postMessage({
+        command: "environmentActionResult",
+        action: "testIpLocationEndpoint",
+        running: false,
+        message: t("extension.ipLocation.test.noEndpoint"),
+      });
+    }
     vscode.window.showWarningMessage(t("extension.ipLocation.test.noEndpoint"));
     return;
   }
@@ -2507,12 +2611,30 @@ async function testIpLocationEndpoint() {
       throw new Error(t("extension.ipLocation.test.invalidResponse"));
     }
     const result = results.find((item) => item.country || item.registeredCountry) || {};
-    vscode.window.showInformationMessage(t("extension.ipLocation.test.success", {
+    const message = t("extension.ipLocation.test.success", {
       country: result.country || "-",
       registeredCountry: result.registeredCountry || "-",
-    }));
+    });
+    if (reportToPanel && panel) {
+      panel.webview.postMessage({
+        command: "environmentActionResult",
+        action: "testIpLocationEndpoint",
+        running: false,
+        message,
+      });
+    }
+    vscode.window.showInformationMessage(message);
   } catch (err) {
-    vscode.window.showErrorMessage(t("extension.ipLocation.test.failed", { message: err.message }));
+    const message = t("extension.ipLocation.test.failed", { message: err.message });
+    if (reportToPanel && panel) {
+      panel.webview.postMessage({
+        command: "environmentActionResult",
+        action: "testIpLocationEndpoint",
+        running: false,
+        message,
+      });
+    }
+    vscode.window.showErrorMessage(message);
   }
 }
 
@@ -4420,6 +4542,7 @@ async function createPanel() {
         }
         postIpLocationConfig();
         postCertAutoPushConfig();
+        postPreferences();
         startAdbMonitor();
         await postEnvironmentStatus(context);
         break;
@@ -4574,6 +4697,39 @@ async function createPanel() {
         }
         break;
       }
+
+      case "getPreferences":
+        postPreferences();
+        break;
+
+      case "updatePreferences": {
+        try {
+          await applyPreferencePatch(message.patch || {});
+          postPreferences();
+          panel.webview.postMessage({
+            command: "environmentActionResult",
+            action: "preferencesSaved",
+            running: false,
+            message: t("webview.prefs.action.saved"),
+          });
+        } catch (err) {
+          panel.webview.postMessage({
+            command: "environmentActionResult",
+            action: "preferencesSaved",
+            running: false,
+            message: t("webview.prefs.action.saveFailed", { message: err.message }),
+          });
+        }
+        break;
+      }
+
+      case "testIpLocationEndpoint":
+        await testIpLocationEndpoint({ reportToPanel: true });
+        break;
+
+      case "openSecmpSettings":
+        await vscode.commands.executeCommand("workbench.action.openSettings", "@ext:xbowu.secmp");
+        break;
 
       case "cleanRuntimeCacheFromEnvironment": {
         if (proxyProcess) {
@@ -4920,6 +5076,91 @@ function setBodyState(flow, side, state, error = "") {
   }
 }
 
+function getBodyState(flow, side) {
+  return side === "request" ? flow?._reqBodyState : flow?._resBodyState;
+}
+
+function getBodyFetched(flow, side) {
+  return side === "request" ? !!flow?._reqBodyFetched : !!flow?._resBodyFetched;
+}
+
+function getBodySize(flow, side) {
+  return Number(side === "request" ? flow?.req_size : flow?.res_size) || 0;
+}
+
+function getBodyAttemptCount(flow, side) {
+  return Number(side === "request" ? flow?._reqBodyAttempts : flow?._resBodyAttempts) || 0;
+}
+
+function setBodyAttemptCount(flow, side, count) {
+  if (side === "request") {
+    flow._reqBodyAttempts = count;
+  } else {
+    flow._resBodyAttempts = count;
+  }
+}
+
+function setBodyLastErrorAt(flow, side, value) {
+  if (side === "request") {
+    flow._reqBodyLastErrorAt = value;
+  } else {
+    flow._resBodyLastErrorAt = value;
+  }
+}
+
+function getBodyLastErrorAt(flow, side) {
+  return Number(side === "request" ? flow?._reqBodyLastErrorAt : flow?._resBodyLastErrorAt) || 0;
+}
+
+function clearBodyFetchFailure(flow, side) {
+  setBodyAttemptCount(flow, side, 0);
+  setBodyLastErrorAt(flow, side, 0);
+}
+
+function markBodyFetchFailure(flow, side, err) {
+  setBodyAttemptCount(flow, side, getBodyAttemptCount(flow, side) + 1);
+  setBodyLastErrorAt(flow, side, Date.now());
+  setBodyState(flow, side, "error", err?.message || String(err || t("common.unknown")));
+}
+
+function getBodyRetryDelayMs(flow, side) {
+  const attempts = Math.max(1, getBodyAttemptCount(flow, side));
+  return BODY_AUTOFETCH_RETRY_DELAYS_MS[Math.min(attempts - 1, BODY_AUTOFETCH_RETRY_DELAYS_MS.length - 1)];
+}
+
+function getBodyRetryWaitMs(flow, side, now = Date.now()) {
+  const lastErrorAt = getBodyLastErrorAt(flow, side);
+  if (!lastErrorAt) return 0;
+  return Math.max(0, getBodyRetryDelayMs(flow, side) - (now - lastErrorAt));
+}
+
+function flowSideNeedsBodyFetch(flow, side, options = {}) {
+  if (!flow || !flow.id || flow._fromSession) return false;
+  if (side === "response" && !isResponseComplete(flow)) return false;
+  if (getBodyFetched(flow, side)) return false;
+  const size = getBodySize(flow, side);
+  if (size <= 0) return false;
+  if (options.maxBytes && size > options.maxBytes) return false;
+  const state = getBodyState(flow, side);
+  if (state === "loading" || state === "unavailable") return false;
+  if (state === "error" && !options.force) {
+    if (!options.retryErrors) return false;
+    if (getBodyAttemptCount(flow, side) >= (options.maxAttempts || BODY_AUTOFETCH_MAX_ATTEMPTS)) return false;
+    if (getBodyRetryWaitMs(flow, side, options.now || Date.now()) > 0) return false;
+  }
+  return true;
+}
+
+function getFlowBodyRetryWaitMs(flow, options = {}) {
+  const waits = [];
+  for (const side of ["request", "response"]) {
+    if (flowSideNeedsBodyFetch(flow, side, { ...options, force: true })) {
+      waits.push(getBodyRetryWaitMs(flow, side));
+    }
+  }
+  return waits.length ? Math.min(...waits) : 0;
+}
+
 function isResponseComplete(flow) {
   if (flow.error) return true;
   if (flow.res_timestamp_end) return true;
@@ -4941,6 +5182,7 @@ function hydrateFlowBodyFromSession(flow, side) {
     }
     flow._reqBodyFetched = true;
     setBodyState(flow, "request", "ready");
+    clearBodyFetchFailure(flow, "request");
   } else {
     if (state.contentKind === "binary") {
       flow.res_body_base64 = activeSession.getBodyBuffer(flow.id, "response").toString("base64");
@@ -4951,6 +5193,7 @@ function hydrateFlowBodyFromSession(flow, side) {
     }
     flow._resBodyFetched = true;
     setBodyState(flow, "response", "ready");
+    clearBodyFetchFailure(flow, "response");
   }
   flow._bodyFetched = !!(flow._reqBodyFetched && flow._resBodyFetched);
   return true;
@@ -4978,11 +5221,13 @@ function applyFetchedBody(flow, side, buf, contentType) {
     flow._resBodyFetched = true;
   }
   setBodyState(flow, side, "ready");
+  clearBodyFetchFailure(flow, side);
   if (activeSession) {
     activeSession.appendBody(flow.id, side, buf, {
       contentType,
       contentKind: binary ? "binary" : "text",
     });
+    scheduleActiveSessionBufferFlush();
     scheduleActiveSessionSync();
   }
   flow._bodyFetched = !!(flow._reqBodyFetched && flow._resBodyFetched);
@@ -5005,12 +5250,14 @@ async function fetchFlowBodies(flow, scopes = { request: true, response: true })
     flow.req_body_base64 = "";
     flow._reqBodyFetched = true;
     setBodyState(flow, "request", "ready");
+    clearBodyFetchFailure(flow, "request");
   }
   if (wantRes && !flow._resBodyFetched && isResponseComplete(flow) && !(flow.res_size > 0)) {
     flow.res_body = "";
     flow.res_body_base64 = "";
     flow._resBodyFetched = true;
     setBodyState(flow, "response", "ready");
+    clearBodyFetchFailure(flow, "response");
   }
 
   let requestOk = !wantReq || !!flow._reqBodyFetched;
@@ -5057,7 +5304,7 @@ async function fetchFlowBodies(flow, scopes = { request: true, response: true })
       applyFetchedBody(flow, "request", buf, ct);
       requestOk = true;
     } catch (err) {
-      setBodyState(flow, "request", "error", err.message);
+      markBodyFetchFailure(flow, "request", err);
       requestOk = false;
     }
   }
@@ -5072,7 +5319,7 @@ async function fetchFlowBodies(flow, scopes = { request: true, response: true })
       applyFetchedBody(flow, "response", buf, ct);
       responseOk = true;
     } catch (err) {
-      setBodyState(flow, "response", "error", err.message);
+      markBodyFetchFailure(flow, "response", err);
       responseOk = false;
     }
   }
@@ -5089,22 +5336,46 @@ async function fetchFlowBodies(flow, scopes = { request: true, response: true })
 
 let bodyFetchQueue = [];
 let bodyFetchQueued = new Set();
+let bodyFetchRetryTimers = new Map();
 let bodyFetchActive = 0;
 
-function flowNeedsBodyFetch(flow) {
-  if (!flow || !flow.id || flow._fromSession) return false;
-  if (!isResponseComplete(flow)) return false;
-  const reqMissing = (flow.req_size || 0) > 0 && !flow._reqBodyFetched && flow._reqBodyState !== "error";
-  const resMissing = (flow.res_size || 0) > 0 && !flow._resBodyFetched && flow._resBodyState !== "error";
-  return reqMissing || resMissing;
+function flowNeedsBodyFetch(flow, options = {}) {
+  return flowSideNeedsBodyFetch(flow, "request", options) ||
+    flowSideNeedsBodyFetch(flow, "response", options);
 }
 
 function enqueueBodyAutoFetch(flow) {
-  if (!flowNeedsBodyFetch(flow)) return;
+  if (!flowNeedsBodyFetch(flow, {
+    maxBytes: BODY_AUTOFETCH_MAX_BYTES,
+    retryErrors: true,
+    maxAttempts: BODY_AUTOFETCH_MAX_ATTEMPTS,
+  })) return;
   if (bodyFetchQueued.has(flow.id)) return;
+  const retryTimer = bodyFetchRetryTimers.get(flow.id);
+  if (retryTimer) {
+    clearTimeout(retryTimer);
+    bodyFetchRetryTimers.delete(flow.id);
+  }
   bodyFetchQueued.add(flow.id);
   bodyFetchQueue.push(flow.id);
   pumpBodyFetchQueue();
+}
+
+function scheduleBodyAutoFetchRetry(flow) {
+  if (!flow?.id || bodyFetchRetryTimers.has(flow.id)) return;
+  const retryableSides = ["request", "response"].filter((side) => {
+    if (!flowSideNeedsBodyFetch(flow, side, { maxBytes: BODY_AUTOFETCH_MAX_BYTES, force: true })) return false;
+    return getBodyState(flow, side) !== "error" ||
+      getBodyAttemptCount(flow, side) < BODY_AUTOFETCH_MAX_ATTEMPTS;
+  });
+  if (retryableSides.length === 0) return;
+  const waitMs = Math.max(250, getFlowBodyRetryWaitMs(flow, { maxBytes: BODY_AUTOFETCH_MAX_BYTES }));
+  const timer = setTimeout(() => {
+    bodyFetchRetryTimers.delete(flow.id);
+    const current = capturedFlowById.get(flow.id);
+    if (current) enqueueBodyAutoFetch(current);
+  }, waitMs);
+  bodyFetchRetryTimers.set(flow.id, timer);
 }
 
 function pumpBodyFetchQueue() {
@@ -5124,6 +5395,15 @@ function pumpBodyFetchQueue() {
         // states are tracked on the flow; on-demand selection retries
       } finally {
         bodyFetchQueued.delete(id);
+        const flow = capturedFlowById.get(id);
+        if (flow && webPort && authToken && flowNeedsBodyFetch(flow, {
+          maxBytes: BODY_AUTOFETCH_MAX_BYTES,
+          retryErrors: true,
+          maxAttempts: BODY_AUTOFETCH_MAX_ATTEMPTS,
+          force: true,
+        })) {
+          scheduleBodyAutoFetchRetry(flow);
+        }
         bodyFetchActive -= 1;
         pumpBodyFetchQueue();
       }
@@ -5134,15 +5414,21 @@ function pumpBodyFetchQueue() {
 function resetBodyFetchQueue() {
   bodyFetchQueue = [];
   bodyFetchQueued.clear();
+  for (const timer of bodyFetchRetryTimers.values()) {
+    clearTimeout(timer);
+  }
+  bodyFetchRetryTimers.clear();
 }
 
 // Before stopping the proxy, pull every body that is still only inside
 // mitmproxy. Cancellable; anything skipped is marked "unavailable" on access.
 async function drainPendingBodiesBeforeStop() {
   if (!webPort || !authToken) return;
-  const pending = capturedFlows.filter(flowNeedsBodyFetch);
+  flushPendingFlowBatch();
+  const pending = capturedFlows.filter((flow) => flowNeedsBodyFetch(flow, { force: true }));
   if (pending.length === 0) return;
   resetBodyFetchQueue();
+  let failed = 0;
   await vscode.window.withProgress({
     location: vscode.ProgressLocation.Notification,
     title: t("extension.stop.fetchingBodies"),
@@ -5156,7 +5442,8 @@ async function drainPendingBodiesBeforeStop() {
         const flow = pending[index];
         index += 1;
         try {
-          await fetchFlowBodies(flow);
+          const result = await fetchFlowBodies(flow);
+          if (!result.requestOk || !result.responseOk) failed += 1;
         } catch (_) {}
         done += 1;
         if (done % 10 === 0 || done === total) {
@@ -5166,6 +5453,10 @@ async function drainPendingBodiesBeforeStop() {
     }
     await Promise.all(Array.from({ length: Math.min(BODY_DRAIN_CONCURRENCY, total) }, worker));
   });
+  flushActiveSessionBuffer();
+  if (failed > 0) {
+    log(`Body drain before stop completed with ${failed}/${pending.length} flows still missing one or more bodies.`);
+  }
 }
 
 // ===== Content (body) filtering =====
@@ -5318,6 +5609,7 @@ async function fetchAllFlowBodies(flows, concurrency = FILTER_BODY_FETCH_CONCURR
   }
   const count = Math.min(concurrency, total);
   await Promise.all(Array.from({ length: count }, () => next()));
+  flushActiveSessionBuffer();
   return { failed, total };
 }
 
@@ -6736,17 +7028,13 @@ async function exportJson(options = {}) {
 
 async function saveSession() {
   if (!activeSession) {
-    const sessionName = await vscode.window.showInputBox({
-      prompt: t("extension.session.namePrompt"),
-      value: "SecMP Capture",
-    });
-    if (!sessionName) return;
     const result = await vscode.window.showSaveDialog({
       filters: { "SecMP Session": ["secmp"] },
-      defaultUri: getDefaultFileDialogUri(`${sessionName}.secmp`),
+      defaultUri: getDefaultFileDialogUri("SecMP Capture.secmp"),
     });
     if (!result) return;
     await rememberFileDialogDir(result.fsPath);
+    const sessionName = path.basename(result.fsPath, ".secmp") || "SecMP Capture";
     activeSession = CaptureSession.createNamed(result.fsPath, sessionName, extensionPackage.version);
     flushActiveSession();
     rememberSession(activeSession);
@@ -6772,25 +7060,19 @@ async function newTemporarySession() {
   knownFlowIds.clear();
   refreshSidebar();
   vscode.window.showInformationMessage(t("extension.session.tempCreated"));
-  if (shouldOpenPanelAfterNewSession()) {
-    await createPanel();
-    await vscode.commands.executeCommand("workbench.action.closeSidebar");
-  }
+  await createPanel();
+  await vscode.commands.executeCommand("workbench.action.closeSidebar");
 }
 
 async function newPersistentSession() {
-  const sessionName = await vscode.window.showInputBox({
-    prompt: t("extension.session.namePrompt"),
-    value: "SecMP Capture",
-  });
-  if (!sessionName) return;
   const result = await vscode.window.showSaveDialog({
     filters: { "SecMP Session": ["secmp"] },
-    defaultUri: getDefaultFileDialogUri(`${sessionName}.secmp`),
+    defaultUri: getDefaultFileDialogUri("SecMP Capture.secmp"),
   });
   if (!result) return;
   await rememberFileDialogDir(result.fsPath);
   if (activeSession && !(await confirmAndCloseActiveSession({ restorePanelOnCancel: !!panel }))) return;
+  const sessionName = path.basename(result.fsPath, ".secmp") || "SecMP Capture";
   activeSession = CaptureSession.createNamed(result.fsPath, sessionName, extensionPackage.version);
   flushActiveSession();
   rememberSession(activeSession);
@@ -6800,10 +7082,8 @@ async function newPersistentSession() {
   knownFlowIds.clear();
   refreshSidebar();
   vscode.window.showInformationMessage(t("extension.session.saved", { path: result.fsPath }));
-  if (shouldOpenPanelAfterNewSession()) {
-    await createPanel();
-    await vscode.commands.executeCommand("workbench.action.closeSidebar");
-  }
+  await createPanel();
+  await vscode.commands.executeCommand("workbench.action.closeSidebar");
 }
 
 async function loadSession() {
@@ -7163,6 +7443,18 @@ function activate(context) {
         await syncMcpBridge();
       })().catch((err) => log(`[mcp] failed to apply configuration: ${err.message}`));
     }
+    if (panel && (
+      event.affectsConfiguration("secmp.language") ||
+      event.affectsConfiguration("secmp.fontSize") ||
+      event.affectsConfiguration("secmp.connectionStrategy") ||
+      event.affectsConfiguration("secmp.certPushWaitMinutes") ||
+      event.affectsConfiguration("secmp.autoPushCertOnDeviceReconnect") ||
+      event.affectsConfiguration("secmp.ipLocation") ||
+      event.affectsConfiguration("secmp.ipLocationEnabled") ||
+      event.affectsConfiguration("secmp.ipLocationEndpoint")
+    )) {
+      postPreferences();
+    }
   });
 
   context.subscriptions.push(
@@ -7215,4 +7507,15 @@ async function deactivate() {
   }
 }
 
-module.exports = { activate, deactivate };
+module.exports = {
+  activate,
+  deactivate,
+  _test: {
+    BODY_AUTOFETCH_MAX_ATTEMPTS,
+    BODY_AUTOFETCH_MAX_BYTES,
+    getBodyRetryWaitMs,
+    flowNeedsBodyFetch,
+    flowSideNeedsBodyFetch,
+    setBodyState,
+  },
+};

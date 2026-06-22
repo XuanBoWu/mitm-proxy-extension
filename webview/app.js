@@ -52,7 +52,51 @@ let proxyPortEditing = false;
 let proxyPortBeforeEdit = currentProxyPort;
 let environmentStatus = null;
 let aboutPopoverOpen = false;
-let mcpPopoverOpen = false;
+let preferencesPopoverOpen = false;
+let preferencesSnapshot = null;
+let preferencesUiSyncing = false;
+
+// Each entry: { id, key, source, parse, equal }
+//   source: "preferences" | "mcp"
+//   parse(value): convert input value back to typed form for the patch
+//   equal(a,b): compare snapshot vs current
+const PREFS_DIRTY_FIELDS = [
+  {
+    id: "prefIpLocationEndpointInput",
+    key: "ipLocationEndpoint",
+    source: "preferences",
+    parse: (el) => String(el.value || "").trim(),
+    read: (snap) => String(snap.ipLocationEndpoint || ""),
+    apply: (el, value) => { el.value = value || ""; },
+  },
+  {
+    id: "prefMcpPortInput",
+    key: "port",
+    source: "mcp",
+    parse: (el) => Number(el.value),
+    read: (snap) => Number(snap.mcp?.configuredPort ?? 0),
+    apply: (el, value) => { el.value = String(value); },
+  },
+  {
+    id: "prefMcpMaxBodyBytesInput",
+    key: "maxBodyBytes",
+    source: "mcp",
+    parse: (el) => Number(el.value),
+    read: (snap) => Number(snap.mcp?.maxBodyBytes ?? 65536),
+    apply: (el, value) => { el.value = String(value); },
+  },
+  {
+    id: "prefMcpStateFileInput",
+    key: "stateFile",
+    source: "mcp",
+    parse: (el) => String(el.value || ""),
+    read: (snap) => snap.mcp?.stateFileConfigured ? (snap.mcp.stateFile || "") : "",
+    apply: (el, value, snap) => {
+      el.value = value || "";
+      el.placeholder = snap.mcp?.stateFile || "";
+    },
+  },
+];
 const EXTENSION_VERSION = window.__SECMP_EXTENSION_VERSION__ || document.getElementById("footerVersion")?.textContent?.trim() || "-";
 
 function t(key, values = {}, fallback = "") {
@@ -497,6 +541,11 @@ window.addEventListener("message", (event) => {
       }
       updateProxyIndicator();
       footerStatus.textContent = msg.message || (msg.running ? t("webview.proxy.runningStatus") : t("webview.proxy.stoppedStatus"));
+      // Restart hint is only meaningful while the proxy is running.
+      if (!proxyRunning) {
+        const restartHint = $("cardConnectionStrategyRestartHint");
+        if (restartHint) restartHint.hidden = true;
+      }
       break;
     case "deviceStatus":
       updateDevicePanel(msg);
@@ -629,9 +678,14 @@ window.addEventListener("message", (event) => {
     case "environmentActionResult":
       if (msg.action === "copyMcpClientConfig" || msg.action === "setMcpConfig") {
         showMcpActionStatus(msg.message || "", !!msg.running);
+      } else if (msg.action === "preferencesSaved" || msg.action === "testIpLocationEndpoint") {
+        showPreferencesActionStatus(msg.message || "", !!msg.running);
       } else {
         showEnvironmentActionStatus(msg.message || "", !!msg.running);
       }
+      break;
+    case "preferences":
+      applyPreferencesToUi(msg.preferences || {});
       break;
     case "flowActionStatus":
       if (msg.message) footerStatus.textContent = msg.message;
@@ -839,7 +893,7 @@ function toggleAboutPopover(open = !aboutPopoverOpen) {
   $("aboutPopover").hidden = !open;
   $("footerVersionBtn").setAttribute("aria-expanded", open ? "true" : "false");
   if (open) {
-    toggleMcpPopover(false);
+    togglePreferencesPopover(false);
   }
   if (open) {
     vscode.postMessage({ command: "getEnvironmentStatus" });
@@ -850,26 +904,229 @@ function renderMcpStatus(mcp) {
   if (!mcp) return;
   const enabled = !!mcp.enabled;
   const running = !!mcp.running;
-  $("mcpEnabledToggle").checked = enabled;
-  $("mcpRedactToggle").checked = mcp.redactByDefault !== false;
-  $("mcpPortInput").value = String(mcp.configuredPort ?? 0);
-  $("mcpMaxBodyBytesInput").value = String(mcp.maxBodyBytes ?? 65536);
-  $("mcpStateFileInput").value = mcp.stateFileConfigured ? (mcp.stateFile || "") : "";
-  $("mcpStateFileInput").placeholder = mcp.stateFile || "";
-  setText("mcpSummary", enabled ? (running ? t("common.running") : t("common.notRunning")) : t("webview.mcp.disabled"));
-  setText("mcpStatusText", enabled ? (running ? t("common.running") : t("common.notRunning")) : t("webview.mcp.disabled"));
-  setText("mcpActivePort", running && mcp.port ? String(mcp.port) : "-");
-  setText("mcpConfiguredPort", String(mcp.configuredPort ?? 0));
+  preferencesUiSyncing = true;
+  try {
+    const enabledToggle = $("prefMcpEnabledToggle");
+    if (enabledToggle) enabledToggle.checked = enabled;
+    const redactToggle = $("prefMcpRedactToggle");
+    if (redactToggle) redactToggle.checked = mcp.redactByDefault !== false;
+  } finally {
+    preferencesUiSyncing = false;
+  }
+  setText("prefMcpStatusText", enabled ? (running ? t("common.running") : t("common.notRunning")) : t("webview.mcp.disabled"));
+  setText("prefMcpActivePort", running && mcp.port ? String(mcp.port) : "-");
+  setText("prefMcpConfiguredPort", String(mcp.configuredPort ?? 0));
+  // Merge mcp into the unified snapshot so dirty-field comparison works.
+  if (preferencesSnapshot) {
+    preferencesSnapshot = { ...preferencesSnapshot, mcp };
+  } else {
+    preferencesSnapshot = { mcp };
+  }
+  syncDirtyFieldsFromSnapshot();
+  refreshDirtyState();
 }
 
-function toggleMcpPopover(open = !mcpPopoverOpen) {
-  mcpPopoverOpen = open;
-  $("mcpPopover").hidden = !open;
-  $("footerMcpBtn").setAttribute("aria-expanded", open ? "true" : "false");
+function togglePreferencesPopover(open = !preferencesPopoverOpen, options = {}) {
+  if (!open && refreshDirtyState() && !options.force) {
+    showPreferencesActionStatus(t("webview.prefs.action.unsavedHint"));
+    return false;
+  }
+  preferencesPopoverOpen = open;
+  $("preferencesPopover").hidden = !open;
+  $("footerPreferencesBtn").setAttribute("aria-expanded", open ? "true" : "false");
   if (open) {
     toggleAboutPopover(false);
+    closeAllCardSettingsPopovers();
+    vscode.postMessage({ command: "getPreferences" });
     vscode.postMessage({ command: "getEnvironmentStatus" });
+  } else {
+    showPreferencesActionStatus("");
   }
+  return true;
+}
+
+// ===== Card settings popovers (lightweight, no dirty model) =====
+
+function closeAllCardSettingsPopovers(except = null) {
+  document.querySelectorAll(".card-settings-popover").forEach((popover) => {
+    if (popover === except) return;
+    popover.hidden = true;
+  });
+  document.querySelectorAll(".card-settings-btn").forEach((btn) => {
+    if (except && btn.dataset.cardSettings && popoverIdForCard(btn.dataset.cardSettings) === except.id) return;
+    btn.setAttribute("aria-expanded", "false");
+  });
+}
+
+function popoverIdForCard(name) {
+  switch (name) {
+    case "cert": return "certSettingsPopover";
+    case "proxy": return "proxySettingsPopover";
+    default: return null;
+  }
+}
+
+function toggleCardSettings(name) {
+  const popoverId = popoverIdForCard(name);
+  if (!popoverId) return;
+  const popover = $(popoverId);
+  if (!popover) return;
+  const willOpen = popover.hidden;
+  closeAllCardSettingsPopovers(willOpen ? popover : null);
+  popover.hidden = !willOpen;
+  const btn = document.querySelector(`.card-settings-btn[data-card-settings="${name}"]`);
+  if (btn) btn.setAttribute("aria-expanded", willOpen ? "true" : "false");
+  if (willOpen) {
+    // Reset transient hints whenever the popover is reopened.
+    const restartHint = $("cardConnectionStrategyRestartHint");
+    if (restartHint) restartHint.hidden = true;
+    vscode.postMessage({ command: "getPreferences" });
+  }
+}
+
+function applyPreferencesToUi(prefs) {
+  if (!prefs) return;
+  // Merge with previous snapshot so we keep mcp from renderMcpStatus.
+  preferencesSnapshot = { ...(preferencesSnapshot || {}), ...prefs };
+  preferencesUiSyncing = true;
+  try {
+    const langSelect = $("prefLanguageSelect");
+    if (langSelect) langSelect.value = prefs.language || "auto";
+    const fontSelect = $("prefFontSizeSelect");
+    if (fontSelect) {
+      const value = String(prefs.fontSize || 13);
+      if (![...fontSelect.options].some((opt) => opt.value === value)) {
+        fontSelect.add(new Option(`${value} px`, value));
+      }
+      fontSelect.value = value;
+    }
+    const ipToggle = $("prefIpLocationEnabledToggle");
+    if (ipToggle) ipToggle.checked = !!prefs.ipLocationEnabled;
+    // Card-level mirrors (proxy + cert cards).
+    const cardStrategy = $("cardConnectionStrategySelect");
+    if (cardStrategy) cardStrategy.value = prefs.connectionStrategy || "lazy";
+    const cardCertWait = $("cardCertPushWaitSelect");
+    if (cardCertWait) {
+      const value = String(prefs.certPushWaitMinutes ?? 1);
+      if (![...cardCertWait.options].some((opt) => opt.value === value)) {
+        cardCertWait.add(new Option(`${value} min`, value));
+      }
+      cardCertWait.value = value;
+    }
+  } finally {
+    preferencesUiSyncing = false;
+  }
+  syncDirtyFieldsFromSnapshot();
+  refreshDirtyState();
+}
+
+// ===== Preferences dirty-state machine =====
+
+function syncDirtyFieldsFromSnapshot() {
+  if (!preferencesSnapshot) return;
+  preferencesUiSyncing = true;
+  try {
+    for (const field of PREFS_DIRTY_FIELDS) {
+      const el = $(field.id);
+      if (!el) continue;
+      // Skip MCP fields until the MCP snapshot has arrived.
+      if (field.source === "mcp" && !preferencesSnapshot.mcp) continue;
+      // Don't clobber the user's in-progress edit.
+      if (document.activeElement === el && el.dataset.prefDirtyMark === "1") continue;
+      const value = field.read(preferencesSnapshot);
+      field.apply(el, value, preferencesSnapshot);
+      delete el.dataset.prefDirtyMark;
+      el.classList.remove("pref-dirty");
+    }
+  } finally {
+    preferencesUiSyncing = false;
+  }
+}
+
+function isFieldDirty(field) {
+  const el = $(field.id);
+  if (!el || !preferencesSnapshot) return false;
+  if (field.source === "mcp" && !preferencesSnapshot.mcp) return false;
+  const current = field.parse(el);
+  const original = field.read(preferencesSnapshot);
+  if (typeof current === "number" && typeof original === "number") {
+    return Number(current) !== Number(original);
+  }
+  return String(current) !== String(original);
+}
+
+function collectDirtyPatch() {
+  const patch = { preferences: {}, mcp: {} };
+  let hasPrefs = false;
+  let hasMcp = false;
+  for (const field of PREFS_DIRTY_FIELDS) {
+    const el = $(field.id);
+    if (!el) continue;
+    if (!isFieldDirty(field)) continue;
+    const value = field.parse(el);
+    if (field.source === "mcp") {
+      patch.mcp[field.key] = value;
+      hasMcp = true;
+    } else {
+      patch.preferences[field.key] = value;
+      hasPrefs = true;
+    }
+  }
+  return { patch, hasPrefs, hasMcp, dirty: hasPrefs || hasMcp };
+}
+
+function refreshDirtyState() {
+  let dirty = false;
+  for (const field of PREFS_DIRTY_FIELDS) {
+    const el = $(field.id);
+    if (!el) continue;
+    const fieldDirty = isFieldDirty(field);
+    if (fieldDirty) {
+      el.classList.add("pref-dirty");
+      el.dataset.prefDirtyMark = "1";
+      dirty = true;
+    } else {
+      el.classList.remove("pref-dirty");
+      delete el.dataset.prefDirtyMark;
+    }
+  }
+  const banner = $("preferencesUnsavedBanner");
+  if (banner) banner.hidden = !dirty;
+  const saveBtn = $("prefSaveBtn");
+  if (saveBtn) saveBtn.disabled = !dirty;
+  const discardBtn = $("prefDiscardBtn");
+  if (discardBtn) discardBtn.disabled = !dirty;
+  return dirty;
+}
+
+function discardDirtyEdits() {
+  syncDirtyFieldsFromSnapshot();
+  refreshDirtyState();
+}
+
+function savePendingPreferenceEdits() {
+  const { patch, hasPrefs, hasMcp, dirty } = collectDirtyPatch();
+  if (!dirty) return false;
+  showPreferencesActionStatus(t("webview.prefs.action.saving"), true);
+  if (hasPrefs) {
+    vscode.postMessage({ command: "updatePreferences", patch: patch.preferences });
+  }
+  if (hasMcp) {
+    vscode.postMessage({ command: "setMcpConfig", ...patch.mcp });
+  }
+  return true;
+}
+
+function showPreferencesActionStatus(message, running = false) {
+  const el = $("preferencesActionStatus");
+  if (!el) return;
+  if (!message) {
+    el.hidden = true;
+    el.textContent = "";
+    return;
+  }
+  el.hidden = false;
+  el.textContent = running ? message : message;
 }
 
 function showEnvironmentActionStatus(message, running = false) {
@@ -884,14 +1141,8 @@ function showEnvironmentActionStatus(message, running = false) {
 }
 
 function showMcpActionStatus(message, running = false) {
-  const el = $("mcpActionStatus");
-  if (!message) {
-    el.hidden = true;
-    el.textContent = "";
-    return;
-  }
-  el.hidden = false;
-  el.textContent = running ? message : message;
+  // MCP actions feed into the unified Preferences status row.
+  showPreferencesActionStatus(message, running);
 }
 
 // ===== Flow List Rendering =====
@@ -3929,16 +4180,118 @@ $("footerVersionBtn").addEventListener("click", () => {
   toggleAboutPopover();
 });
 
-$("footerMcpBtn").addEventListener("click", () => {
-  toggleMcpPopover();
+$("footerPreferencesBtn").addEventListener("click", () => {
+  togglePreferencesPopover();
 });
 
 $("aboutCloseBtn").addEventListener("click", () => {
   toggleAboutPopover(false);
 });
 
-$("mcpCloseBtn").addEventListener("click", () => {
-  toggleMcpPopover(false);
+$("preferencesCloseBtn").addEventListener("click", () => {
+  if (!togglePreferencesPopover(false)) {
+    // Has unsaved edits — surface save / discard buttons in the action area.
+  }
+});
+
+// Card settings (cert + proxy) wiring.
+document.querySelectorAll(".card-settings-btn").forEach((btn) => {
+  btn.addEventListener("click", (event) => {
+    event.stopPropagation();
+    toggleCardSettings(btn.dataset.cardSettings);
+  });
+});
+
+$("cardCertPushWaitSelect").addEventListener("change", () => {
+  if (preferencesUiSyncing) return;
+  vscode.postMessage({
+    command: "updatePreferences",
+    patch: { certPushWaitMinutes: Number($("cardCertPushWaitSelect").value) },
+  });
+});
+
+$("cardConnectionStrategySelect").addEventListener("change", () => {
+  if (preferencesUiSyncing) return;
+  vscode.postMessage({
+    command: "updatePreferences",
+    patch: { connectionStrategy: $("cardConnectionStrategySelect").value },
+  });
+  // Strategy is read once at proxy startup, so warn the user if a session is already running.
+  const hint = $("cardConnectionStrategyRestartHint");
+  if (hint) hint.hidden = !proxyRunning;
+});
+
+document.addEventListener("click", (event) => {
+  // Close card settings popovers when clicking outside.
+  const target = event.target;
+  if (!target.closest?.(".card-settings-popover") && !target.closest?.(".card-settings-btn")) {
+    closeAllCardSettingsPopovers();
+  }
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  let handled = false;
+  document.querySelectorAll(".card-settings-popover").forEach((popover) => {
+    if (!popover.hidden) {
+      handled = true;
+    }
+  });
+  if (handled) {
+    closeAllCardSettingsPopovers();
+    return;
+  }
+  if (preferencesPopoverOpen) {
+    if (refreshDirtyState()) {
+      // ESC won't discard — the user must click Save or Discard explicitly.
+      showPreferencesActionStatus(t("webview.prefs.action.unsavedHint"));
+    } else {
+      togglePreferencesPopover(false);
+    }
+  }
+});
+
+$("prefLanguageSelect").addEventListener("change", () => {
+  if (preferencesUiSyncing) return;
+  vscode.postMessage({ command: "updatePreferences", patch: { language: $("prefLanguageSelect").value } });
+});
+
+$("prefFontSizeSelect").addEventListener("change", () => {
+  if (preferencesUiSyncing) return;
+  vscode.postMessage({ command: "updatePreferences", patch: { fontSize: Number($("prefFontSizeSelect").value) } });
+});
+
+$("prefIpLocationEnabledToggle").addEventListener("change", () => {
+  if (preferencesUiSyncing) return;
+  vscode.postMessage({ command: "updatePreferences", patch: { ipLocationEnabled: $("prefIpLocationEnabledToggle").checked } });
+});
+
+// Dirty-mode inputs: only mark dirty, do not auto-save.
+for (const field of PREFS_DIRTY_FIELDS) {
+  const el = $(field.id);
+  if (!el) continue;
+  el.addEventListener("input", () => {
+    if (preferencesUiSyncing) return;
+    refreshDirtyState();
+  });
+}
+
+$("prefSaveBtn").addEventListener("click", () => {
+  if (!savePendingPreferenceEdits()) return;
+});
+
+$("prefDiscardBtn").addEventListener("click", () => {
+  discardDirtyEdits();
+  showPreferencesActionStatus("");
+});
+
+$("prefTestIpLocationBtn").addEventListener("click", () => {
+  showPreferencesActionStatus(t("webview.prefs.action.testing"), true);
+  vscode.postMessage({ command: "testIpLocationEndpoint" });
+});
+
+$("prefOpenSettingsBtn").addEventListener("click", () => {
+  vscode.postMessage({ command: "openSecmpSettings" });
 });
 
 $("envCheckUpdateBtn").addEventListener("click", () => {
@@ -3951,21 +4304,25 @@ $("envDownloadUpdateBtn").addEventListener("click", () => {
   vscode.postMessage({ command: "installEnvironmentUpdate" });
 });
 
-$("mcpCopyConfigBtn").addEventListener("click", () => {
-  showMcpActionStatus(t("webview.mcp.action.copyingConfig"), true);
-  vscode.postMessage({ command: "copyMcpClientConfig" });
-});
-
-$("mcpSaveBtn").addEventListener("click", () => {
-  showMcpActionStatus(t("webview.mcp.action.saving"), true);
+$("prefMcpEnabledToggle").addEventListener("change", () => {
+  if (preferencesUiSyncing) return;
   vscode.postMessage({
     command: "setMcpConfig",
-    enabled: $("mcpEnabledToggle").checked,
-    port: Number($("mcpPortInput").value),
-    redactByDefault: $("mcpRedactToggle").checked,
-    maxBodyBytes: Number($("mcpMaxBodyBytesInput").value),
-    stateFile: $("mcpStateFileInput").value,
+    enabled: $("prefMcpEnabledToggle").checked,
   });
+});
+
+$("prefMcpRedactToggle").addEventListener("change", () => {
+  if (preferencesUiSyncing) return;
+  vscode.postMessage({
+    command: "setMcpConfig",
+    redactByDefault: $("prefMcpRedactToggle").checked,
+  });
+});
+
+$("prefMcpCopyConfigBtn").addEventListener("click", () => {
+  showPreferencesActionStatus(t("webview.mcp.action.copyingConfig"), true);
+  vscode.postMessage({ command: "copyMcpClientConfig" });
 });
 
 $("envOpenReleaseBtn").addEventListener("click", () => {

@@ -50,7 +50,7 @@ Before creating a release:
 - Confirm runtime icon assets are current when building runtime packages: `media/secmp.ico` for Windows and `media/secmp.icns` for macOS.
 - Confirm `README.md`, `README.zh-CN.md`, `LICENSE`, `CHANGELOG.md`, `SECURITY.md`, `RELEASE_NOTES.md`, and runtime documentation are up to date.
 - Confirm local packaged runtime build and extension runtime install smoke tests pass for the target platform when the expected packaged runtime version changes or when the matching runtime release does not already exist.
-- Confirm GitHub Actions build, runtime smoke tests, and VSIX packaging pass.
+- Confirm GitHub Actions extension checks and VSIX packaging pass. Confirm runtime build and smoke-test jobs pass only when the expected packaged runtime version changes or runtime-related files changed.
 - Confirm the release job uses the `release` environment if manual approval is required.
 - Confirm release notes mention OS network access prompts and the rooted Android device requirement.
 
@@ -99,34 +99,37 @@ After the final code is on `master`, create and push a tag:
 ```powershell
 git checkout master
 git pull --ff-only
-git tag v0.3.4
-git push origin v0.3.4
+git tag v0.3.5
+git push origin v0.3.5
 ```
 
-The `Build Runtime Packages` workflow will:
+The `Build and Package SecMP` workflow starts with a detection job. It will:
 
-- resolve the runtime version from the expected packaged runtime version unless `runtime_version` is provided manually
-- build `secmp-runtime-win32-x64-<runtimeVersion>.zip`
-- build `secmp-runtime-darwin-arm64-<runtimeVersion>.zip`
-- generate `secmp-runtime-win32-x64-<runtimeVersion>.zip.sha256`
-- generate `secmp-runtime-darwin-arm64-<runtimeVersion>.zip.sha256`
-- run runtime and extension install smoke tests
+- resolve the extension version from `package.json`
+- resolve the runtime version from `extension.js` `DEFAULT_RUNTIME_VERSION` unless `runtime_version` is provided manually
+- run extension checks and package `secmp-<extensionVersion>.vsix`
+- skip Windows/macOS runtime build jobs when the release is a VSIX-only patch that reuses an older expected runtime version
+- build `secmp-runtime-win32-x64-<runtimeVersion>.zip` and `secmp-runtime-darwin-arm64-<runtimeVersion>.zip` only when runtime-related files changed, `DEFAULT_RUNTIME_VERSION` / `PACKAGED_RUNTIME_API_VERSION` changed, a tag release has `runtimeVersion == extensionVersion`, or manual `build_runtime=true` is set
+- run runtime and extension install smoke tests only when runtime packages are built
 - package `secmp-<extensionVersion>.vsix`
 - attach the VSIX to the GitHub Release
-- attach runtime zips and checksums only when `runtimeVersion` equals the extension version
+- attach runtime zips and checksums only when runtime packages are built for that release
 
 For a manual release run, trigger the workflow with:
 
 ```text
 publish=true
-runtime_version=0.3.4
-release_tag=v0.3.4
+build_runtime=false
+runtime_version=
+release_tag=v0.3.5
 ```
+
+Set `build_runtime=true` and provide or confirm `runtime_version` only when the release intentionally ships new packaged runtime assets.
 
 ## Release Notes Template
 
 ```markdown
-## SecMP 0.3.4
+## SecMP 0.3.5
 
 Patch release for a focused bug fix or feature stage.
 
@@ -149,9 +152,9 @@ Patch release for a focused bug fix or feature stage.
 
 ### Assets
 
-- `secmp-0.3.4.vsix`
+- `secmp-0.3.5.vsix`
 
-Runtime assets are included when the expected packaged runtime version matches the extension release version.
+Runtime assets are included only when this release intentionally builds a new packaged runtime. VSIX-only patch releases should mention the reused runtime release explicitly.
 ```
 
 Runtime assets are also required when the release would otherwise point at a runtime version that has no published GitHub Release. Runtime icon-only changes still produce new runtime binaries when they affect `media/secmp.ico` or `media/secmp.icns`; handle them as runtime package changes for release planning.

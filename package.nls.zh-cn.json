@@ -17,7 +17,6 @@
   "secmp.config.fontSize.comfortable": "舒适",
   "secmp.config.fontSize.large": "较大",
   "secmp.config.fontSize.maximum": "最大",
-  "secmp.config.openPanelAfterNewSession": "新建临时或持久 SecMP 会话后自动打开抓包面板。",
   "secmp.config.mcp.enabled": "启用本地 SecMP MCP bridge，供 Agent 读取和断言抓包流量。bridge 仅监听 127.0.0.1。",
   "secmp.config.mcp.port": "SecMP MCP bridge 使用的本地端口。默认 0，由操作系统选择空闲端口。",
   "secmp.config.mcp.stateFile": "MCP bridge 状态文件路径。留空时使用 ~/.secmp/mcp-bridge.json。",

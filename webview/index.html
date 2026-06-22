@@ -111,7 +111,30 @@
       </div>
 
       <div class="card">
-        <div class="card-title" data-i18n="webview.device.certManagement">证书管理</div>
+        <div class="card-title">
+          <span data-i18n="webview.device.certManagement">证书管理</span>
+          <button class="card-settings-btn" data-card-settings="cert" type="button" aria-haspopup="true" aria-expanded="false" title="证书设置" data-i18n-title="webview.cardSettings.cert">
+            <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M8 5.25a2.75 2.75 0 1 0 0 5.5 2.75 2.75 0 0 0 0-5.5Zm0 1.25a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3Z"/><path d="M9.16 1.5a1 1 0 0 1 .98.79l.27 1.26a5.5 5.5 0 0 1 .85.5l1.22-.43a1 1 0 0 1 1.18.46l1.16 2a1 1 0 0 1-.21 1.25l-.97.86c.04.3.06.6.06.81 0 .21-.02.5-.06.81l.97.86a1 1 0 0 1 .21 1.25l-1.16 2a1 1 0 0 1-1.18.46l-1.22-.43a5.5 5.5 0 0 1-.85.5l-.27 1.26a1 1 0 0 1-.98.79H6.84a1 1 0 0 1-.98-.79l-.27-1.26a5.5 5.5 0 0 1-.85-.5l-1.22.43a1 1 0 0 1-1.18-.46l-1.16-2a1 1 0 0 1 .21-1.25l.97-.86A6.5 6.5 0 0 1 2.3 8c0-.21.02-.5.06-.81l-.97-.86a1 1 0 0 1-.21-1.25l1.16-2a1 1 0 0 1 1.18-.46l1.22.43a5.5 5.5 0 0 1 .85-.5l.27-1.26a1 1 0 0 1 .98-.79h2.32Z" fill="none" stroke="currentColor" stroke-width="1.1"/></svg>
+          </button>
+        </div>
+        <div class="card-settings-popover" id="certSettingsPopover" hidden>
+          <div class="card-settings-row">
+            <label for="cardCertPushWaitSelect" data-i18n="webview.prefs.certPushWaitMinutes">证书推送等待</label>
+            <select id="cardCertPushWaitSelect">
+              <option value="0" data-i18n="webview.prefs.certPushWait.0">0（立即失败）</option>
+              <option value="1">1 min</option>
+              <option value="2">2 min</option>
+              <option value="3">3 min</option>
+              <option value="4">4 min</option>
+              <option value="5">5 min</option>
+              <option value="6">6 min</option>
+              <option value="7">7 min</option>
+              <option value="8">8 min</option>
+              <option value="9">9 min</option>
+              <option value="10">10 min</option>
+            </select>
+          </div>
+        </div>
         <button id="pushCertBtn" class="btn btn-block btn-sm" data-i18n="webview.device.pushCert">推送 CA 证书</button>
         <div class="setting-row compact">
           <span data-i18n="webview.device.autoPushCert">设备重连后自动预置</span>
@@ -125,7 +148,23 @@
       </div>
 
       <div class="card">
-        <div class="card-title" data-i18n="webview.device.proxySettings">代理设置</div>
+        <div class="card-title">
+          <span data-i18n="webview.device.proxySettings">代理设置</span>
+          <button class="card-settings-btn" data-card-settings="proxy" type="button" aria-haspopup="true" aria-expanded="false" title="代理设置" data-i18n-title="webview.cardSettings.proxy">
+            <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M8 5.25a2.75 2.75 0 1 0 0 5.5 2.75 2.75 0 0 0 0-5.5Zm0 1.25a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3Z"/><path d="M9.16 1.5a1 1 0 0 1 .98.79l.27 1.26a5.5 5.5 0 0 1 .85.5l1.22-.43a1 1 0 0 1 1.18.46l1.16 2a1 1 0 0 1-.21 1.25l-.97.86c.04.3.06.6.06.81 0 .21-.02.5-.06.81l.97.86a1 1 0 0 1 .21 1.25l-1.16 2a1 1 0 0 1-1.18.46l-1.22-.43a5.5 5.5 0 0 1-.85.5l-.27 1.26a1 1 0 0 1-.98.79H6.84a1 1 0 0 1-.98-.79l-.27-1.26a5.5 5.5 0 0 1-.85-.5l-1.22.43a1 1 0 0 1-1.18-.46l-1.16-2a1 1 0 0 1 .21-1.25l.97-.86A6.5 6.5 0 0 1 2.3 8c0-.21.02-.5.06-.81l-.97-.86a1 1 0 0 1-.21-1.25l1.16-2a1 1 0 0 1 1.18-.46l1.22.43a5.5 5.5 0 0 1 .85-.5l.27-1.26a1 1 0 0 1 .98-.79h2.32Z" fill="none" stroke="currentColor" stroke-width="1.1"/></svg>
+          </button>
+        </div>
+        <div class="card-settings-popover" id="proxySettingsPopover" hidden>
+          <div class="card-settings-row">
+            <label for="cardConnectionStrategySelect" data-i18n="webview.prefs.connectionStrategy">连接策略</label>
+            <select id="cardConnectionStrategySelect">
+              <option value="lazy" data-i18n="webview.prefs.connectionStrategy.lazy">Lazy（延迟连接）</option>
+              <option value="eager" data-i18n="webview.prefs.connectionStrategy.eager">Eager（立即连接）</option>
+            </select>
+          </div>
+          <div id="cardConnectionStrategyRestartHint" class="card-settings-restart-hint" hidden data-i18n="webview.prefs.connectionStrategy.restartHint">已保存，需重启代理后才会生效。</div>
+          <div class="card-settings-hint" data-i18n="webview.prefs.connectionStrategy.hint">Lazy 能更完整捕获握手失败的请求；Eager 与 mitmproxy 默认行为一致。</div>
+        </div>
         <div class="input-row">
           <label data-i18n="webview.device.port">端口</label>
           <input type="number" id="proxyPort" value="8080" min="1024" max="65535" />
@@ -310,60 +349,106 @@
   <footer id="footer">
     <span id="footerStatus" data-i18n="common.ready">就绪</span>
     <div class="footer-actions">
-      <button id="footerMcpBtn" class="footer-version" type="button" aria-expanded="false" title="MCP">MCP</button>
+      <button id="footerPreferencesBtn" class="footer-version" type="button" aria-expanded="false" title="偏好设置" data-i18n-title="webview.prefs.title" data-i18n="webview.prefs.title">偏好设置</button>
       <button id="footerVersionBtn" class="footer-version" type="button" aria-expanded="false">
         SecMP v<span id="footerVersion">__EXTENSION_VERSION__</span>
       </button>
     </div>
-    <div id="mcpPopover" class="about-popover mcp-popover" hidden>
+    <div id="preferencesPopover" class="about-popover preferences-popover" hidden>
       <div class="about-header">
         <div>
-          <div class="about-title" data-i18n="webview.mcp.title">MCP</div>
-          <div id="mcpSummary" class="about-summary" data-i18n="common.checking">Checking</div>
+          <div class="about-title" data-i18n="webview.prefs.title">偏好设置</div>
+          <div class="about-summary" data-i18n="webview.prefs.summary">常用设置即调即生效，无需打开 settings.json</div>
         </div>
-        <button id="mcpCloseBtn" class="collapse-btn" title="关闭" data-i18n-title="common.close">×</button>
+        <button id="preferencesCloseBtn" class="collapse-btn" title="关闭" data-i18n-title="common.close">×</button>
+      </div>
+      <div id="preferencesUnsavedBanner" class="prefs-banner" hidden>
+        <span data-i18n="webview.prefs.unsavedBanner">有未保存的修改</span>
       </div>
       <div class="about-body">
         <section class="about-section">
+          <div class="about-section-title" data-i18n="webview.prefs.appearance">外观</div>
           <div class="about-setting-row">
-            <label for="mcpEnabledToggle" data-i18n="webview.mcp.enabled">Enable MCP bridge</label>
-            <label class="switch">
-              <input type="checkbox" id="mcpEnabledToggle">
-              <span class="switch-track"></span>
-            </label>
+            <label for="prefLanguageSelect" data-i18n="webview.prefs.language">显示语言</label>
+            <select id="prefLanguageSelect">
+              <option value="auto" data-i18n="webview.prefs.language.auto">跟随 VS Code</option>
+              <option value="zh-CN" data-i18n="webview.prefs.language.zhCN">简体中文</option>
+              <option value="en-US" data-i18n="webview.prefs.language.enUS">English</option>
+            </select>
           </div>
           <div class="about-setting-row">
-            <label for="mcpRedactToggle" data-i18n="webview.mcp.redact">Redact by default</label>
-            <label class="switch">
-              <input type="checkbox" id="mcpRedactToggle">
-              <span class="switch-track"></span>
-            </label>
+            <label for="prefFontSizeSelect" data-i18n="webview.prefs.fontSize">字号</label>
+            <select id="prefFontSizeSelect">
+              <option value="12" data-i18n="webview.prefs.fontSize.12">12 紧凑</option>
+              <option value="13" data-i18n="webview.prefs.fontSize.13">13 默认</option>
+              <option value="14" data-i18n="webview.prefs.fontSize.14">14 舒适</option>
+              <option value="15" data-i18n="webview.prefs.fontSize.15">15 较大</option>
+              <option value="16" data-i18n="webview.prefs.fontSize.16">16 最大</option>
+            </select>
           </div>
-          <label class="mcp-field">
-            <span data-i18n="webview.mcp.port">Port</span>
-            <input id="mcpPortInput" type="number" min="0" max="65535" step="1">
-          </label>
-          <label class="mcp-field">
-            <span data-i18n="webview.mcp.maxBodyBytes">Max body bytes</span>
-            <input id="mcpMaxBodyBytesInput" type="number" min="0" max="2097152" step="1024">
-          </label>
-          <label class="mcp-field">
-            <span data-i18n="webview.mcp.stateFile">State file</span>
-            <input id="mcpStateFileInput" type="text">
-          </label>
         </section>
         <section class="about-section">
-          <dl class="about-dl">
-            <dt data-i18n="webview.mcp.status">Status</dt><dd id="mcpStatusText">-</dd>
-            <dt data-i18n="webview.mcp.activePort">Active port</dt><dd id="mcpActivePort">-</dd>
-            <dt data-i18n="webview.mcp.configuredPort">Configured port</dt><dd id="mcpConfiguredPort">-</dd>
-          </dl>
+          <div class="about-section-title" data-i18n="webview.prefs.ipLocation">IP 归属地</div>
+          <div class="about-setting-row">
+            <label for="prefIpLocationEnabledToggle" data-i18n="webview.prefs.ipLocation.enabled">启用 IP 归属地查询</label>
+            <label class="switch">
+              <input type="checkbox" id="prefIpLocationEnabledToggle">
+              <span class="switch-track"></span>
+            </label>
+          </div>
+          <label class="mcp-field">
+            <span data-i18n="webview.prefs.ipLocation.endpoint">接口地址</span>
+            <input id="prefIpLocationEndpointInput" type="text" data-pref-dirty="true" placeholder="https://example.com/ip-location">
+          </label>
+          <div class="section-inline-actions">
+            <button id="prefTestIpLocationBtn" class="btn btn-sm" data-i18n="webview.prefs.testIpLocation">检测 IP 接口</button>
+          </div>
+          <div class="about-section-hint" data-i18n="webview.prefs.ipLocation.hint">保存接口地址后点击右侧“检测 IP 接口”验证返回值。</div>
         </section>
-        <div id="mcpActionStatus" class="about-action-status" hidden></div>
+        <section class="about-section">
+          <div class="about-section-title" data-i18n="webview.prefs.mcp">MCP Bridge</div>
+          <div class="about-setting-row">
+            <label for="prefMcpEnabledToggle" data-i18n="webview.mcp.enabled">启用 MCP bridge</label>
+            <label class="switch">
+              <input type="checkbox" id="prefMcpEnabledToggle">
+              <span class="switch-track"></span>
+            </label>
+          </div>
+          <div class="about-setting-row">
+            <label for="prefMcpRedactToggle" data-i18n="webview.mcp.redact">默认脱敏</label>
+            <label class="switch">
+              <input type="checkbox" id="prefMcpRedactToggle">
+              <span class="switch-track"></span>
+            </label>
+          </div>
+          <label class="mcp-field">
+            <span data-i18n="webview.mcp.port">端口</span>
+            <input id="prefMcpPortInput" type="number" min="0" max="65535" step="1" data-pref-dirty="true">
+          </label>
+          <label class="mcp-field">
+            <span data-i18n="webview.mcp.maxBodyBytes">最大 Body 字节数</span>
+            <input id="prefMcpMaxBodyBytesInput" type="number" min="0" max="2097152" step="1024" data-pref-dirty="true">
+          </label>
+          <label class="mcp-field">
+            <span data-i18n="webview.mcp.stateFile">状态文件</span>
+            <input id="prefMcpStateFileInput" type="text" data-pref-dirty="true">
+          </label>
+          <dl class="about-dl">
+            <dt data-i18n="webview.mcp.status">状态</dt><dd id="prefMcpStatusText">-</dd>
+            <dt data-i18n="webview.mcp.activePort">实际端口</dt><dd id="prefMcpActivePort">-</dd>
+            <dt data-i18n="webview.mcp.configuredPort">配置端口</dt><dd id="prefMcpConfiguredPort">-</dd>
+          </dl>
+          <div class="section-inline-actions">
+            <button id="prefMcpCopyConfigBtn" class="btn btn-sm" data-i18n="webview.mcp.copyConfig">复制 Client 配置</button>
+          </div>
+          <div class="about-section-hint" data-i18n="webview.prefs.mcp.hint">输入框需点击下方“保存修改”后生效；开关与脱敏即时保存。</div>
+        </section>
+        <div id="preferencesActionStatus" class="about-action-status" hidden></div>
       </div>
       <div class="about-actions">
-        <button id="mcpSaveBtn" class="btn btn-sm btn-primary" data-i18n="webview.mcp.save">Save MCP Settings</button>
-        <button id="mcpCopyConfigBtn" class="btn btn-sm" data-i18n="webview.mcp.copyConfig">Copy Client Config</button>
+        <button id="prefSaveBtn" class="btn btn-sm btn-primary" disabled data-i18n="webview.prefs.save">保存修改</button>
+        <button id="prefDiscardBtn" class="btn btn-sm btn-outline" disabled data-i18n="webview.prefs.discard">丢弃修改</button>
+        <button id="prefOpenSettingsBtn" class="btn btn-sm btn-outline" data-i18n="webview.prefs.openSettings">打开完整设置</button>
       </div>
     </div>
     <div id="aboutPopover" class="about-popover" hidden>
