@@ -6,6 +6,19 @@ All notable changes to SecMP are documented in this file.
 
 暂无。
 
+## 0.3.6 - 2026-06-23
+
+### MCP 稳定性
+
+- 修复 MCP Client 配置引用 VS Code 扩展安装目录的问题；SecMP 现在会将内置 MCP server 同步到 `~/.secmp/mcp/secmp-mcp-server.js`，复制出的配置引用该稳定路径，避免 VSIX 升级后扩展目录变化导致 Agent 配置失效。
+- MCP bridge 在 `secmp_status`、`secmp_list_flows` 和 `secmp_stats` 返回空结果时，会检测当前 packaged runtime 下是否存在其他 Extension Host 遗留的 `proxy_engine`，并通过 `staleProxyDetected` 与诊断字段暴露 PID、父 PID、代理端口和 web-port，避免“抓包实际运行但 MCP 静默返回空状态”。
+- MCP 启动和配置变更时会清理当前 packaged runtime 下、父进程不属于当前 Extension Host 的 stale proxy 进程；停止代理和扩展退出也统一使用进程树终止逻辑，降低窗口重载后旧 Extension Host 残留造成的状态错配。
+- 更新 MCP 文档，说明稳定 MCP server 路径和 `staleProxyDetected` 排查方式。
+
+### 发布与 runtime
+
+- 发布 `0.3.6` VSIX，packaged runtime 继续复用 `0.3.4`；未修改 runtime 代码、依赖、图标、包布局或 extension↔runtime 协议，`runtimeApiVersion` 继续保持兼容的 `1`。
+
 ## 0.3.5 - 2026-06-22
 
 ### 正文可靠性

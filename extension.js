@@ -104,6 +104,7 @@ const MCP_MAX_BODY_BYTES = 2 * 1024 * 1024;
 const MCP_DEFAULT_WAIT_TIMEOUT_MS = 10000;
 const MCP_MAX_WAIT_TIMEOUT_MS = 60000;
 const MCP_BODY_SNIPPET_CHARS = 240;
+const MCP_STALE_PROXY_COMMAND_PREVIEW_CHARS = 500;
 const ANDROID_SYSTEM_CACERTS_DIR = "/system/etc/security/cacerts";
 const ANDROID_APEX_CONSCRYPT_CACERTS_DIR = "/apex/com.android.conscrypt/cacerts";
 const ANDROID_CERT_WORK_DIR = "/data/local/tmp/";
@@ -1599,6 +1600,198 @@ async function getCertManagerCommand() {
   return {
     command: getPythonCmd(),
     args: [path.join(TOOLS_DIR, "cert_manager.py")],
+  };
+}
+
+function normalizeProcessPathText(value) {
+  const text = String(value || "");
+  return process.platform === "win32"
+    ? text.replace(/\//g, "\\").toLowerCase()
+    : text;
+}
+
+function truncateProcessCommandLine(commandLine) {
+  const text = String(commandLine || "");
+  if (text.length <= MCP_STALE_PROXY_COMMAND_PREVIEW_CHARS) {
+    return text;
+  }
+  return `${text.slice(0, MCP_STALE_PROXY_COMMAND_PREVIEW_CHARS)}...`;
+}
+
+function getPackagedProxyEntrypointForDetection() {
+  if (!isPackagedRuntimePlatform()) {
+    return null;
+  }
+  const runtimeDir = getActivePackagedRuntimeDir();
+  if (!isPackagedRuntimeReady(runtimeDir)) {
+    return null;
+  }
+  return getPackagedRuntimeEntrypoint("proxyEngine", runtimeDir);
+}
+
+function parseProxyProcessCommandLine(commandLine) {
+  const text = String(commandLine || "");
+  const webPortMatch = text.match(/(?:^|\s)--web-port\s+(\d+)/);
+  const proxyPortMatch = text.match(/(?:^|\s)--port\s+(\d+)/);
+  const hostMatch = text.match(/(?:^|\s)--host\s+("[^"]+"|'[^']+'|\S+)/);
+  return {
+    webPort: webPortMatch ? Number(webPortMatch[1]) : 0,
+    proxyPort: proxyPortMatch ? Number(proxyPortMatch[1]) : 0,
+    host: hostMatch ? hostMatch[1].replace(/^["']|["']$/g, "") : "",
+  };
+}
+
+function normalizeProcessInfo(raw) {
+  const pid = Number(raw?.ProcessId ?? raw?.pid);
+  const parentPid = Number(raw?.ParentProcessId ?? raw?.parentPid);
+  const commandLine = String(raw?.CommandLine ?? raw?.commandLine ?? "");
+  return {
+    pid,
+    parentPid,
+    commandLine,
+    ...parseProxyProcessCommandLine(commandLine),
+  };
+}
+
+function parsePsProxyProcesses(stdout) {
+  const processes = [];
+  for (const line of String(stdout || "").split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const match = trimmed.match(/^(\d+)\s+(\d+)\s+(.+)$/);
+    if (!match) continue;
+    const commandLine = match[3];
+    if (!/proxy_engine(?:\.py)?(?:\s|$)/.test(commandLine)) continue;
+    processes.push(normalizeProcessInfo({
+      pid: Number(match[1]),
+      parentPid: Number(match[2]),
+      commandLine,
+    }));
+  }
+  return processes;
+}
+
+async function listProxyEngineProcesses() {
+  if (process.platform === "win32") {
+    const command = [
+      "$items = @(Get-CimInstance Win32_Process -Filter \"Name = 'proxy_engine.exe'\" |",
+      "Select-Object ProcessId,ParentProcessId,CommandLine);",
+      "if ($items.Count -gt 0) { $items | ConvertTo-Json -Compress }",
+    ].join(" ");
+    const result = await runProcess("powershell.exe", [
+      "-NoProfile",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-Command",
+      command,
+    ]);
+    const text = result.stdout.trim();
+    if (!text) return [];
+    const parsed = JSON.parse(text);
+    return (Array.isArray(parsed) ? parsed : [parsed]).map(normalizeProcessInfo);
+  }
+
+  if (process.platform === "darwin") {
+    const result = await runProcess("ps", ["-axo", "pid=,ppid=,command="]);
+    return parsePsProxyProcesses(result.stdout);
+  }
+
+  return [];
+}
+
+function processMatchesPackagedProxyEntrypoint(proc, entrypoint) {
+  if (!entrypoint || !proc?.commandLine) {
+    return false;
+  }
+  return normalizeProcessPathText(proc.commandLine).includes(normalizeProcessPathText(entrypoint));
+}
+
+async function findStalePackagedProxyProcesses() {
+  const entrypoint = getPackagedProxyEntrypointForDetection();
+  if (!entrypoint) {
+    return [];
+  }
+  const currentProxyPid = proxyProcess?.pid ? Number(proxyProcess.pid) : 0;
+  const processes = await listProxyEngineProcesses();
+  return processes
+    .filter((proc) => Number.isFinite(proc.pid) && proc.pid > 0)
+    .filter((proc) => proc.pid !== currentProxyPid)
+    .filter((proc) => proc.parentPid !== process.pid)
+    .filter((proc) => processMatchesPackagedProxyEntrypoint(proc, entrypoint));
+}
+
+async function terminateProcessTree(pid, reason) {
+  const targetPid = Number(pid);
+  if (!Number.isInteger(targetPid) || targetPid <= 0) {
+    return;
+  }
+  log(`[mcp] terminating stale proxy process ${targetPid}${reason ? ` (${reason})` : ""}`);
+  if (process.platform === "win32") {
+    await runProcess("taskkill", ["/pid", String(targetPid), "/f", "/t"]);
+  } else {
+    try {
+      process.kill(targetPid, "SIGTERM");
+    } catch (err) {
+      if (err.code !== "ESRCH") throw err;
+    }
+  }
+}
+
+async function cleanupStalePackagedProxyProcesses(reason = "startup") {
+  if (!getMcpConfig().enabled || proxyProcess) {
+    return [];
+  }
+  const staleProcesses = await findStalePackagedProxyProcesses();
+  for (const proc of staleProcesses) {
+    try {
+      await terminateProcessTree(proc.pid, reason);
+    } catch (err) {
+      log(`[mcp] failed to terminate stale proxy process ${proc.pid}: ${err.message}`);
+    }
+  }
+  if (staleProcesses.length > 0) {
+    log(`[mcp] cleaned ${staleProcesses.length} stale proxy process(es)`);
+  }
+  return staleProcesses;
+}
+
+async function getMcpStaleProxyDiagnostics() {
+  if (proxyProcess || capturedFlows.length > 0) {
+    return {
+      staleProxyDetected: false,
+      extensionHostPid: process.pid,
+      staleProxyCount: 0,
+      staleProxies: [],
+      warning: "",
+    };
+  }
+  let staleProcesses = [];
+  try {
+    staleProcesses = await findStalePackagedProxyProcesses();
+  } catch (err) {
+    return {
+      staleProxyDetected: false,
+      extensionHostPid: process.pid,
+      staleProxyCount: 0,
+      staleProxies: [],
+      warning: `Failed to inspect local proxy processes: ${err.message}`,
+    };
+  }
+  return {
+    staleProxyDetected: staleProcesses.length > 0,
+    extensionHostPid: process.pid,
+    staleProxyCount: staleProcesses.length,
+    staleProxies: staleProcesses.map((proc) => ({
+      pid: proc.pid,
+      parentPid: proc.parentPid,
+      host: proc.host,
+      proxyPort: proc.proxyPort,
+      webPort: proc.webPort,
+      commandLine: truncateProcessCommandLine(proc.commandLine),
+    })),
+    warning: staleProcesses.length > 0
+      ? "A SecMP proxy process is running outside this Extension Host, so this MCP bridge cannot read its in-memory capture state. Restart the proxy from the current SecMP window."
+      : "",
   };
 }
 
@@ -4389,11 +4582,8 @@ async function stopProxyEngine(options = {}) {
       resolve({ success: true, message: t("extension.proxy.stopped") });
     });
 
-    if (process.platform === "win32") {
-      spawn("taskkill", ["/pid", String(stoppingProcess.pid), "/f", "/t"]);
-    } else {
-      stoppingProcess.kill("SIGTERM");
-    }
+    terminateProcessTree(stoppingProcess.pid, "proxyStop")
+      .catch((err) => log(`Failed to terminate proxy process ${stoppingProcess.pid}: ${err.message}`));
 
     setTimeout(() => {
       if (proxyProcess === stoppingProcess) {
@@ -5632,8 +5822,43 @@ function getDefaultMcpStateFilePath() {
   return path.join(os.homedir(), ".secmp", "mcp-bridge.json");
 }
 
-function getMcpServerScriptPath() {
+function getBundledMcpServerScriptPath() {
   return path.join(__dirname, "mcp", "secmp-mcp-server.js");
+}
+
+function getStableMcpServerScriptPath() {
+  return path.join(os.homedir(), ".secmp", "mcp", "secmp-mcp-server.js");
+}
+
+function syncStableMcpServerScript() {
+  const sourcePath = getBundledMcpServerScriptPath();
+  const targetPath = getStableMcpServerScriptPath();
+  const source = fs.readFileSync(sourcePath);
+  try {
+    if (fs.existsSync(targetPath) && fs.readFileSync(targetPath).equals(source)) {
+      return targetPath;
+    }
+  } catch (_) {}
+
+  fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+  const tempPath = path.join(
+    path.dirname(targetPath),
+    `.secmp-mcp-server.${process.pid}.${Date.now()}.tmp`
+  );
+  try {
+    fs.writeFileSync(tempPath, source, { mode: 0o755 });
+    fs.renameSync(tempPath, targetPath);
+    try {
+      fs.chmodSync(targetPath, 0o755);
+    } catch (_) {}
+  } catch (err) {
+    try {
+      if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
+    } catch (_) {}
+    throw err;
+  }
+  log(`[mcp] stable MCP server synced to ${targetPath}`);
+  return targetPath;
 }
 
 function hasCustomMcpStateFile() {
@@ -5642,7 +5867,7 @@ function hasCustomMcpStateFile() {
 }
 
 function buildMcpClientConfig() {
-  const args = [getMcpServerScriptPath()];
+  const args = [syncStableMcpServerScript()];
   const config = getMcpConfig();
   if (hasCustomMcpStateFile()) {
     args.push("--state-file", config.stateFile);
@@ -6097,6 +6322,7 @@ function buildMcpHints(flow, options = {}) {
 async function mcpStatus() {
   const ipLocationConfig = getIpLocationConfig();
   const stats = buildMcpStats(capturedFlows, 5);
+  const diagnostics = await getMcpStaleProxyDiagnostics();
   return {
     proxyRunning: !!proxyProcess,
     proxyPort: activeProxyPort || 0,
@@ -6127,6 +6353,8 @@ async function mcpStatus() {
       configured: !!(ipLocationConfig.enabled && ipLocationConfig.endpoint),
       endpointConfigured: !!ipLocationConfig.endpoint,
     },
+    staleProxyDetected: diagnostics.staleProxyDetected,
+    diagnostics,
     mcp: getMcpEnvironmentInfo(),
   };
 }
@@ -6138,7 +6366,7 @@ async function mcpListFlows(filter = {}) {
   const order = String(filter.order || "desc").toLowerCase() === "asc" ? "asc" : "desc";
   const ordered = order === "asc" ? matchedFlows : matchedFlows.slice().reverse();
   const flows = ordered.slice(offset, offset + limit).map(getMcpFlowSummary);
-  return {
+  const result = {
     total: capturedFlows.length,
     matched: matchedFlows.length,
     offset,
@@ -6148,6 +6376,12 @@ async function mcpListFlows(filter = {}) {
     hasMore: offset + flows.length < matchedFlows.length,
     flows,
   };
+  const diagnostics = await getMcpStaleProxyDiagnostics();
+  if (diagnostics.staleProxyDetected || diagnostics.warning) {
+    result.staleProxyDetected = diagnostics.staleProxyDetected;
+    result.diagnostics = diagnostics;
+  }
+  return result;
 }
 
 async function mcpGetFlow(id, options = {}) {
@@ -6255,11 +6489,17 @@ async function mcpListHosts(options = {}) {
 async function mcpStats(options = {}) {
   const top = clampNumber(options.top, 1, 50, 10);
   const flows = findMcpFlows({ sinceMs: options.sinceMs });
-  return {
+  const result = {
     totalFlows: capturedFlows.length,
     matchedFlows: flows.length,
     ...buildMcpStats(flows, top),
   };
+  const diagnostics = await getMcpStaleProxyDiagnostics();
+  if (diagnostics.staleProxyDetected || diagnostics.warning) {
+    result.staleProxyDetected = diagnostics.staleProxyDetected;
+    result.diagnostics = diagnostics;
+  }
+  return result;
 }
 
 async function mcpWaitForFlow(filter = {}) {
@@ -7253,6 +7493,13 @@ function activate(context) {
   initializeRuntimeStorage(context);
   runtimeConfigMigrationPromise = migrateRuntimeConfiguration(context)
     .catch((err) => log(`Runtime configuration migration failed: ${err.message}`));
+  try {
+    syncStableMcpServerScript();
+  } catch (err) {
+    log(`[mcp] failed to sync stable MCP server: ${err.message}`);
+  }
+  const startupProxyCleanupPromise = cleanupStalePackagedProxyProcesses("activation")
+    .catch((err) => log(`[mcp] stale proxy cleanup failed: ${err.message}`));
   checkForExtensionUpdate(context, { manual: false });
   sidebarProvider = new SecmpSidebarProvider();
   const sidebarView = vscode.window.createTreeView("secmp.sidebar", {
@@ -7440,6 +7687,7 @@ function activate(context) {
           await mcpBridge.stop();
           mcpBridge = null;
         }
+        await cleanupStalePackagedProxyProcesses("mcpConfigurationChanged");
         await syncMcpBridge();
       })().catch((err) => log(`[mcp] failed to apply configuration: ${err.message}`));
     }
@@ -7472,7 +7720,9 @@ function activate(context) {
   if (isAutoPushCertEnabled()) {
     startAdbMonitor();
   }
-  syncMcpBridge().catch((err) => log(`[mcp] failed to start bridge: ${err.message}`));
+  startupProxyCleanupPromise
+    .then(() => syncMcpBridge())
+    .catch((err) => log(`[mcp] failed to start bridge: ${err.message}`));
   checkInterruptedSession();
 }
 
@@ -7496,13 +7746,9 @@ async function deactivate() {
     log(`Failed to close SecMP session file during deactivate: ${err.message}`);
   }
   if (proxyProcess) {
-    try {
-      if (process.platform === "win32") {
-        spawn("taskkill", ["/pid", String(proxyProcess.pid), "/f", "/t"]);
-      } else {
-        proxyProcess.kill();
-      }
-    } catch (_) {}
+    const pid = proxyProcess.pid;
+    terminateProcessTree(pid, "extensionDeactivate")
+      .catch((err) => log(`Failed to terminate proxy process ${pid}: ${err.message}`));
     proxyProcess = null;
   }
 }

@@ -99,8 +99,8 @@ After the final code is on `master`, create and push a tag:
 ```powershell
 git checkout master
 git pull --ff-only
-git tag v0.3.5
-git push origin v0.3.5
+git tag v0.3.6
+git push origin v0.3.6
 ```
 
 The `Build and Package SecMP` workflow starts with a detection job. It will:
@@ -121,7 +121,7 @@ For a manual release run, trigger the workflow with:
 publish=true
 build_runtime=false
 runtime_version=
-release_tag=v0.3.5
+release_tag=v0.3.6
 ```
 
 Set `build_runtime=true` and provide or confirm `runtime_version` only when the release intentionally ships new packaged runtime assets.
@@ -129,7 +129,7 @@ Set `build_runtime=true` and provide or confirm `runtime_version` only when the 
 ## Release Notes Template
 
 ```markdown
-## SecMP 0.3.5
+## SecMP 0.3.6
 
 Patch release for a focused bug fix or feature stage.
 
@@ -152,7 +152,7 @@ Patch release for a focused bug fix or feature stage.
 
 ### Assets
 
-- `secmp-0.3.5.vsix`
+- `secmp-0.3.6.vsix`
 
 Runtime assets are included only when this release intentionally builds a new packaged runtime. VSIX-only patch releases should mention the reused runtime release explicitly.
 ```
