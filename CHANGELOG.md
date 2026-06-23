@@ -6,6 +6,22 @@ All notable changes to SecMP are documented in this file.
 
 暂无。
 
+## 0.3.7 - 2026-06-24
+
+### MCP 多会话
+
+- MCP 不再在每个 VS Code / VSCodium 窗口激活时自动启动 bridge；只有创建或打开 SecMP 会话的窗口才会注册 MCP bridge，空窗口不会覆盖已有抓包窗口的 MCP 状态。
+- 将 MCP 单状态文件改为多会话 registry：每个打开的 SecMP 会话写入独立 `~/.secmp/mcp/bridges/<bridgeId>.json` entry，MCP server 作为 router 扫描 registry 并按 `sessionId` / `bridgeId` 路由到对应窗口。
+- 新增 `secmp_list_sessions` tool，用于列出当前本机所有已注册 SecMP 会话、代理状态、flow 数量和 bridge 信息。
+- 所有查询、搜索、等待、断言和证据导出 MCP tools 支持 `sessionId` / `bridgeId` 参数；当本机存在多个会话且未指定目标时，MCP server 返回 ambiguity 错误，避免默认选择最近会话导致误查。
+- 移除 `secmp.mcp.stateFile` 配置和 Webview 状态文件输入；旧配置会在启动迁移中清理。
+- 移除 0.3.6 中基于“其他 Extension Host proxy 即 stale”的自动清理和诊断，避免多窗口正常抓包时误杀其他窗口的 proxy。
+- 更新 MCP 文档，说明 registry、session 选择规则和多窗口使用方式。
+
+### 发布与 runtime
+
+- 将 VSIX 版本更新为 `0.3.7`；packaged runtime 继续复用 `0.3.4`，`runtimeApiVersion` 继续保持兼容的 `1`。
+
 ## 0.3.6 - 2026-06-23
 
 ### MCP 稳定性

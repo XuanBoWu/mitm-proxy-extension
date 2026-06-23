@@ -85,17 +85,6 @@ const PREFS_DIRTY_FIELDS = [
     read: (snap) => Number(snap.mcp?.maxBodyBytes ?? 65536),
     apply: (el, value) => { el.value = String(value); },
   },
-  {
-    id: "prefMcpStateFileInput",
-    key: "stateFile",
-    source: "mcp",
-    parse: (el) => String(el.value || ""),
-    read: (snap) => snap.mcp?.stateFileConfigured ? (snap.mcp.stateFile || "") : "",
-    apply: (el, value, snap) => {
-      el.value = value || "";
-      el.placeholder = snap.mcp?.stateFile || "";
-    },
-  },
 ];
 const EXTENSION_VERSION = window.__SECMP_EXTENSION_VERSION__ || document.getElementById("footerVersion")?.textContent?.trim() || "-";
 

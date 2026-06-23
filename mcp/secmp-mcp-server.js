@@ -4,14 +4,25 @@ const http = require("http");
 const os = require("os");
 const path = require("path");
 
-const DEFAULT_STATE_FILE = path.join(os.homedir(), ".secmp", "mcp-bridge.json");
+const DEFAULT_REGISTRY_DIR = path.join(os.homedir(), ".secmp", "mcp", "bridges");
 const PROTOCOL_VERSION = "2024-11-05";
+const BRIDGE_HEALTH_TIMEOUT_MS = 1500;
+
+const sessionSelectorProperties = {
+  sessionId: { type: "string", description: "SecMP session id. Use secmp_list_sessions when multiple sessions are active." },
+  bridgeId: { type: "string", description: "SecMP bridge id. Use secmp_list_sessions when multiple sessions are active." },
+};
 
 const tools = [
   {
+    name: "secmp_list_sessions",
+    description: "List active SecMP sessions registered by all open VS Code / VSCodium windows. Use this first when multiple SecMP sessions may be open.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  },
+  {
     name: "secmp_status",
     description: "Get SecMP proxy, MCP bridge, device, session, capture status, IP-location configuration, and a small flow summary.",
-    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    inputSchema: { type: "object", properties: sessionSelectorProperties, additionalProperties: false },
   },
   {
     name: "secmp_stats",
@@ -19,6 +30,7 @@ const tools = [
     inputSchema: {
       type: "object",
       properties: {
+        ...sessionSelectorProperties,
         sinceMs: { type: "number", description: "Only include flows started within the last N milliseconds." },
         top: { type: "number", description: "Number of top values to return for each category (default 10, max 50)." },
       },
@@ -31,6 +43,7 @@ const tools = [
     inputSchema: {
       type: "object",
       properties: {
+        ...sessionSelectorProperties,
         hostContains: { type: "string", description: "Substring filter for host names." },
         sinceMs: { type: "number", description: "Only include flows started within the last N milliseconds." },
         sortBy: { type: "string", enum: ["count", "name"], description: "Sort by count or host name (default count)." },
@@ -45,6 +58,7 @@ const tools = [
     inputSchema: {
       type: "object",
       properties: {
+        ...sessionSelectorProperties,
         host: { type: "string", description: "Exact host match." },
         hostContains: { type: "string", description: "Substring match on host." },
         method: { type: "string", description: "HTTP method, case-insensitive." },
@@ -69,6 +83,7 @@ const tools = [
       required: ["id"],
       properties: {
         id: { type: "string", description: "Flow id returned by secmp_list_flows, secmp_search_flows, or secmp_wait_for_flow." },
+        ...sessionSelectorProperties,
         includeRequestBody: { type: "boolean", description: "Include request body if available. Default false." },
         includeResponseBody: { type: "boolean", description: "Include response body if available. Default false." },
         maxBodyBytes: { type: "number", description: "Maximum body bytes to return per side. Defaults to secmp.mcp.maxBodyBytes." },
@@ -85,6 +100,7 @@ const tools = [
       required: ["term"],
       properties: {
         term: { type: "string", description: "Text or regular expression to search for." },
+        ...sessionSelectorProperties,
         scopes: {
           type: "array",
           items: { enum: ["url", "requestHeaders", "requestBody", "responseHeaders", "responseBody"] },
@@ -104,6 +120,7 @@ const tools = [
     inputSchema: {
       type: "object",
       properties: {
+        ...sessionSelectorProperties,
         host: { type: "string", description: "Exact host match." },
         hostContains: { type: "string", description: "Substring match on host." },
         method: { type: "string", description: "HTTP method, case-insensitive." },
@@ -124,6 +141,7 @@ const tools = [
       required: ["assertions"],
       properties: {
         match: { type: "object" },
+        ...sessionSelectorProperties,
         assertions: {
           type: "array",
           items: {
@@ -156,6 +174,7 @@ const tools = [
     inputSchema: {
       type: "object",
       properties: {
+        ...sessionSelectorProperties,
         flowIds: { type: "array", items: { type: "string" } },
         includeBodies: { type: "boolean" },
         maxBodyBytes: { type: "number" },
@@ -170,27 +189,171 @@ function parseArgs(argv) {
   const out = {};
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
-    if (arg === "--state-file") out.stateFile = argv[++i];
+    if (arg === "--registry-dir") out.registryDir = argv[++i];
     else if (arg === "--bridge-url") out.bridgeUrl = argv[++i];
     else if (arg === "--token") out.token = argv[++i];
   }
   return out;
 }
 
-function loadBridgeConfig() {
+function getRegistryDir() {
   const args = parseArgs(process.argv.slice(2));
-  const stateFile = args.stateFile || process.env.SECMP_MCP_STATE_FILE || DEFAULT_STATE_FILE;
-  let state = {};
-  if (fs.existsSync(stateFile)) {
-    try {
-      state = JSON.parse(fs.readFileSync(stateFile, "utf8"));
-    } catch (_) {}
+  return args.registryDir || process.env.SECMP_MCP_REGISTRY_DIR || DEFAULT_REGISTRY_DIR;
+}
+
+function getDirectBridgeConfig() {
+  const args = parseArgs(process.argv.slice(2));
+  const url = args.bridgeUrl || process.env.SECMP_MCP_BRIDGE_URL || "";
+  const token = args.token || process.env.SECMP_MCP_TOKEN || "";
+  return url ? { bridgeId: "direct", url, token, direct: true } : null;
+}
+
+function readJsonFile(filePath) {
+  try {
+    return JSON.parse(fs.readFileSync(filePath, "utf8"));
+  } catch (_) {
+    return null;
   }
+}
+
+function bridgeSessionLabel(entry) {
+  return entry?.session?.name || entry?.session?.filePath || entry?.session?.id || entry?.bridgeId || "(unnamed)";
+}
+
+function publicSession(entry) {
   return {
-    url: args.bridgeUrl || process.env.SECMP_MCP_BRIDGE_URL || state.url || "",
-    token: args.token || process.env.SECMP_MCP_TOKEN || state.token || "",
-    stateFile,
+    bridgeId: entry.bridgeId || "",
+    sessionId: entry.session?.id || "",
+    name: entry.session?.name || "",
+    temporary: !!entry.session?.temporary,
+    filePath: entry.session?.filePath || "",
+    workspace: entry.workspace || "",
+    proxy: entry.proxy || {},
+    capture: entry.capture || {},
+    device: entry.device || {},
+    pid: entry.pid || entry.extensionHostPid || 0,
+    extensionVersion: entry.extensionVersion || "",
+    heartbeatAt: entry.heartbeatAt || "",
+    updatedAt: entry.updatedAt || "",
+    lastActiveAt: entry.lastActiveAt || entry.updatedAt || "",
   };
+}
+
+function stripSessionSelector(args = {}) {
+  const { sessionId, bridgeId, ...rest } = args || {};
+  return rest;
+}
+
+function requestJson(url, options = {}) {
+  const payload = options.body == null ? null : Buffer.from(JSON.stringify(options.body), "utf8");
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(url);
+    const req = http.request({
+      hostname: parsed.hostname,
+      port: parsed.port,
+      method: options.method || "GET",
+      path: `${parsed.pathname}${parsed.search}`,
+      timeout: options.timeout || 30000,
+      headers: {
+        ...(options.token ? { authorization: `Bearer ${options.token}` } : {}),
+        ...(payload ? { "content-type": "application/json", "content-length": payload.length } : {}),
+      },
+    }, (res) => {
+      const chunks = [];
+      res.on("data", (chunk) => chunks.push(chunk));
+      res.on("end", () => {
+        const text = Buffer.concat(chunks).toString("utf8");
+        let parsedBody = {};
+        try {
+          parsedBody = text ? JSON.parse(text) : {};
+        } catch (err) {
+          reject(new Error(`Invalid bridge response JSON: ${err.message}`));
+          return;
+        }
+        if (res.statusCode >= 400 || parsedBody.error) {
+          reject(new Error(parsedBody.error?.message || `SecMP bridge returned HTTP ${res.statusCode}`));
+          return;
+        }
+        resolve(parsedBody);
+      });
+    });
+    req.on("timeout", () => req.destroy(new Error("SecMP bridge request timed out")));
+    req.on("error", reject);
+    if (payload) req.write(payload);
+    req.end();
+  });
+}
+
+async function bridgeIsLive(entry) {
+  if (!entry?.url) return false;
+  try {
+    await requestJson(new URL("/health", entry.url).toString(), { timeout: BRIDGE_HEALTH_TIMEOUT_MS });
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+async function listBridgeEntries() {
+  const direct = getDirectBridgeConfig();
+  if (direct) return [direct];
+
+  const registryDir = getRegistryDir();
+  if (!fs.existsSync(registryDir)) return [];
+  const entries = [];
+  for (const entry of fs.readdirSync(registryDir, { withFileTypes: true })) {
+    if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
+    const filePath = path.join(registryDir, entry.name);
+    const state = readJsonFile(filePath);
+    if (!state?.running || !state.url || !state.token || !state.session?.id || !state.bridgeId) {
+      continue;
+    }
+    if (await bridgeIsLive(state)) {
+      entries.push({ ...state, registryFile: filePath });
+    } else {
+      try {
+        fs.unlinkSync(filePath);
+      } catch (_) {}
+    }
+  }
+  entries.sort((a, b) => String(b.lastActiveAt || b.updatedAt || "").localeCompare(String(a.lastActiveAt || a.updatedAt || "")));
+  return entries;
+}
+
+async function listSessions() {
+  const entries = await listBridgeEntries();
+  return {
+    registryDir: getRegistryDir(),
+    count: entries.length,
+    sessions: entries.map(publicSession),
+  };
+}
+
+async function selectBridge(args = {}) {
+  const entries = await listBridgeEntries();
+  const sessionId = String(args.sessionId || "").trim();
+  const bridgeId = String(args.bridgeId || "").trim();
+  if (bridgeId) {
+    const found = entries.find((entry) => entry.bridgeId === bridgeId);
+    if (found) return found;
+    throw new Error(`SecMP MCP bridge not found for bridgeId=${bridgeId}`);
+  }
+  if (sessionId) {
+    const matches = entries.filter((entry) => entry.session?.id === sessionId);
+    if (matches.length === 1) return matches[0];
+    if (matches.length > 1) {
+      throw new Error(`Multiple SecMP bridges matched sessionId=${sessionId}; retry with bridgeId from secmp_list_sessions.`);
+    }
+    throw new Error(`SecMP session not found for sessionId=${sessionId}`);
+  }
+  if (entries.length === 0) {
+    throw new Error(`No active SecMP MCP sessions were found. Open or create a SecMP session first. Registry: ${getRegistryDir()}`);
+  }
+  if (entries.length === 1) {
+    return entries[0];
+  }
+  const labels = entries.map((entry) => `${bridgeSessionLabel(entry)} (sessionId=${entry.session?.id || "-"}, bridgeId=${entry.bridgeId || "-"})`);
+  throw new Error(`Multiple SecMP sessions are active; call secmp_list_sessions and pass sessionId or bridgeId. Active sessions: ${labels.join("; ")}`);
 }
 
 let outputFormat = "content-length";
@@ -214,49 +377,15 @@ function error(id, code, message, data) {
   sendMessage({ jsonrpc: "2.0", id, error: { code, message, data } });
 }
 
-function requestBridge(method, route, body) {
-  const config = loadBridgeConfig();
-  if (!config.url) {
-    throw new Error(`SecMP MCP bridge state was not found. Enable MCP in SecMP or run "SecMP: Copy MCP Client Config" first. State file: ${config.stateFile}`);
-  }
-  const base = new URL(config.url);
+function withSession(entry, value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  return { ...value, session: publicSession(entry) };
+}
+
+function requestBridge(entry, method, route, body) {
+  const base = new URL(entry.url);
   const url = new URL(route, base);
-  const payload = body == null ? null : Buffer.from(JSON.stringify(body), "utf8");
-  return new Promise((resolve, reject) => {
-    const req = http.request({
-      hostname: url.hostname,
-      port: url.port,
-      method,
-      path: `${url.pathname}${url.search}`,
-      timeout: 30000,
-      headers: {
-        ...(config.token ? { authorization: `Bearer ${config.token}` } : {}),
-        ...(payload ? { "content-type": "application/json", "content-length": payload.length } : {}),
-      },
-    }, (res) => {
-      const chunks = [];
-      res.on("data", (chunk) => chunks.push(chunk));
-      res.on("end", () => {
-        const text = Buffer.concat(chunks).toString("utf8");
-        let parsed = {};
-        try {
-          parsed = text ? JSON.parse(text) : {};
-        } catch (err) {
-          reject(new Error(`Invalid bridge response JSON: ${err.message}`));
-          return;
-        }
-        if (res.statusCode >= 400 || parsed.error) {
-          reject(new Error(parsed.error?.message || `SecMP bridge returned HTTP ${res.statusCode}`));
-          return;
-        }
-        resolve(parsed);
-      });
-    });
-    req.on("timeout", () => req.destroy(new Error("SecMP bridge request timed out")));
-    req.on("error", reject);
-    if (payload) req.write(payload);
-    req.end();
-  });
+  return requestJson(url.toString(), { method, body, token: entry.token });
 }
 
 function encodeToolResult(value) {
@@ -272,50 +401,66 @@ function encodeToolResult(value) {
 
 async function callTool(name, args) {
   switch (name) {
-    case "secmp_status":
-      return requestBridge("GET", "/mcp/status");
+    case "secmp_list_sessions":
+      return listSessions();
+    case "secmp_status": {
+      const bridge = await selectBridge(args || {});
+      return withSession(bridge, await requestBridge(bridge, "GET", "/mcp/status"));
+    }
     case "secmp_stats": {
+      const bridge = await selectBridge(args || {});
       const query = new URLSearchParams();
-      for (const [key, value] of Object.entries(args || {})) {
+      for (const [key, value] of Object.entries(stripSessionSelector(args))) {
         if (value == null) continue;
         query.set(key, String(value));
       }
-      return requestBridge("GET", `/mcp/stats?${query.toString()}`);
+      return withSession(bridge, await requestBridge(bridge, "GET", `/mcp/stats?${query.toString()}`));
     }
     case "secmp_list_hosts": {
+      const bridge = await selectBridge(args || {});
       const query = new URLSearchParams();
-      for (const [key, value] of Object.entries(args || {})) {
+      for (const [key, value] of Object.entries(stripSessionSelector(args))) {
         if (value == null) continue;
         query.set(key, String(value));
       }
-      return requestBridge("GET", `/mcp/hosts?${query.toString()}`);
+      return withSession(bridge, await requestBridge(bridge, "GET", `/mcp/hosts?${query.toString()}`));
     }
     case "secmp_list_flows": {
+      const bridge = await selectBridge(args || {});
       const query = new URLSearchParams();
-      for (const [key, value] of Object.entries(args || {})) {
+      for (const [key, value] of Object.entries(stripSessionSelector(args))) {
         if (value == null) continue;
         query.set(key, Array.isArray(value) ? value.join(",") : String(value));
       }
-      return requestBridge("GET", `/mcp/flows?${query.toString()}`);
+      return withSession(bridge, await requestBridge(bridge, "GET", `/mcp/flows?${query.toString()}`));
     }
     case "secmp_get_flow": {
+      const bridge = await selectBridge(args || {});
       const { id, ...rest } = args || {};
       if (!id) throw new Error("secmp_get_flow requires id");
       const query = new URLSearchParams();
-      for (const [key, value] of Object.entries(rest)) {
+      for (const [key, value] of Object.entries(stripSessionSelector(rest))) {
         if (value == null) continue;
         query.set(key, String(value));
       }
-      return requestBridge("GET", `/mcp/flows/${encodeURIComponent(id)}?${query.toString()}`);
+      return withSession(bridge, await requestBridge(bridge, "GET", `/mcp/flows/${encodeURIComponent(id)}?${query.toString()}`));
     }
-    case "secmp_search_flows":
-      return requestBridge("POST", "/mcp/search", args || {});
-    case "secmp_wait_for_flow":
-      return requestBridge("POST", "/mcp/wait", args || {});
-    case "secmp_assert_flow":
-      return requestBridge("POST", "/mcp/assert", args || {});
-    case "secmp_export_evidence":
-      return requestBridge("POST", "/mcp/export", args || {});
+    case "secmp_search_flows": {
+      const bridge = await selectBridge(args || {});
+      return withSession(bridge, await requestBridge(bridge, "POST", "/mcp/search", stripSessionSelector(args)));
+    }
+    case "secmp_wait_for_flow": {
+      const bridge = await selectBridge(args || {});
+      return withSession(bridge, await requestBridge(bridge, "POST", "/mcp/wait", stripSessionSelector(args)));
+    }
+    case "secmp_assert_flow": {
+      const bridge = await selectBridge(args || {});
+      return withSession(bridge, await requestBridge(bridge, "POST", "/mcp/assert", stripSessionSelector(args)));
+    }
+    case "secmp_export_evidence": {
+      const bridge = await selectBridge(args || {});
+      return withSession(bridge, await requestBridge(bridge, "POST", "/mcp/export", stripSessionSelector(args)));
+    }
     default:
       throw new Error(`Unknown tool: ${name}`);
   }

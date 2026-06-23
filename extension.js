@@ -51,6 +51,9 @@ let certPushTask = null;
 let certManagerDeviceArgsSupported = null;
 let mcpBridge = null;
 let mcpBridgeToken = "";
+let mcpBridgeId = "";
+let mcpRegistryUpdateTimer = null;
+let mcpRegistryHeartbeatTimer = null;
 
 const TOOLS_DIR = path.join(__dirname, "tools");
 const DEFAULT_RUNTIME_VERSION = "0.3.4";
@@ -104,7 +107,9 @@ const MCP_MAX_BODY_BYTES = 2 * 1024 * 1024;
 const MCP_DEFAULT_WAIT_TIMEOUT_MS = 10000;
 const MCP_MAX_WAIT_TIMEOUT_MS = 60000;
 const MCP_BODY_SNIPPET_CHARS = 240;
-const MCP_STALE_PROXY_COMMAND_PREVIEW_CHARS = 500;
+const MCP_REGISTRY_VERSION = 2;
+const MCP_REGISTRY_UPDATE_DEBOUNCE_MS = 500;
+const MCP_REGISTRY_HEARTBEAT_MS = 10000;
 const ANDROID_SYSTEM_CACERTS_DIR = "/system/etc/security/cacerts";
 const ANDROID_APEX_CONSCRYPT_CACERTS_DIR = "/apex/com.android.conscrypt/cacerts";
 const ANDROID_CERT_WORK_DIR = "/data/local/tmp/";
@@ -254,6 +259,7 @@ async function migrateRuntimeConfiguration(context) {
     "windowsRuntimeUrl",
     "windowsRuntimeSha256",
     "windowsRuntimeVersion",
+    "mcp.stateFile",
   ];
   const removed = [];
   for (const key of staleKeys) {
@@ -1413,8 +1419,8 @@ function getMcpEnvironmentInfo() {
     running: !!mcpBridge,
     port: mcpBridge?.port || 0,
     configuredPort: config.port,
-    stateFile: config.stateFile,
-    stateFileConfigured: hasCustomMcpStateFile(),
+    registryDir: getDefaultMcpRegistryDir(),
+    bridgeId: mcpBridgeId,
     redactByDefault: config.redactByDefault,
     maxBodyBytes: config.maxBodyBytes,
   };
@@ -1603,123 +1609,6 @@ async function getCertManagerCommand() {
   };
 }
 
-function normalizeProcessPathText(value) {
-  const text = String(value || "");
-  return process.platform === "win32"
-    ? text.replace(/\//g, "\\").toLowerCase()
-    : text;
-}
-
-function truncateProcessCommandLine(commandLine) {
-  const text = String(commandLine || "");
-  if (text.length <= MCP_STALE_PROXY_COMMAND_PREVIEW_CHARS) {
-    return text;
-  }
-  return `${text.slice(0, MCP_STALE_PROXY_COMMAND_PREVIEW_CHARS)}...`;
-}
-
-function getPackagedProxyEntrypointForDetection() {
-  if (!isPackagedRuntimePlatform()) {
-    return null;
-  }
-  const runtimeDir = getActivePackagedRuntimeDir();
-  if (!isPackagedRuntimeReady(runtimeDir)) {
-    return null;
-  }
-  return getPackagedRuntimeEntrypoint("proxyEngine", runtimeDir);
-}
-
-function parseProxyProcessCommandLine(commandLine) {
-  const text = String(commandLine || "");
-  const webPortMatch = text.match(/(?:^|\s)--web-port\s+(\d+)/);
-  const proxyPortMatch = text.match(/(?:^|\s)--port\s+(\d+)/);
-  const hostMatch = text.match(/(?:^|\s)--host\s+("[^"]+"|'[^']+'|\S+)/);
-  return {
-    webPort: webPortMatch ? Number(webPortMatch[1]) : 0,
-    proxyPort: proxyPortMatch ? Number(proxyPortMatch[1]) : 0,
-    host: hostMatch ? hostMatch[1].replace(/^["']|["']$/g, "") : "",
-  };
-}
-
-function normalizeProcessInfo(raw) {
-  const pid = Number(raw?.ProcessId ?? raw?.pid);
-  const parentPid = Number(raw?.ParentProcessId ?? raw?.parentPid);
-  const commandLine = String(raw?.CommandLine ?? raw?.commandLine ?? "");
-  return {
-    pid,
-    parentPid,
-    commandLine,
-    ...parseProxyProcessCommandLine(commandLine),
-  };
-}
-
-function parsePsProxyProcesses(stdout) {
-  const processes = [];
-  for (const line of String(stdout || "").split(/\r?\n/)) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    const match = trimmed.match(/^(\d+)\s+(\d+)\s+(.+)$/);
-    if (!match) continue;
-    const commandLine = match[3];
-    if (!/proxy_engine(?:\.py)?(?:\s|$)/.test(commandLine)) continue;
-    processes.push(normalizeProcessInfo({
-      pid: Number(match[1]),
-      parentPid: Number(match[2]),
-      commandLine,
-    }));
-  }
-  return processes;
-}
-
-async function listProxyEngineProcesses() {
-  if (process.platform === "win32") {
-    const command = [
-      "$items = @(Get-CimInstance Win32_Process -Filter \"Name = 'proxy_engine.exe'\" |",
-      "Select-Object ProcessId,ParentProcessId,CommandLine);",
-      "if ($items.Count -gt 0) { $items | ConvertTo-Json -Compress }",
-    ].join(" ");
-    const result = await runProcess("powershell.exe", [
-      "-NoProfile",
-      "-ExecutionPolicy",
-      "Bypass",
-      "-Command",
-      command,
-    ]);
-    const text = result.stdout.trim();
-    if (!text) return [];
-    const parsed = JSON.parse(text);
-    return (Array.isArray(parsed) ? parsed : [parsed]).map(normalizeProcessInfo);
-  }
-
-  if (process.platform === "darwin") {
-    const result = await runProcess("ps", ["-axo", "pid=,ppid=,command="]);
-    return parsePsProxyProcesses(result.stdout);
-  }
-
-  return [];
-}
-
-function processMatchesPackagedProxyEntrypoint(proc, entrypoint) {
-  if (!entrypoint || !proc?.commandLine) {
-    return false;
-  }
-  return normalizeProcessPathText(proc.commandLine).includes(normalizeProcessPathText(entrypoint));
-}
-
-async function findStalePackagedProxyProcesses() {
-  const entrypoint = getPackagedProxyEntrypointForDetection();
-  if (!entrypoint) {
-    return [];
-  }
-  const currentProxyPid = proxyProcess?.pid ? Number(proxyProcess.pid) : 0;
-  const processes = await listProxyEngineProcesses();
-  return processes
-    .filter((proc) => Number.isFinite(proc.pid) && proc.pid > 0)
-    .filter((proc) => proc.pid !== currentProxyPid)
-    .filter((proc) => proc.parentPid !== process.pid)
-    .filter((proc) => processMatchesPackagedProxyEntrypoint(proc, entrypoint));
-}
-
 async function terminateProcessTree(pid, reason) {
   const targetPid = Number(pid);
   if (!Number.isInteger(targetPid) || targetPid <= 0) {
@@ -1735,64 +1624,6 @@ async function terminateProcessTree(pid, reason) {
       if (err.code !== "ESRCH") throw err;
     }
   }
-}
-
-async function cleanupStalePackagedProxyProcesses(reason = "startup") {
-  if (!getMcpConfig().enabled || proxyProcess) {
-    return [];
-  }
-  const staleProcesses = await findStalePackagedProxyProcesses();
-  for (const proc of staleProcesses) {
-    try {
-      await terminateProcessTree(proc.pid, reason);
-    } catch (err) {
-      log(`[mcp] failed to terminate stale proxy process ${proc.pid}: ${err.message}`);
-    }
-  }
-  if (staleProcesses.length > 0) {
-    log(`[mcp] cleaned ${staleProcesses.length} stale proxy process(es)`);
-  }
-  return staleProcesses;
-}
-
-async function getMcpStaleProxyDiagnostics() {
-  if (proxyProcess || capturedFlows.length > 0) {
-    return {
-      staleProxyDetected: false,
-      extensionHostPid: process.pid,
-      staleProxyCount: 0,
-      staleProxies: [],
-      warning: "",
-    };
-  }
-  let staleProcesses = [];
-  try {
-    staleProcesses = await findStalePackagedProxyProcesses();
-  } catch (err) {
-    return {
-      staleProxyDetected: false,
-      extensionHostPid: process.pid,
-      staleProxyCount: 0,
-      staleProxies: [],
-      warning: `Failed to inspect local proxy processes: ${err.message}`,
-    };
-  }
-  return {
-    staleProxyDetected: staleProcesses.length > 0,
-    extensionHostPid: process.pid,
-    staleProxyCount: staleProcesses.length,
-    staleProxies: staleProcesses.map((proc) => ({
-      pid: proc.pid,
-      parentPid: proc.parentPid,
-      host: proc.host,
-      proxyPort: proc.proxyPort,
-      webPort: proc.webPort,
-      commandLine: truncateProcessCommandLine(proc.commandLine),
-    })),
-    warning: staleProcesses.length > 0
-      ? "A SecMP proxy process is running outside this Extension Host, so this MCP bridge cannot read its in-memory capture state. Restart the proxy from the current SecMP window."
-      : "",
-  };
 }
 
 // ===== mitmweb REST API helpers =====
@@ -1916,6 +1747,7 @@ function scheduleActiveSessionBufferFlush() {
 
 function closeActiveSession(options = {}) {
   if (!activeSession) return;
+  stopMcpBridge().catch((err) => log(`[mcp] failed to stop bridge for closed session: ${err.message}`));
   const session = activeSession;
   const shouldDeleteTemporary = !!options.deleteTemporary && session.temporary;
   try {
@@ -2062,6 +1894,7 @@ async function checkInterruptedSession() {
       refreshSidebar();
       vscode.window.showInformationMessage(t("extension.session.loaded", { count: capturedFlows.length }));
       await createPanel();
+      await syncMcpBridge();
       await maybeAutoStartProxyForSession();
     } catch (err) {
       vscode.window.showErrorMessage(t("extension.session.parseFailed", { message: err.message }));
@@ -2112,6 +1945,7 @@ async function saveActiveSessionAs() {
   activeSession.saveAs(result.fsPath, path.basename(result.fsPath, ".secmp"));
   writeResumeMarker({ running: !!proxyProcess });
   rememberSession(activeSession);
+  scheduleMcpRegistryUpdate(0);
   if (panel) panel.title = getCapturePanelTitle();
   refreshSidebar();
   vscode.window.showInformationMessage(t("extension.session.saved", { path: result.fsPath }));
@@ -2158,6 +1992,7 @@ function recordSessionProxyState(running, options = {}) {
   try {
     activeSession.setProxyState(state);
     scheduleActiveSessionSync();
+    scheduleMcpRegistryUpdate(0);
   } catch (err) {
     log(`Failed to save SecMP proxy state: ${err.message}`);
   }
@@ -2199,6 +2034,7 @@ async function stopProxyForSessionExit() {
 
 async function closeActiveSessionForExit(options = {}) {
   await stopProxyForSessionExit();
+  await stopMcpBridge();
   closeActiveSession({ deleteTemporary: !!options.deleteTemporary });
   discardPendingFlowBatch();
   resetCapturedFlows();
@@ -2274,6 +2110,7 @@ function resetCapturedFlows() {
   capturedFlows = [];
   capturedFlowById.clear();
   capturedFlowIndexById.clear();
+  scheduleMcpRegistryUpdate(0);
 }
 
 function setCapturedFlows(flows) {
@@ -2286,6 +2123,7 @@ function setCapturedFlows(flows) {
       capturedFlowIndexById.set(flow.id, index);
     }
   });
+  scheduleMcpRegistryUpdate(0);
 }
 
 function addCapturedFlow(flow) {
@@ -2295,6 +2133,7 @@ function addCapturedFlow(flow) {
     capturedFlowById.set(flow.id, flow);
     capturedFlowIndexById.set(flow.id, index);
   }
+  scheduleMcpRegistryUpdate();
 }
 
 function replaceCapturedFlow(id, nextFlow) {
@@ -2303,6 +2142,7 @@ function replaceCapturedFlow(id, nextFlow) {
   capturedFlows[idx] = nextFlow;
   capturedFlowById.set(id, nextFlow);
   capturedFlowIndexById.set(id, idx);
+  scheduleMcpRegistryUpdate();
   return true;
 }
 
@@ -4862,9 +4702,6 @@ async function createPanel() {
           const maxBodyBytes = clampNumber(message.maxBodyBytes, 0, MCP_MAX_BODY_BYTES, MCP_DEFAULT_MAX_BODY_BYTES);
           await config.update("mcp.maxBodyBytes", maxBodyBytes, vscode.ConfigurationTarget.Global);
         }
-        if (typeof message.stateFile === "string") {
-          await config.update("mcp.stateFile", message.stateFile.trim(), vscode.ConfigurationTarget.Global);
-        }
         await syncMcpBridge();
         panel.webview.postMessage({
           command: "environmentActionResult",
@@ -5812,14 +5649,17 @@ function getMcpConfig() {
   return {
     enabled: Boolean(config.get("mcp.enabled", false)),
     port: Number.isInteger(rawPort) && rawPort >= 0 && rawPort <= 65535 ? rawPort : MCP_DEFAULT_PORT,
-    stateFile: String(config.get("mcp.stateFile", "") || "").trim() || getDefaultMcpStateFilePath(),
     redactByDefault: config.get("mcp.redactByDefault", true) !== false,
     maxBodyBytes: clampNumber(rawMaxBodyBytes, 0, MCP_MAX_BODY_BYTES, MCP_DEFAULT_MAX_BODY_BYTES),
   };
 }
 
-function getDefaultMcpStateFilePath() {
-  return path.join(os.homedir(), ".secmp", "mcp-bridge.json");
+function getDefaultMcpHomeDir() {
+  return path.join(os.homedir(), ".secmp", "mcp");
+}
+
+function getDefaultMcpRegistryDir() {
+  return path.join(getDefaultMcpHomeDir(), "bridges");
 }
 
 function getBundledMcpServerScriptPath() {
@@ -5861,17 +5701,8 @@ function syncStableMcpServerScript() {
   return targetPath;
 }
 
-function hasCustomMcpStateFile() {
-  const config = vscode.workspace.getConfiguration("secmp");
-  return String(config.get("mcp.stateFile", "") || "").trim() !== "";
-}
-
 function buildMcpClientConfig() {
   const args = [syncStableMcpServerScript()];
-  const config = getMcpConfig();
-  if (hasCustomMcpStateFile()) {
-    args.push("--state-file", config.stateFile);
-  }
   return {
     mcpServers: {
       secmp: {
@@ -6322,7 +6153,6 @@ function buildMcpHints(flow, options = {}) {
 async function mcpStatus() {
   const ipLocationConfig = getIpLocationConfig();
   const stats = buildMcpStats(capturedFlows, 5);
-  const diagnostics = await getMcpStaleProxyDiagnostics();
   return {
     proxyRunning: !!proxyProcess,
     proxyPort: activeProxyPort || 0,
@@ -6353,8 +6183,6 @@ async function mcpStatus() {
       configured: !!(ipLocationConfig.enabled && ipLocationConfig.endpoint),
       endpointConfigured: !!ipLocationConfig.endpoint,
     },
-    staleProxyDetected: diagnostics.staleProxyDetected,
-    diagnostics,
     mcp: getMcpEnvironmentInfo(),
   };
 }
@@ -6376,11 +6204,6 @@ async function mcpListFlows(filter = {}) {
     hasMore: offset + flows.length < matchedFlows.length,
     flows,
   };
-  const diagnostics = await getMcpStaleProxyDiagnostics();
-  if (diagnostics.staleProxyDetected || diagnostics.warning) {
-    result.staleProxyDetected = diagnostics.staleProxyDetected;
-    result.diagnostics = diagnostics;
-  }
   return result;
 }
 
@@ -6494,11 +6317,6 @@ async function mcpStats(options = {}) {
     matchedFlows: flows.length,
     ...buildMcpStats(flows, top),
   };
-  const diagnostics = await getMcpStaleProxyDiagnostics();
-  if (diagnostics.staleProxyDetected || diagnostics.warning) {
-    result.staleProxyDetected = diagnostics.staleProxyDetected;
-    result.diagnostics = diagnostics;
-  }
   return result;
 }
 
@@ -6680,13 +6498,116 @@ function createMcpService() {
   };
 }
 
+function getMcpBridgeId() {
+  if (!mcpBridgeId) {
+    mcpBridgeId = `${process.pid}-${crypto.randomBytes(8).toString("hex")}`;
+  }
+  return mcpBridgeId;
+}
+
+function getMcpBridgeEntryPath() {
+  return path.join(getDefaultMcpRegistryDir(), `${getMcpBridgeId()}.json`);
+}
+
+function getMcpSessionInfo() {
+  if (!activeSession) return null;
+  return {
+    id: activeSession.sessionId,
+    name: activeSession.sessionName,
+    temporary: activeSession.temporary,
+    filePath: activeSession.filePath,
+  };
+}
+
+function getMcpBridgeRegistryState() {
+  const stats = buildMcpStats(capturedFlows, 5);
+  return {
+    version: MCP_REGISTRY_VERSION,
+    bridgeId: getMcpBridgeId(),
+    extensionHostPid: process.pid,
+    extensionVersion: normalizeVersion(extensionPackage.version),
+    workspace: vscode.workspace.workspaceFolders?.[0]?.uri?.fsPath || "",
+    session: getMcpSessionInfo(),
+    proxy: {
+      running: !!proxyProcess,
+      proxyPort: activeProxyPort || 0,
+      webPort: webPort || 0,
+      flowFeedStatus,
+      websocketLive: !!flowWebSocketActive,
+    },
+    capture: {
+      flowCount: capturedFlows.length,
+      uniqueHosts: stats.uniqueHosts,
+      topHosts: stats.topHosts,
+      updatedAt: new Date().toISOString(),
+    },
+    device: {
+      connected: !!deviceInfo?.connected,
+      serial: deviceInfo?.serial || selectedAdbSerial || "",
+    },
+    lastActiveAt: new Date().toISOString(),
+    heartbeatAt: new Date().toISOString(),
+  };
+}
+
+function removeMcpBridgeEntry() {
+  if (!mcpBridgeId) return;
+  try {
+    const entryPath = getMcpBridgeEntryPath();
+    if (fs.existsSync(entryPath)) fs.unlinkSync(entryPath);
+  } catch (err) {
+    log(`[mcp] failed to remove bridge registry entry: ${err.message}`);
+  }
+}
+
+function scheduleMcpRegistryUpdate(delay = MCP_REGISTRY_UPDATE_DEBOUNCE_MS) {
+  if (!mcpBridge) return;
+  if (mcpRegistryUpdateTimer) return;
+  mcpRegistryUpdateTimer = setTimeout(() => {
+    mcpRegistryUpdateTimer = null;
+    try {
+      mcpBridge?.writeState();
+    } catch (err) {
+      log(`[mcp] failed to update bridge registry: ${err.message}`);
+    }
+  }, delay);
+}
+
+function startMcpRegistryHeartbeat() {
+  if (mcpRegistryHeartbeatTimer) return;
+  mcpRegistryHeartbeatTimer = setInterval(() => {
+    try {
+      mcpBridge?.writeState();
+    } catch (err) {
+      log(`[mcp] failed to write bridge heartbeat: ${err.message}`);
+    }
+  }, MCP_REGISTRY_HEARTBEAT_MS);
+}
+
+function stopMcpRegistryTimers() {
+  if (mcpRegistryUpdateTimer) {
+    clearTimeout(mcpRegistryUpdateTimer);
+    mcpRegistryUpdateTimer = null;
+  }
+  if (mcpRegistryHeartbeatTimer) {
+    clearInterval(mcpRegistryHeartbeatTimer);
+    mcpRegistryHeartbeatTimer = null;
+  }
+}
+
+async function stopMcpBridge() {
+  stopMcpRegistryTimers();
+  if (mcpBridge) {
+    await mcpBridge.stop();
+    mcpBridge = null;
+  }
+  removeMcpBridgeEntry();
+}
+
 async function syncMcpBridge() {
   const config = getMcpConfig();
-  if (!config.enabled) {
-    if (mcpBridge) {
-      await mcpBridge.stop();
-      mcpBridge = null;
-    }
+  if (!config.enabled || !activeSession) {
+    await stopMcpBridge();
     return;
   }
   if (!mcpBridgeToken) {
@@ -6701,8 +6622,11 @@ async function syncMcpBridge() {
   await mcpBridge.start({
     port: config.port,
     token: mcpBridgeToken,
-    stateFile: config.stateFile,
+    registryFile: getMcpBridgeEntryPath(),
+    stateProvider: getMcpBridgeRegistryState,
   });
+  mcpBridge.writeState();
+  startMcpRegistryHeartbeat();
 }
 
 async function fetchAllFlowBodiesWithProgress(flows) {
@@ -7279,6 +7203,7 @@ async function saveSession() {
     flushActiveSession();
     rememberSession(activeSession);
     refreshSidebar();
+    await syncMcpBridge();
     vscode.window.showInformationMessage(t("extension.session.saved", { path: result.fsPath }));
     return;
   }
@@ -7301,6 +7226,7 @@ async function newTemporarySession() {
   refreshSidebar();
   vscode.window.showInformationMessage(t("extension.session.tempCreated"));
   await createPanel();
+  await syncMcpBridge();
   await vscode.commands.executeCommand("workbench.action.closeSidebar");
 }
 
@@ -7323,6 +7249,7 @@ async function newPersistentSession() {
   refreshSidebar();
   vscode.window.showInformationMessage(t("extension.session.saved", { path: result.fsPath }));
   await createPanel();
+  await syncMcpBridge();
   await vscode.commands.executeCommand("workbench.action.closeSidebar");
 }
 
@@ -7375,6 +7302,7 @@ async function openSessionFile(filePath) {
   refreshSidebar();
   vscode.window.showInformationMessage(t("extension.session.loaded", { count: capturedFlows.length }));
   await createPanel();
+  await syncMcpBridge();
   await vscode.commands.executeCommand("workbench.action.closeSidebar");
   await maybeAutoStartProxyForSession();
 }
@@ -7498,8 +7426,6 @@ function activate(context) {
   } catch (err) {
     log(`[mcp] failed to sync stable MCP server: ${err.message}`);
   }
-  const startupProxyCleanupPromise = cleanupStalePackagedProxyProcesses("activation")
-    .catch((err) => log(`[mcp] stale proxy cleanup failed: ${err.message}`));
   checkForExtensionUpdate(context, { manual: false });
   sidebarProvider = new SecmpSidebarProvider();
   const sidebarView = vscode.window.createTreeView("secmp.sidebar", {
@@ -7683,11 +7609,7 @@ function activate(context) {
     }
     if (event.affectsConfiguration("secmp.mcp")) {
       (async () => {
-        if (mcpBridge) {
-          await mcpBridge.stop();
-          mcpBridge = null;
-        }
-        await cleanupStalePackagedProxyProcesses("mcpConfigurationChanged");
+        await stopMcpBridge();
         await syncMcpBridge();
       })().catch((err) => log(`[mcp] failed to apply configuration: ${err.message}`));
     }
@@ -7720,18 +7642,12 @@ function activate(context) {
   if (isAutoPushCertEnabled()) {
     startAdbMonitor();
   }
-  startupProxyCleanupPromise
-    .then(() => syncMcpBridge())
-    .catch((err) => log(`[mcp] failed to start bridge: ${err.message}`));
   checkInterruptedSession();
 }
 
 async function deactivate() {
   stopFlowPolling();
-  if (mcpBridge) {
-    await mcpBridge.stop();
-    mcpBridge = null;
-  }
+  await stopMcpBridge();
   stopAdbMonitor();
   recordSessionProxyState(!!proxyProcess, {
     port: activeProxyPort,

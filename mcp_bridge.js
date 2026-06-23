@@ -57,13 +57,18 @@ class SecmpMcpBridge {
     this.server = null;
     this.port = 0;
     this.token = "";
-    this.stateFile = "";
+    this.registryFile = "";
+    this.stateProvider = null;
   }
 
   async start(config) {
-    if (this.server) return this.getState();
     this.token = String(config.token || "");
-    this.stateFile = String(config.stateFile || "");
+    this.registryFile = String(config.registryFile || "");
+    this.stateProvider = typeof config.stateProvider === "function" ? config.stateProvider : null;
+    if (this.server) {
+      this.writeState();
+      return this.getState();
+    }
     const requestedPort = Number(config.port) || 0;
 
     this.server = http.createServer((req, res) => {
@@ -111,17 +116,18 @@ class SecmpMcpBridge {
       token: this.token,
       pid: process.pid,
       updatedAt: new Date().toISOString(),
+      ...(this.stateProvider ? this.stateProvider() : {}),
       ...extra,
     };
   }
 
   writeState(extra = {}) {
-    if (!this.stateFile) return;
+    if (!this.registryFile) return;
     try {
-      fs.mkdirSync(path.dirname(this.stateFile), { recursive: true, mode: 0o700 });
-      fs.writeFileSync(this.stateFile, JSON.stringify(this.getState(extra), null, 2), { mode: 0o600 });
+      fs.mkdirSync(path.dirname(this.registryFile), { recursive: true, mode: 0o700 });
+      fs.writeFileSync(this.registryFile, JSON.stringify(this.getState(extra), null, 2), { mode: 0o600 });
     } catch (err) {
-      this.options.log?.(`[mcp] failed to write bridge state file: ${err.message}`);
+      this.options.log?.(`[mcp] failed to write bridge registry file: ${err.message}`);
     }
   }
 

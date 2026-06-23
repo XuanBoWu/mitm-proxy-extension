@@ -3,7 +3,7 @@
   "displayName": "SecMP",
   "icon": "media/icon.png",
   "description": "%secmp.description%",
-  "version": "0.3.6",
+  "version": "0.3.7",
   "publisher": "xbowu",
   "license": "MIT",
   "repository": {
@@ -125,12 +125,6 @@
           "maximum": 65535,
           "order": 61,
           "description": "%secmp.config.mcp.port%"
-        },
-        "secmp.mcp.stateFile": {
-          "type": "string",
-          "default": "",
-          "order": 62,
-          "description": "%secmp.config.mcp.stateFile%"
         },
         "secmp.mcp.redactByDefault": {
           "type": "boolean",

@@ -20,7 +20,7 @@ SecMP is intended for authorized testing of devices and applications you own or 
 - Show an optional IP location column for captured server IPs, with lookup results persisted into `.secmp` sessions as an audit snapshot.
 - Bind the selected capture network to both the proxy listener and the mitmproxy upstream source address when multiple host interfaces are available.
 - Export captures as HAR or JSON.
-- Expose captured traffic to local MCP agents for authorized inspection, search, assertions, and evidence export.
+- Expose one or more open capture sessions to local MCP agents for authorized inspection, search, assertions, and evidence export.
 - Use the SecMP Activity Bar icon and sidebar to create/open sessions before entering the capture panel.
 - Run on Windows and macOS with a packaged runtime, without requiring users to install Python or mitmproxy.
 

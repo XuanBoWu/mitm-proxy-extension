@@ -19,7 +19,6 @@
   "secmp.config.fontSize.maximum": "最大",
   "secmp.config.mcp.enabled": "启用本地 SecMP MCP bridge，供 Agent 读取和断言抓包流量。bridge 仅监听 127.0.0.1。",
   "secmp.config.mcp.port": "SecMP MCP bridge 使用的本地端口。默认 0，由操作系统选择空闲端口。",
-  "secmp.config.mcp.stateFile": "MCP bridge 状态文件路径。留空时使用 ~/.secmp/mcp-bridge.json。",
   "secmp.config.mcp.redactByDefault": "Agent 通过 MCP 读取 flow 时，默认脱敏敏感 Header 和 body 字段。",
   "secmp.config.mcp.maxBodyBytes": "MCP tools 默认返回的最大 body 字节数；tool 调用可提供更小的显式限制。",
   "secmp.config.certPushWaitMinutes": "手动预置 CA 证书时，SecMP 在无 ADB 设备可用后等待设备上线的分钟数。设为 0 时立即失败。",

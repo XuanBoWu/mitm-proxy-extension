@@ -1,14 +1,16 @@
-# SecMP 0.3.6
+# SecMP 0.3.7
 
-SecMP 0.3.6 is a VSIX-only patch release focused on MCP reliability after extension updates and Extension Host restarts.
+SecMP 0.3.7 is a VSIX-only patch release that redesigns MCP routing for multiple open VS Code / VSCodium windows and multiple SecMP sessions.
 
 ## Highlights
 
-- Fixed MCP client configs becoming stale after VSIX updates by copying the bundled MCP server to a stable user path: `~/.secmp/mcp/secmp-mcp-server.js`.
-- Updated copied MCP client configs to reference the stable MCP server path instead of the versioned VS Code extension install directory.
-- Added stale proxy diagnostics to `secmp_status`, `secmp_list_flows`, and `secmp_stats` so MCP callers can distinguish a real empty capture from an Extension Host/proxy ownership mismatch.
-- Added startup/config-change cleanup for stale packaged-runtime `proxy_engine` processes whose parent is not the current Extension Host.
-- Reused the same process-tree termination path when stopping the proxy and during extension deactivation.
+- Stopped starting the MCP bridge from every empty Code window during extension activation.
+- Replaced the single global MCP bridge state file with a multi-session registry under `~/.secmp/mcp/bridges/`.
+- Added `secmp_list_sessions` so agents can discover every open SecMP session before querying traffic.
+- Added `sessionId` and `bridgeId` selectors to MCP traffic tools.
+- Return an ambiguity error when multiple SecMP sessions are open and the agent does not specify which session to query.
+- Removed the unsafe stale-proxy cleanup path from 0.3.6 so one Code window no longer treats another active window's proxy as stale.
+- Removed the obsolete `secmp.mcp.stateFile` setting and Webview field.
 
 ## Runtime
 
@@ -16,7 +18,7 @@ This release reuses runtime `0.3.4`.
 
 No packaged runtime code, runtime dependency, runtime icon, package layout, or extension-to-runtime protocol changed in this release. `runtimeApiVersion` remains `1`.
 
-When SecMP 0.3.6 starts the proxy, it continues to install or use the runtime version declared by the extension's `DEFAULT_RUNTIME_VERSION`, currently `0.3.4`.
+When SecMP 0.3.7 starts the proxy, it continues to install or use the runtime version declared by the extension's `DEFAULT_RUNTIME_VERSION`, currently `0.3.4`.
 
 ## Requirements
 
@@ -28,23 +30,23 @@ When SecMP 0.3.6 starts the proxy, it continues to install or use the runtime ve
 
 ## Installation
 
-1. Download `secmp-0.3.6.vsix`.
+1. Download `secmp-0.3.7.vsix`.
 2. In VS Code or VSCodium, run `Extensions: Install from VSIX...`.
 3. Run `SecMP: New Temporary Session`, `SecMP: New Persistent Session`, or open an existing `.secmp` session from the SecMP sidebar.
 4. Start the proxy from the capture panel.
 5. Push the CA certificate and configure the Android device proxy as needed.
 
-## Update From 0.3.5
+## Update From 0.3.6
 
-This release includes every change since the previous release tag `v0.3.5`: stable MCP server config paths, stale proxy detection in MCP responses, and cleanup for stale packaged-runtime proxy processes after Extension Host restarts.
+This release includes every change since the previous release tag `v0.3.6`: multi-session MCP registry routing, explicit session selection for MCP tools, and removal of activation-time bridge startup from empty Code windows.
 
-After installing 0.3.6, run `SecMP: Copy MCP Client Config` once if your agent still has a config copied from 0.3.5 or earlier. Future VSIX updates should keep using the stable MCP server path.
+After installing 0.3.7, run `SecMP: Copy MCP Client Config` once so your agent uses the stable MCP router script. When multiple SecMP sessions are open, call `secmp_list_sessions` first and pass `sessionId` or `bridgeId` to subsequent tools.
 
-Because the expected packaged runtime remains `0.3.4`, SecMP 0.3.6 reuses an already cached runtime `0.3.4` or downloads the runtime assets from the existing `v0.3.4` release when needed.
+Because the expected packaged runtime remains `0.3.4`, SecMP 0.3.7 reuses an already cached runtime `0.3.4` or downloads the runtime assets from the existing `v0.3.4` release when needed.
 
 ## Assets
 
-- `secmp-0.3.6.vsix`
+- `secmp-0.3.7.vsix`
 
 Runtime assets are intentionally not attached to this release. Use the `v0.3.4` runtime assets when a manual/offline runtime package is needed:
 
