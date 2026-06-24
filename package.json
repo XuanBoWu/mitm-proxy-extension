@@ -3,7 +3,7 @@
   "displayName": "SecMP",
   "icon": "media/icon.png",
   "description": "%secmp.description%",
-  "version": "0.3.7",
+  "version": "0.3.7-ts",
   "publisher": "xbowu",
   "license": "MIT",
   "repository": {
@@ -34,7 +34,8 @@
     "runtime:windows": "powershell -ExecutionPolicy Bypass -File scripts/build-windows-runtime.ps1",
     "runtime:windows:test-install": "node scripts/test-extension-runtime-install.js",
     "test:session": "node scripts/test-secmp-session.js",
-    "l10n:check": "node scripts/check-l10n.js"
+    "l10n:check": "node scripts/check-l10n.js",
+    "typecheck": "tsc --noEmit"
   },
   "activationEvents": [
     "onStartupFinished",
@@ -286,5 +287,10 @@
         }
       ]
     }
+  },
+  "devDependencies": {
+    "@types/node": "16.18.126",
+    "@types/vscode": "1.74.0",
+    "typescript": "5.8.3"
   }
 }

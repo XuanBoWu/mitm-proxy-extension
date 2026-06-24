@@ -6,10 +6,17 @@ media/icon_pack/**
 .venv/**
 .build/**
 dist/**
+node_modules/**
 certificate/**
 tools/__pycache__/**
 tools/scripts/**
 scripts/**
+docs/typescript-migration-plan.md
+src/**
+types/**
+*.ts
+tsconfig*.json
+package-lock.json
 *.vsix
 *.pyc
 *.pyo
