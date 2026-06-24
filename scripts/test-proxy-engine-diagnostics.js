@@ -43,6 +43,34 @@ mod.emit_runtime_diagnostics(mitmproxy_version="test-version")
   assert.match(diagnostics.stderr, /test-version/);
   assert.match(diagnostics.stderr, /asyncioPolicy/);
 
+  const event = runPython(importSnippet(`
+mod.emit_runtime_event({"type": "runtime/health", "bodyPipeline": "healthy"})
+`));
+  assert.strictEqual(event.status, 0, event.stderr || event.stdout);
+  assert.match(event.stdout, /SECMPRT_EVENT=/);
+  assert.match(event.stdout, /runtime\/health/);
+
+  const bodyEvents = runPython(importSnippet(`
+class Headers(dict):
+    def get(self, key, default=""):
+        return super().get(key, default)
+
+class Message:
+    raw_content = b"runtime-body"
+    headers = Headers({"content-type": "text/plain"})
+
+class Flow:
+    id = "flow-1"
+    response = Message()
+
+addon = mod.RuntimeCaptureEventAddon(max_body_bytes=1024)
+addon.response(Flow())
+`));
+  assert.strictEqual(bodyEvents.status, 0, bodyEvents.stderr || bodyEvents.stdout);
+  assert(bodyEvents.stdout.includes('"type": "body/chunk"'), bodyEvents.stdout);
+  assert(bodyEvents.stdout.includes('"type": "body/complete"'), bodyEvents.stdout);
+  assert(bodyEvents.stdout.includes('"flowId": "flow-1"'), bodyEvents.stdout);
+
   const fatal = runPython(importSnippet(`
 import threading
 

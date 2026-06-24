@@ -2,7 +2,9 @@
 
 本文档是 SecMP 从 JavaScript 增量迁移到 TypeScript 的执行方案。后续 agent 处理 TypeScript 相关任务时，应先阅读本文，再决定是否进入具体阶段。
 
-当前状态：Stage 0 基础设施已落地；Stage 1a 已开始，已新增 CommonJS `proxy/mitmweb_client.js` 作为 mitmweb HTTP keep-alive client，并把 HTTP/body API health 接入 extension/Webview/MCP 状态。Stage 1b 已开始，`fetchFlowBodies` 通过 `proxy/body_source.js` 的 `session-cache` 与 `mitmweb-http` BodySource 读取 body，为后续 runtime event body store 替换主链路预留接口。Stage 1c 已开始，`tools/proxy_engine.py` 会输出 runtime diagnostics，Windows 默认使用 selector event loop policy，并在 Tornado selector thread fatal 时主动退出；extension 会把 `RUNTIME_FATAL` 映射为 proxy error。运行入口仍为 `./extension.js`，尚未切换到 TS 编译产物。
+当前状态：Stage 0 基础设施已落地；Stage 1a 已开始，已新增 CommonJS `proxy/mitmweb_client.js` 作为 mitmweb HTTP keep-alive client，并把 HTTP/body API health 接入 extension/Webview/MCP 状态。Stage 1b 已开始，`fetchFlowBodies` 通过 `proxy/body_source.js` 的 `session-cache` 与 `mitmweb-http` BodySource 读取 body，为后续 runtime event body store 替换主链路预留接口。Stage 1c 已开始，`tools/proxy_engine.py` 会输出 runtime diagnostics，Windows 默认使用 selector event loop policy，并在 Tornado selector thread fatal 时主动退出；extension 会把 `RUNTIME_FATAL` 映射为 proxy error。Stage 1d 已开始，runtime 通过 stdout `SECMPRT_EVENT=` 发送 `runtime/ready` 与 body chunk/complete/error 事件，extension 可解析、聚合并写入 `.secmp`。运行入口仍为 `./extension.js`，尚未切换到 TS 编译产物。
+
+当前实验 runtime 版本：`DEFAULT_RUNTIME_VERSION=0.3.8-ts`，用于 GitHub Actions 构建 Windows/macOS runtime artifact 供 Windows 实机验证；正式发布前应按最终候选版本重新确认 runtime 版本号。
 
 ## 目标
 
@@ -422,7 +424,8 @@ types/runtime-events.d.ts
 
 推荐传输：
 
-- 优先 stdout NDJSON 或单独 pipe。
+- 当前使用 stdout 前缀行：`SECMPRT_EVENT=<json>`。
+- 未来如需要更强隔离，可改为单独 pipe。
 - 不复用 mitmweb/Tornado HTTP 服务。
 - stderr 继续保留人类可读日志；机器事件应有明确前缀或独立流，避免和日志混淆。
 
@@ -451,6 +454,15 @@ type RuntimeCaptureEvent =
 {"type":"runtime/fatal","component":"tornado-selector","message":"WinError 10038"}
 ```
 
+当前已落地：
+
+- `proxy/runtime_event_reader.js` 解析 stdout `SECMPRT_EVENT=` 行，支持分片输入、非协议 stdout passthrough、事件校验。
+- `RuntimeBodyAssembler` 聚合 `body/chunk`，在 `body/complete` 时校验 size 和 sha256，再交给 extension 写入 session。
+- `extension.js` 每次启动 proxy 时创建独立 runtime event reader，`runtime/ready` 可作为启动就绪信号，`runtime/fatal` 会进入 proxy error 链路。
+- runtime body event 到达时，若 flow 已存在则同步 flow 内存状态；若 flow 尚未到达则先写 `.secmp`，后续由 `session-cache` BodySource 命中。
+- `tools/proxy_engine.py` 装载 `RuntimeCaptureEventAddon`，request/response body 到达后以 64KB base64 chunk 发 stdout 事件，默认只发送不超过 8MB 的 body；更大 body 发 `body/error` 并继续依赖 mitmweb HTTP fallback。
+- `scripts/test-runtime-events.js` 覆盖 reader、assembler、offset mismatch 和 body/error。
+
 迁移策略：
 
 1. 并行写入：保留 mitmweb HTTP body fetch，同时 runtime event protocol 也写 session/body store。
@@ -464,6 +476,7 @@ type RuntimeCaptureEvent =
 - runtime event body 与 mitmweb HTTP body 的 size/hash 可对账。
 - mitmweb HTTP API 半失效时，已经由 runtime event 到达的 body 不会丢。
 - 新协议若不兼容旧 runtime，必须 bump `PACKAGED_RUNTIME_API_VERSION`。
+- packaged runtime 交付前必须做 Windows 实机抓包压测，确认 stdout body event 不会阻塞 mitmproxy 主循环。
 
 ## Stage 2: 拆分并迁移 Node/extension 模块
 
@@ -707,14 +720,14 @@ npx --yes @vscode/vsce package --allow-missing-repository
 
 ## 推荐第一步
 
-Stage 0 已完成，Stage 1a/1b/1c 已开始。若后续继续推进，下一步应先补齐 Stage 1c 的 Windows packaged runtime 实机验证，再继续扩展 Stage 1b 和设计 Stage 1d：
+Stage 0 已完成，Stage 1a/1b/1c/1d 已开始。若后续继续推进，下一步应先补齐 Stage 1c/1d 的 Windows packaged runtime 实机验证，再继续收敛 body-fetcher：
 
 1. 在 Windows packaged runtime 中分别跑默认 selector policy 和 `SECMP_WINDOWS_EVENT_LOOP_POLICY=proactor` A/B 压测。
-2. 若交付 runtime 产物，按 runtime version 规则更新 `DEFAULT_RUNTIME_VERSION`、runtime manifest 和 release 说明。
-3. 让 `body-fetcher` 在 session-cache、runtime-events、mitmweb-http 之间按优先级选择来源。
-4. 增加更多 body API down/degraded 策略测试。
-5. 将内容过滤、导出、MCP body prepare 的共享逻辑继续收敛到 body-fetcher。
-6. 开始 Stage 1d runtime capture event protocol 设计。
+2. 压测 runtime stdout body event，确认大流量下不会阻塞 mitmproxy 主循环，且 `.secmp` body 记录完整。
+3. 若交付 runtime 产物，按 runtime version 规则更新 `DEFAULT_RUNTIME_VERSION`、runtime manifest 和 release 说明。
+4. 让 `body-fetcher` 在 session-cache、runtime-events、mitmweb-http 之间按优先级选择来源。
+5. 增加更多 body API down/degraded 策略测试。
+6. 将内容过滤、导出、MCP body prepare 的共享逻辑继续收敛到 body-fetcher。
 7. 运行：
 
 ```bash
@@ -724,6 +737,7 @@ npm run test:session
 node scripts/test-body-fetch-policy.js
 npm run test:mitmweb-health
 npm run test:proxy-engine-diagnostics
+npm run test:runtime-events
 ```
 
 这一步能先降低 Windows 上 mitmweb HTTP body API 半失效造成的 body 丢失风险，并为后续 `BodySource` 和 runtime event protocol 替换主链路打基础。

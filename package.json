@@ -36,6 +36,7 @@
     "test:session": "node scripts/test-secmp-session.js",
     "test:mitmweb-health": "node scripts/test-mitmweb-health.js",
     "test:proxy-engine-diagnostics": "node scripts/test-proxy-engine-diagnostics.js",
+    "test:runtime-events": "node scripts/test-runtime-events.js",
     "l10n:check": "node scripts/check-l10n.js",
     "typecheck": "tsc --noEmit"
   },

@@ -11,6 +11,7 @@ const { CaptureSession } = require("./secmp_session");
 const { createSecmpMcpBridge } = require("./mcp_bridge");
 const { createMitmwebClient } = require("./proxy/mitmweb_client");
 const { createMitmwebHttpBodySource, createSessionCacheBodySource } = require("./proxy/body_source");
+const { createRuntimeBodyAssembler, createRuntimeEventReader } = require("./proxy/runtime_event_reader");
 
 let proxyProcess = null;
 let outputChannel = null;
@@ -58,7 +59,7 @@ let mcpRegistryUpdateTimer = null;
 let mcpRegistryHeartbeatTimer = null;
 
 const TOOLS_DIR = path.join(__dirname, "tools");
-const DEFAULT_RUNTIME_VERSION = "0.3.4";
+const DEFAULT_RUNTIME_VERSION = "0.3.8-ts";
 const DEFAULT_RUNTIME_REPO = "https://github.com/XuanBoWu/mitm-proxy-extension";
 const GITHUB_RELEASE_API_URL = "https://api.github.com/repos/XuanBoWu/mitm-proxy-extension/releases/latest";
 const GITHUB_RELEASE_LATEST_URL = `${DEFAULT_RUNTIME_REPO}/releases/latest`;
@@ -128,6 +129,11 @@ const mitmwebClient = createMitmwebClient({
 });
 const mitmwebBodySource = createMitmwebHttpBodySource({ mitmwebClient });
 const sessionCacheBodySource = createSessionCacheBodySource({ getSession: () => activeSession });
+const runtimeBodyAssembler = createRuntimeBodyAssembler({
+  onBodyComplete: handleRuntimeBodyComplete,
+  onBodyError: handleRuntimeBodyError,
+  onError: (err) => log(`Runtime body event ignored: ${err.message}`),
+});
 let extensionStorageDir = null;
 let certDir = path.join(__dirname, "certificate");
 let packagedRuntimeReadyPromise = null;
@@ -1689,6 +1695,41 @@ function extractRuntimeFatalFromStderr(stderrText, options = {}) {
     }
   }
   return fatal;
+}
+
+function handleRuntimeCaptureEvent(event, options = {}) {
+  if (!event || typeof event !== "object") return;
+  if (runtimeBodyAssembler.handleEvent(event)) return;
+
+  if (event.type === "runtime/ready") {
+    const nextWebPort = Number(event.webPort);
+    if (Number.isInteger(nextWebPort) && nextWebPort > 0 && !webPort) {
+      webPort = nextWebPort;
+      log(`Runtime event web UI port: ${webPort}`);
+    }
+    if (event.authToken && !authToken) {
+      authToken = String(event.authToken);
+      log("Runtime event auth token received");
+    }
+    if (typeof options.onReady === "function") options.onReady(event);
+    return;
+  }
+
+  if (event.type === "runtime/fatal") {
+    log(`Runtime event fatal (${event.component || "runtime"}): ${event.message || ""}`);
+    if (typeof options.onFatal === "function") options.onFatal(event);
+    return;
+  }
+
+  if (event.type === "runtime/health") {
+    log(`Runtime health: ${event.message || event.bodyPipeline || event.mitmwebHttp || "ok"}`);
+    return;
+  }
+
+  if (event.type === "flow/meta") {
+    // Flow metadata continues to be reconciled through mitmweb for now.
+    return;
+  }
 }
 
 function getMitmwebHealthSnapshot() {
@@ -4280,6 +4321,7 @@ async function startProxyEngine(options = {}) {
 
     activeCaptureNetwork = captureNetwork;
     mitmwebClient.resetHealth();
+    runtimeBodyAssembler.reset();
 
     proxyProcess = spawn(engine.command, spawnArgs, {
       stdio: ["pipe", "pipe", "pipe"],
@@ -4292,6 +4334,19 @@ async function startProxyEngine(options = {}) {
     let startupTimer = null;
     let runtimeFatalMessage = "";
     let runtimeFatalComponent = "";
+    const runtimeEventReader = createRuntimeEventReader({
+      onEvent: (event) => handleRuntimeCaptureEvent(event, {
+        onReady: () => {
+          proxyReady = true;
+          resolveStarted();
+        },
+        onFatal: (fatalEvent) => {
+          runtimeFatalMessage = fatalEvent.message || "runtime fatal";
+          runtimeFatalComponent = fatalEvent.component || "runtime";
+        },
+      }),
+      onError: (err) => log(`Runtime event parse error: ${err.message}`),
+    });
 
     webPort = null;
     authToken = null;
@@ -4351,7 +4406,10 @@ async function startProxyEngine(options = {}) {
     });
 
     proxyProcess.stdout.on("data", (data) => {
-      log(`[proxy stdout] ${data.toString().trim()}`);
+      const passthrough = runtimeEventReader.push(data);
+      if (passthrough.length > 0) {
+        log(`[proxy stdout] ${passthrough.join("\n").trim()}`);
+      }
     });
 
     proxyProcess.on("error", (err) => {
@@ -4370,6 +4428,10 @@ async function startProxyEngine(options = {}) {
 
     proxyProcess.on("close", (code) => {
       log(`Proxy engine exited with code ${code}`);
+      const stdoutPassthrough = runtimeEventReader.flush();
+      if (stdoutPassthrough.length > 0) {
+        log(`[proxy stdout] ${stdoutPassthrough.join("\n").trim()}`);
+      }
       const finalRuntimeFatal = runtimeFatalMessage
         ? { message: runtimeFatalMessage, component: runtimeFatalComponent }
         : extractRuntimeFatalFromStderr(stderrBuffer, { includeTrailingPartial: true });
@@ -5139,6 +5201,12 @@ function isLikelyBinaryBuffer(buf) {
   return controlBytes / sampleLength > 0.1;
 }
 
+function resolveBodyContentKind(buf, contentType, contentKind = "") {
+  if (contentKind === "binary") return "binary";
+  if (contentKind === "text") return "text";
+  return isBinaryContentType(contentType) || isLikelyBinaryBuffer(buf) ? "binary" : "text";
+}
+
 // Per-side body lifecycle: (absent) -> "loading" -> "ready" | "error" | "unavailable".
 // "pending" means the response has not finished yet, so its body must not be
 // fetched — a premature fetch would cache an empty/partial body forever.
@@ -5259,14 +5327,8 @@ async function hydrateFlowBodyFromSession(flow, side) {
 }
 
 function applyFetchedBody(flow, side, buf, contentType, options = {}) {
-  let binary;
-  if (options.contentKind === "binary") {
-    binary = true;
-  } else if (options.contentKind === "text") {
-    binary = false;
-  } else {
-    binary = isBinaryContentType(contentType) || isLikelyBinaryBuffer(buf);
-  }
+  const contentKind = resolveBodyContentKind(buf, contentType, options.contentKind);
+  const binary = contentKind === "binary";
   if (side === "request") {
     if (binary) {
       flow.req_body_base64 = buf.toString("base64");
@@ -5288,15 +5350,59 @@ function applyFetchedBody(flow, side, buf, contentType, options = {}) {
   }
   setBodyState(flow, side, "ready");
   clearBodyFetchFailure(flow, side);
-  if (options.persist !== false && activeSession) {
+  if (options.persist !== false && activeSession && !sessionHasBody(flow.id, side)) {
     activeSession.appendBody(flow.id, side, buf, {
       contentType,
-      contentKind: binary ? "binary" : "text",
+      contentKind,
     });
     scheduleActiveSessionBufferFlush();
     scheduleActiveSessionSync();
   }
   flow._bodyFetched = !!(flow._reqBodyFetched && flow._resBodyFetched);
+}
+
+function sessionHasBody(flowId, side) {
+  return !!(activeSession && activeSession.bodyState(flowId, side).state === "ready");
+}
+
+function persistRuntimeBodyToSession(flowId, side, buf, contentType, contentKind) {
+  if (!activeSession || sessionHasBody(flowId, side)) return false;
+  activeSession.appendBody(flowId, side, buf, {
+    contentType,
+    contentKind,
+  });
+  scheduleActiveSessionBufferFlush();
+  scheduleActiveSessionSync();
+  return true;
+}
+
+function handleRuntimeBodyComplete(result) {
+  if (!result?.flowId || !Buffer.isBuffer(result.buffer)) return;
+  const side = result.side === "request" ? "request" : "response";
+  const contentType = result.contentType || "";
+  const contentKind = resolveBodyContentKind(result.buffer, contentType, result.contentKind);
+  const flow = capturedFlowById.get(result.flowId);
+  const shouldPersist = !sessionHasBody(result.flowId, side);
+  if (flow) {
+    applyFetchedBody(flow, side, result.buffer, contentType, {
+      contentKind,
+      persist: shouldPersist,
+    });
+    syncFetchedBodiesToCurrentFlow(flow);
+  } else {
+    persistRuntimeBodyToSession(result.flowId, side, result.buffer, contentType, contentKind);
+  }
+}
+
+function handleRuntimeBodyError(result) {
+  if (!result?.flowId) return;
+  const flow = capturedFlowById.get(result.flowId);
+  if (!flow) return;
+  const side = result.side === "request" ? "request" : "response";
+  if (!getBodyFetched(flow, side)) {
+    setBodyState(flow, side, result.retryable ? "error" : "unavailable", result.message || "");
+    syncFetchedBodiesToCurrentFlow(flow);
+  }
 }
 
 async function fetchFlowBodies(flow, scopes = { request: true, response: true }) {

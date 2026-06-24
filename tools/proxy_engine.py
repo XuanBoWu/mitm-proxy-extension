@@ -7,6 +7,8 @@ SecMP proxy engine - 基于 mitmproxy WebMaster 的抓包引擎。
 
 import sys
 import os
+import base64
+import hashlib
 import json
 import secrets
 import logging
@@ -19,6 +21,9 @@ import traceback
 EXPECTED_MITMPROXY_VERSION = "12.2.2"
 FATAL_TORNADO_SELECTOR_EXIT_CODE = 88
 WINDOWS_EVENT_LOOP_POLICY_ENV = "SECMP_WINDOWS_EVENT_LOOP_POLICY"
+RUNTIME_EVENT_PREFIX = "SECMPRT_EVENT="
+RUNTIME_EVENT_BODY_CHUNK_BYTES = 64 * 1024
+DEFAULT_RUNTIME_EVENT_BODY_MAX_BYTES = 8 * 1024 * 1024
 
 
 class UpstreamBindAddon:
@@ -28,6 +33,70 @@ class UpstreamBindAddon:
     def server_connect(self, data):
         if self.connect_addr and not data.server.sockname:
             data.server.sockname = (self.connect_addr, 0)
+
+
+class RuntimeCaptureEventAddon:
+    def __init__(self, max_body_bytes=DEFAULT_RUNTIME_EVENT_BODY_MAX_BYTES):
+        self.max_body_bytes = max(0, int(max_body_bytes or 0))
+
+    def request(self, flow):
+        self.emit_body(flow, "request", getattr(flow, "request", None))
+
+    def response(self, flow):
+        self.emit_body(flow, "response", getattr(flow, "response", None))
+
+    def error(self, flow):
+        flow_id = getattr(flow, "id", "")
+        if flow_id and getattr(flow, "error", None):
+            emit_runtime_event({
+                "type": "body/error",
+                "flowId": flow_id,
+                "side": "response",
+                "message": str(flow.error),
+                "retryable": False,
+            })
+
+    def emit_body(self, flow, side, message):
+        if not flow or not message:
+            return
+        body = get_message_body_bytes(message)
+        if not body:
+            return
+        flow_id = getattr(flow, "id", "")
+        if not flow_id:
+            return
+        content_type = get_message_content_type(message)
+        if self.max_body_bytes and len(body) > self.max_body_bytes:
+            emit_runtime_event({
+                "type": "body/error",
+                "flowId": flow_id,
+                "side": side,
+                "message": f"body size {len(body)} exceeds runtime event limit {self.max_body_bytes}",
+                "retryable": True,
+            })
+            return
+
+        offset = 0
+        for start in range(0, len(body), RUNTIME_EVENT_BODY_CHUNK_BYTES):
+            chunk = body[start:start + RUNTIME_EVENT_BODY_CHUNK_BYTES]
+            emit_runtime_event({
+                "type": "body/chunk",
+                "flowId": flow_id,
+                "side": side,
+                "encoding": "base64",
+                "contentType": content_type,
+                "offset": offset,
+                "data": base64.b64encode(chunk).decode("ascii"),
+            })
+            offset += len(chunk)
+        emit_runtime_event({
+            "type": "body/complete",
+            "flowId": flow_id,
+            "side": side,
+            "size": len(body),
+            "sha256": hashlib.sha256(body).hexdigest(),
+            "contentType": content_type,
+        })
 
 if sys.platform == "win32":
     sys.stdout = open(sys.stdout.fileno(), mode="w", encoding="utf-8", buffering=1)
@@ -44,6 +113,38 @@ logging.basicConfig(
 def write_stderr_line(line):
     sys.stderr.write(f"{line}\n")
     sys.stderr.flush()
+
+
+def write_stdout_line(line):
+    sys.stdout.write(f"{line}\n")
+    sys.stdout.flush()
+
+
+def emit_runtime_event(event):
+    write_stdout_line(RUNTIME_EVENT_PREFIX + json.dumps(event, ensure_ascii=False, sort_keys=True))
+
+
+def get_message_content_type(message):
+    try:
+        return message.headers.get("content-type", "") or ""
+    except Exception:
+        return ""
+
+
+def get_message_body_bytes(message):
+    body = getattr(message, "raw_content", None)
+    if body is None:
+        body = getattr(message, "content", None)
+    if body is None:
+        return b""
+    if isinstance(body, bytes):
+        return body
+    if isinstance(body, str):
+        return body.encode("utf-8", errors="replace")
+    try:
+        return bytes(body)
+    except Exception:
+        return b""
 
 
 def get_tornado_version():
@@ -178,6 +279,12 @@ def main():
         default="lazy",
         help="When mitmproxy establishes upstream server connections",
     )
+    parser.add_argument(
+        "--runtime-event-body-max-bytes",
+        type=int,
+        default=DEFAULT_RUNTIME_EVENT_BODY_MAX_BYTES,
+        help="Maximum request/response body size emitted through runtime capture events; 0 disables the limit",
+    )
     args = parser.parse_args()
 
     if args.check_deps:
@@ -230,6 +337,7 @@ def main():
         master = WebMaster(opts)
         if args.connect_addr:
             master.addons.add(UpstreamBindAddon(args.connect_addr))
+        master.addons.add(RuntimeCaptureEventAddon(args.runtime_event_body_max_bytes))
         # web_host/web_port registered by WebAddon, must set AFTER WebMaster creation
         master.options.update(
             web_host="127.0.0.1",
@@ -247,6 +355,13 @@ def main():
         sys.stderr.write(f"CONNECTION_STRATEGY={args.connection_strategy}\n")
         sys.stderr.write(f"Proxy server listening on {args.host}:{args.port}\n")
         sys.stderr.flush()
+        emit_runtime_event({
+            "type": "runtime/ready",
+            "webPort": args.web_port,
+            "authToken": auth_token,
+            "proxyPort": args.port,
+            "runtimeApiVersion": 1,
+        })
 
         try:
             await master.run()

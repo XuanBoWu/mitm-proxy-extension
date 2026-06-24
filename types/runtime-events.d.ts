@@ -1,6 +1,8 @@
 import type { FlowBodySide, MitmwebFlow } from "./flow";
 import type { BodyPipelineHealth } from "./proxy-health";
 
+export const RUNTIME_EVENT_PREFIX: "SECMPRT_EVENT=";
+
 export type RuntimeCaptureEventType =
   | "runtime/ready"
   | "flow/meta"
@@ -32,6 +34,7 @@ export interface RuntimeBodyChunkEvent {
   side: FlowBodySide;
   encoding: "base64";
   contentType?: string;
+  contentKind?: "text" | "binary" | "unknown" | string;
   data: string;
   offset?: number;
 }
@@ -43,6 +46,7 @@ export interface RuntimeBodyCompleteEvent {
   size: number;
   sha256?: string;
   contentType?: string;
+  contentKind?: "text" | "binary" | "unknown" | string;
 }
 
 export interface RuntimeBodyErrorEvent {
