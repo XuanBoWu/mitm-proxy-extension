@@ -12,8 +12,13 @@ import secrets
 import logging
 import asyncio
 import argparse
+import platform
+import threading
+import traceback
 
 EXPECTED_MITMPROXY_VERSION = "12.2.2"
+FATAL_TORNADO_SELECTOR_EXIT_CODE = 88
+WINDOWS_EVENT_LOOP_POLICY_ENV = "SECMP_WINDOWS_EVENT_LOOP_POLICY"
 
 
 class UpstreamBindAddon:
@@ -34,6 +39,88 @@ logging.basicConfig(
     format="%(message)s",
     stream=sys.stderr,
 )
+
+
+def write_stderr_line(line):
+    sys.stderr.write(f"{line}\n")
+    sys.stderr.flush()
+
+
+def get_tornado_version():
+    try:
+        import tornado
+        return getattr(tornado, "version", "") or getattr(tornado, "__version__", "")
+    except Exception as e:
+        return f"unavailable: {e}"
+
+
+def get_event_loop_policy_name():
+    try:
+        return type(asyncio.get_event_loop_policy()).__name__
+    except Exception as e:
+        return f"unavailable: {e}"
+
+
+def configure_windows_event_loop_policy():
+    if sys.platform != "win32":
+        return get_event_loop_policy_name()
+
+    requested = os.environ.get(WINDOWS_EVENT_LOOP_POLICY_ENV, "selector").strip().lower()
+    if requested in ("", "selector", "windowsselector"):
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    elif requested in ("default", "proactor", "windowsproactor"):
+        # Keep Python's default Windows policy for A/B comparison.
+        pass
+    else:
+        write_stderr_line(
+            f"RUNTIME_DIAGNOSTIC_WARNING=unknown {WINDOWS_EVENT_LOOP_POLICY_ENV}={requested}; using current policy"
+        )
+    return get_event_loop_policy_name()
+
+
+def emit_runtime_diagnostics(actual_loop=None, mitmproxy_version=""):
+    diagnostics = {
+        "python": sys.version.replace("\n", " "),
+        "pythonExecutable": sys.executable,
+        "platform": platform.platform(),
+        "system": sys.platform,
+        "mitmproxy": mitmproxy_version,
+        "tornado": get_tornado_version(),
+        "asyncioPolicy": get_event_loop_policy_name(),
+        "asyncioLoop": type(actual_loop).__name__ if actual_loop else "",
+    }
+    write_stderr_line("RUNTIME_DIAGNOSTICS=" + json.dumps(diagnostics, ensure_ascii=False, sort_keys=True))
+
+
+def install_threading_excepthook():
+    if not hasattr(threading, "excepthook"):
+        return
+
+    previous_hook = threading.excepthook
+
+    def secmp_threading_excepthook(args):
+        thread_name = getattr(args.thread, "name", "") or ""
+        message = "".join(traceback.format_exception(args.exc_type, args.exc_value, args.exc_traceback)).strip()
+        fatal = "Tornado selector" in thread_name
+        payload = {
+            "component": "tornado-selector" if fatal else "thread",
+            "thread": thread_name,
+            "exception": getattr(args.exc_type, "__name__", str(args.exc_type)),
+            "message": str(args.exc_value),
+            "fatal": fatal,
+        }
+        prefix = "RUNTIME_FATAL" if fatal else "RUNTIME_THREAD_EXCEPTION"
+        write_stderr_line(prefix + "=" + json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        if message:
+            write_stderr_line(message)
+        try:
+            previous_hook(args)
+        except Exception:
+            pass
+        if fatal:
+            os._exit(FATAL_TORNADO_SELECTOR_EXIT_CODE)
+
+    threading.excepthook = secmp_threading_excepthook
 
 
 def load_mitmproxy():
@@ -75,6 +162,9 @@ def check_dependencies():
 
 
 def main():
+    install_threading_excepthook()
+    selected_policy = configure_windows_event_loop_policy()
+
     parser = argparse.ArgumentParser(description="SecMP proxy engine")
     parser.add_argument("--check-deps", action="store_true", help="Check runtime dependencies and exit")
     parser.add_argument("--host", default="0.0.0.0", help="Listen host")
@@ -101,7 +191,7 @@ def main():
         sys.stderr.flush()
         sys.exit(1)
 
-    options, WebMaster, _ = load_mitmproxy()
+    options, WebMaster, actual_mitmproxy_version = load_mitmproxy()
 
     if not args.confdir:
         script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -132,6 +222,11 @@ def main():
     )
 
     async def run_proxy():
+        emit_runtime_diagnostics(
+            actual_loop=asyncio.get_running_loop(),
+            mitmproxy_version=actual_mitmproxy_version,
+        )
+        write_stderr_line(f"ASYNCIO_EVENT_LOOP_POLICY={selected_policy}")
         master = WebMaster(opts)
         if args.connect_addr:
             master.addons.add(UpstreamBindAddon(args.connect_addr))

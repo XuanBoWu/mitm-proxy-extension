@@ -62,6 +62,22 @@ function loadExtensionTestApi() {
 function main() {
   const api = loadExtensionTestApi();
   assert(api, "extension test API should be exported");
+  assert.strictEqual(
+    api.extractRuntimeFatalFromStderr('RUNTIME_FATAL={"component":"tornado-selector","message":"WinError 10038"}'),
+    null,
+    "runtime fatal parser should wait for a complete stderr line"
+  );
+  const fatalLine = api.extractRuntimeFatalFromStderr(
+    'prefix\nRUNTIME_FATAL={"component":"tornado-selector","message":"WinError 10038"}\ntraceback\n'
+  );
+  assert.strictEqual(fatalLine.component, "tornado-selector", "runtime fatal parser should read component");
+  assert.strictEqual(fatalLine.message, "WinError 10038", "runtime fatal parser should read message");
+  const fatalAtEof = api.extractRuntimeFatalFromStderr(
+    'RUNTIME_FATAL={"component":"runtime","message":"fatal at EOF"}',
+    { includeTrailingPartial: true }
+  );
+  assert.strictEqual(fatalAtEof.component, "runtime", "runtime fatal parser should support close-time EOF component");
+  assert.strictEqual(fatalAtEof.message, "fatal at EOF", "runtime fatal parser should support close-time EOF message");
 
   const now = Date.now();
   const backgroundOptions = {

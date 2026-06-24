@@ -41,6 +41,15 @@ export interface SecmpExtensionConfig extends SecmpPreferencePatch {
   updateCheckIntervalHours: number;
 }
 
+export interface HealthSnapshot {
+  status: "unknown" | "healthy" | "degraded" | "down" | string;
+  source?: string;
+  consecutiveFailures: number;
+  lastOkAt?: number;
+  lastFailureAt?: number;
+  lastError?: string;
+}
+
 export interface EnvironmentStatus {
   extension?: {
     version?: string;
@@ -56,6 +65,18 @@ export interface EnvironmentStatus {
     path?: string;
     ready?: boolean;
     [key: string]: unknown;
+  };
+  mitmproxy?: {
+    running?: boolean;
+    version?: string;
+    error?: string;
+    http?: HealthSnapshot;
+    bodyApi?: HealthSnapshot;
+    [key: string]: unknown;
+  };
+  bodyPipeline?: HealthSnapshot & {
+    source: "mitmweb-http" | "runtime-events" | "session-cache" | string;
+    backlog?: number;
   };
   mcp?: McpEnvironmentInfo;
   proxy?: {

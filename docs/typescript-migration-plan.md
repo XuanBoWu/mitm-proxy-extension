@@ -2,13 +2,14 @@
 
 本文档是 SecMP 从 JavaScript 增量迁移到 TypeScript 的执行方案。后续 agent 处理 TypeScript 相关任务时，应先阅读本文，再决定是否进入具体阶段。
 
-当前状态：Stage 0 基础设施已落地，已新增 `tsconfig.json`、`npm run typecheck`、TypeScript devDependencies 和 `types/*.d.ts` 协议类型蓝本；运行入口仍为 `./extension.js`，尚未迁移任何源码文件。
+当前状态：Stage 0 基础设施已落地；Stage 1a 已开始，已新增 CommonJS `proxy/mitmweb_client.js` 作为 mitmweb HTTP keep-alive client，并把 HTTP/body API health 接入 extension/Webview/MCP 状态。Stage 1b 已开始，`fetchFlowBodies` 通过 `proxy/body_source.js` 的 `session-cache` 与 `mitmweb-http` BodySource 读取 body，为后续 runtime event body store 替换主链路预留接口。Stage 1c 已开始，`tools/proxy_engine.py` 会输出 runtime diagnostics，Windows 默认使用 selector event loop policy，并在 Tornado selector thread fatal 时主动退出；extension 会把 `RUNTIME_FATAL` 映射为 proxy error。运行入口仍为 `./extension.js`，尚未切换到 TS 编译产物。
 
 ## 目标
 
 - 在不破坏现有 VSIX 打包、runtime 分发和 Webview 加载方式的前提下，引入 TypeScript。
 - 优先类型化高风险协议边界：Webview 消息、mitmweb flow JSON、runtime manifest、MCP JSON-RPC、session flow/body state、`secmp.*` 配置。
-- 逐步拆分 `extension.js` 的职责，降低代理生命周期、body 拉取、会话、MCP 和 Webview 消息处理之间的耦合。
+- 逐步拆分 `extension.js` 的职责，优先稳定 proxy/body 获取链路，再降低代理生命周期、body 拉取、会话、MCP 和 Webview 消息处理之间的耦合。
+- 借 TS 模块化迁移替换脆弱的 body 获取主链路，最终让 body 持久化不依赖 mitmweb/Tornado Web API。
 - 让每个阶段都能单独验证、单独 review、单独回滚。
 
 ## 非目标
@@ -30,16 +31,37 @@
 | `mcp/secmp-mcp-server.js` | 约 0.5k | MCP stdio server、JSON-RPC 工具路由 | 中高 |
 | `scripts/*.js` | 约 1.1k | l10n 检查、会话测试、runtime 安装烟测、bench | 中，可后置 |
 
+## 关键 bug 与路线调整
+
+2026-06-24 的会话文件和日志显示，Windows 上可能出现 mitmweb/Tornado Web 服务半失效：`/updates` WebSocket 和 `/flows.json` 仍能继续提供 flow metadata，但 `/flows/{id}/request/content.data`、`/flows/{id}/response/content.data` body API 开始 timeout 或连接失败，导致 `.secmp` 只保存 metadata，缺失实际 response body。
+
+已验证的现象：
+
+- 异常点前一个 flow 仍正常保存 body。
+- 异常 flow metadata 中存在非零 response size，但 `.secmp` 没有对应 response body 记录。
+- Windows 日志出现 `Exception in thread Tornado selector` 和 `OSError: [WinError 10038] 在一个非套接字上尝试了一个操作`。
+- proxy 主进程可能继续存活，extension 误以为代理健康；UI/MCP 继续看到 flow 增长，但 body 状态变为 `error`。
+
+根因高概率是 Windows 上 Python Proactor event loop 与 Tornado `AddThreadSelectorEventLoop` 兼容层在高频 loopback HTTP API 访问下发生 selector thread 竞态。当前实现频繁对 mitmweb body API 发起短连接请求，会放大该问题。
+
+因此，TS 迁移不能只是把当前实现类型化。后续阶段必须优先把 proxy/body 链路模块化并替换 body 持久化主路径：
+
+1. 短期封装并观测现有 mitmweb HTTP API，降低短连接压力并暴露 body API 健康状态。
+2. 中期把 body-fetcher 改为依赖 `BodySource` 抽象，不永久绑定 mitmweb HTTP API。
+3. 在 runtime 增加 fatal diagnostics，让 Tornado selector thread 异常能主动终止 proxy 进程并反馈到 extension/UI。
+4. 设计 runtime capture event protocol，由 `proxy_engine.py` 主动推送 flow/body 事件，最终让 body 持久化不再依赖 mitmweb Web API。
+
 ## 总体结论
 
-迁移可行，工程难度中等。最大风险不是 TypeScript 本身，而是 `extension.js` 当前承载过多模块级状态，直接 `extension.js -> extension.ts` 会产生大量类型错误和 review 噪音。
+迁移可行，工程难度中等。最大风险不是 TypeScript 本身，而是 `extension.js` 当前承载过多模块级状态，且 body 持久化主链路依赖 mitmweb/Tornado HTTP API。直接 `extension.js -> extension.ts` 会产生大量类型错误和 review 噪音，也会把现有脆弱链路原样固化到 TS 中。
 
 正确路线是：
 
 1. 先建立 TypeScript 基础设施和协议类型，但不改变运行入口。
-2. 迁移边界清晰的 Node 模块。
-3. 先把 `extension.js` 做无行为变化的 JS 模块拆分，再逐模块迁移到 TS。
-4. Webview 独立排期，最后再决定是否从 `app.ts` 编译到 `app.js`。
+2. 优先封装 mitmweb client 和 body-fetcher，增加 body API 健康状态，保持行为基本不变但不再隐藏半失效。
+3. 增加 proxy runtime fatal diagnostics，并设计 runtime capture event protocol。
+4. 再迁移边界清晰的 Node 模块和 extension proxy 相关模块。
+5. Webview 独立排期，最后再决定是否从 `app.ts` 编译到 `app.js`。
 
 ## 迁移原则
 
@@ -50,6 +72,8 @@
 - TypeScript 不能替代外部输入校验。mitmweb、MCP、session 文件、用户配置、ADB 输出仍需 normalize 或运行时校验。
 - `strict` 分阶段收紧，不在第一阶段全局开启所有严格检查。
 - 迁移不改变 `secmp.*` 配置 key，不改变 Webview message 字段语义，不改变 runtime 命令/输出协议。
+- 不把 mitmweb WebSocket 是否存活等同于 body API 是否健康；flow feed health 和 body pipeline health 必须分开建模。
+- body 获取失败不能直接等同于业务 body 为空；必须区分真实空 body、未加载、HTTP API 不可用、proxy 已停止且不可恢复。
 
 ## 推荐目录与产物策略
 
@@ -72,8 +96,11 @@ src/
   proxy/
     lifecycle.ts
     mitmweb-client.ts
+    body-source.ts
+    body-store.ts
     flow-transform.ts
     body-fetcher.ts
+    runtime-event-reader.ts
   session/
     secmp-session.ts
   adb/
@@ -121,6 +148,9 @@ webview/
   - `session.ts` 或 `session.d.ts`
   - `mcp.ts` 或 `mcp.d.ts`
   - `config.ts` 或 `config.d.ts`
+  - `proxy-health.ts` 或 `proxy-health.d.ts`
+  - `body-source.ts` 或 `body-source.d.ts`
+  - `runtime-events.ts` 或 `runtime-events.d.ts`
 - 初始不改 `package.json.main`。
 - 初始不改 `.vscodeignore` 的产物策略，除非实际新增 `src/` 或 `types/`。
 
@@ -173,80 +203,285 @@ npm run test:session
 - 扩展仍从 `./extension.js` 启动。
 - VSIX 打包路径不变。
 
-## Stage 1: 迁移独立 Node 模块
+## Stage 1: 稳定 proxy/body 获取链路
 
-目标：选择低耦合模块先迁移，验证 TS 编译产物策略。
+目标：不要把当前 mitmweb HTTP body API 依赖原样迁移到 TS。先把现有链路封装、观测、降级，再为 runtime 主动 body event 协议铺路。
 
-推荐顺序：
+### Stage 1a: Stabilize mitmweb client
 
-1. `secmp_session.js`
-2. `mcp_bridge.js`
-3. `mcp/secmp-mcp-server.js`
-4. 部分 `scripts/*.js`
+目标：抽出 mitmweb HTTP client，保持用户行为基本不变，但集中 timeout、错误类型、keep-alive 和健康状态。
 
-执行方式：
+建议模块：
 
-- 先决定产物策略，再迁移文件。不要让根目录源码长期 `require("./out/...")`。
-- 若此阶段开始生成产物，应统一引入：
-  - `rootDir: "src"` 或明确的多 root 策略
-  - `outDir: "out"`
-  - `npm run build`
-  - `vscode:prepublish`
-- 迁移 `secmp_session` 时优先定义：
-  - session header
-  - record meta
-  - persisted flow
-  - body side
-  - UI state
-  - proxy state
-- 迁移 `mcp_bridge` 时优先定义：
-  - bridge options
-  - bridge state
-  - service interface
-  - HTTP error shape
-- 迁移 `mcp/secmp-mcp-server` 时优先定义：
-  - JSON-RPC request/response
-  - tool schema
-  - bridge registry entry
-  - session selector
+```text
+src/proxy/mitmweb-client.ts
+```
+
+职责：
+
+- `getJson(path)`
+- `getBuffer(path)`
+- `request(method, path)`
+- `/flows.json`
+- `/flows/{id}/request/content.data`
+- `/flows/{id}/response/content.data`
+- `/clear`
+- timeout、`ECONNREFUSED`、HTTP >= 400 统一错误类型
+- mitmweb HTTP/body API 健康状态维护
+
+实现要求：
+
+- 使用 keep-alive HTTP Agent，降低 Windows loopback 短连接压力：
+
+```js
+new http.Agent({ keepAlive: true, maxSockets: 4 })
+```
+
+- 连续失败达到阈值后标记 `degraded` 或 `down`。
+- 一次成功请求应更新 `lastOkAt` 并逐步恢复健康状态。
+- `flowFeedStatus=websocket-live` 只能代表 flow metadata feed 健康，不能代表 body API 健康。
+- MCP status 和 Webview/environment status 应暴露 body API 状态。
+- body API 异常时 UI/MCP 应显示“body 服务异常/不可用”，不得把正文表现为真实空。
+
+核心类型：
+
+```ts
+type MitmwebHttpStatus = "unknown" | "healthy" | "degraded" | "down";
+
+interface MitmwebHealthSnapshot {
+  status: MitmwebHttpStatus;
+  consecutiveFailures: number;
+  lastOkAt?: number;
+  lastFailureAt?: number;
+  lastError?: string;
+}
+```
+
+测试建议：
+
+- `scripts/test-mitmweb-health.js`
+- 连续 timeout 后状态从 `healthy` 变为 `degraded/down`。
+- 成功请求后状态可恢复。
+- body API down 时不会把所有 body 立即永久标为真实空。
+
+完成标准：
+
+- 现有 body 拉取、过滤、导出继续工作。
+- `npm run typecheck`、`npm run test:session`、`node scripts/test-body-fetch-policy.js` 通过。
+- Webview/MCP 能区分 flow feed health 和 body API health。
+
+### Stage 1b: Extract body-fetcher state machine
+
+目标：抽出 `proxy/body-fetcher.ts`，统一 request/response body lifecycle、自动拉取队列、retry/backoff、停止前 drain、过滤和导出前 prepare。
+
+建议模块：
+
+```text
+src/proxy/body-fetcher.ts
+src/proxy/body-source.ts
+src/proxy/body-store.ts
+```
+
+`body-fetcher` 不应直接绑定 mitmweb HTTP API，应依赖抽象：
+
+```ts
+interface BodySource {
+  getBody(flowId: string, side: FlowBodySide): Promise<Buffer>;
+  getHealth(): BodyPipelineHealth;
+}
+```
+
+状态机必须明确区分：
+
+- 业务 body 真实为空。
+- body 尚未加载。
+- response 未完成，body 处于 `pending`。
+- body API 暂时不可用，可重试。
+- proxy 已停止且 body 不可恢复。
+- body 已从 session/runtime event store 命中。
+
+调整要求：
+
+- 自动拉取遇到 body API `down` 时应暂停或退避，不要把大量新 flow 永久写成 `error`。
+- 失败 body 应保留可重试状态；只有明确不可恢复时才进入 `unavailable`。
+- `.secmp` 应优先持久化实际 body；错误文本和失败状态不应替代 body 记录。
+- 导出和 MCP 获取 body 时可使用 `force` 策略重试，但应显示失败计数和 body pipeline health。
+
+核心类型：
+
+```ts
+interface BodyFetchResult {
+  requestOk: boolean;
+  responseOk: boolean;
+  requestError?: string;
+  responseError?: string;
+}
+
+interface BodyFetchPolicy {
+  maxBytes?: number;
+  retryErrors?: boolean;
+  maxAttempts?: number;
+  force?: boolean;
+  allowWhenHttpDegraded?: boolean;
+}
+```
+
+当前已落地：
+
+- `proxy/body_source.js` 定义 `mitmweb-http` BodySource，`fetchFlowBodies` 不再直接拼 mitmweb body API URL。
+- `proxy/body_source.js` 定义 `session-cache` BodySource，已持久化到 `.secmp` 的 body 会先从 session cache 命中。
+- session cache 命中只恢复 flow 内存状态，不会重复 append body 记录到 `.secmp`。
+- `secmp_session.js` 的 `bodyState()` 返回 `contentType` 和 `contentKind`，供 BodySource 保留文本/二进制判断。
+
+测试建议：
+
+- 扩展 `scripts/test-body-fetch-policy.js`。
+- 新增 body API down / degraded 时的 retry、pause、force 行为测试。
+- 验证 response 未完成时不拉取 response body，完成后可恢复拉取。
+- 覆盖 `session-cache` BodySource 命中与 cache miss 行为。
+
+完成标准：
+
+- body 状态机行为由测试覆盖。
+- 内容过滤、导出、MCP body 获取共享同一套 body prepare 逻辑。
+- body API down 时不会误把 body 当作真实空，也不会无限高频请求失败 API。
+
+### Stage 1c: Add proxy runtime fatal diagnostics
+
+目标：短期提高 Windows 诊断能力，避免 `proxy_engine.py` 在 Tornado selector thread 死亡后“假运行”。
+
+文件：
+
+```text
+tools/proxy_engine.py
+```
+
+建议改造：
+
+- Windows 启动时打印：
+  - Python version
+  - mitmproxy version
+  - Tornado version
+  - asyncio event loop policy
+  - actual loop type
+- 增加 `threading.excepthook`。
+- 如果线程名包含 `Tornado selector`，输出 fatal 日志并主动退出进程。
+- extension 侧把 child process close 映射为 proxy stopped/error，并同步到 Webview/MCP。
+
+当前已落地：
+
+- `tools/proxy_engine.py` 输出 `RUNTIME_DIAGNOSTICS={...}`，包含 Python、mitmproxy、Tornado、asyncio policy 和实际 loop。
+- Windows 默认设置 `asyncio.WindowsSelectorEventLoopPolicy()`；可通过 `SECMP_WINDOWS_EVENT_LOOP_POLICY=default` 或 `proactor` 做 A/B 对照。
+- `threading.excepthook` 捕获 `Tornado selector` 线程异常，输出 `RUNTIME_FATAL={...}` 后用固定退出码 `88` 主动退出。
+- `extension.js` 从 stderr 累计 buffer 中解析 `RUNTIME_FATAL` 完整行，启动失败或运行中退出时把状态映射为 proxy `error`。
+- `scripts/test-proxy-engine-diagnostics.js` 覆盖 diagnostics 输出和 Tornado selector fatal 退出。
+- `scripts/test-body-fetch-policy.js` 覆盖 extension 侧 `RUNTIME_FATAL` stderr 解析，包含分片和 EOF 兜底场景。
+
+Windows A/B 实验：
+
+```python
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+```
+
+如果该策略能稳定跑过大量 flow，根因基本锁定为 Proactor + Tornado selector shim。
+
+版本影响：
+
+- 修改 `tools/proxy_engine.py` 属于 runtime 变更。
+- 正式交付时必须更新 `DEFAULT_RUNTIME_VERSION` 和 runtime manifest。
+- 如果只是实验分支且不交付 packaged runtime，应在 PR/说明中明确不能作为正式 VSIX 候选发布。
 
 验证：
 
 ```bash
-npm run typecheck
-npm run build
-npm run test:session
-npm run l10n:check
-```
-
-若影响 runtime 安装测试，再运行：
-
-```bash
-npm run runtime:windows:test-install -- --runtime-zip <zip> --runtime-version <version>
+npm run runtime:windows -- -RuntimeVersion <new-version> -OutputDir dist
+.\scripts\test-windows-runtime.ps1 -RuntimeZip .\dist\secmp-runtime-win32-x64-<new-version>.zip -RuntimeVersion <new-version>
+npm run runtime:windows:test-install -- --runtime-zip .\dist\secmp-runtime-win32-x64-<new-version>.zip --runtime-version <new-version>
 ```
 
 完成标准：
 
-- 已迁移模块由 TS 编译。
-- 原有测试通过。
-- `package.json.main` 若仍指向 `./extension.js`，其依赖路径必须清晰且不形成长期技术债。
-- 若 `package.json.main` 已切到 `./out/extension.js`，VSIX 包内必须包含完整 `out/**`。
+- 本地脚本测试能证明 runtime diagnostics 输出和 fatal 退出码稳定。
+- Windows runtime 日志能明确输出事件循环和 Tornado selector fatal。
+- selector thread fatal 不再让 proxy 主进程假运行。
+- extension 能感知 runtime 退出并更新 UI/MCP 状态。
+- packaged Windows runtime 完成 selector/proactor A/B 实机压测后，才能作为正式 VSIX 候选交付。
 
-## Stage 2: 拆分并迁移 extension 主入口
+### Stage 1d: Introduce runtime capture event protocol
 
-目标：把 `extension.js` 从单文件状态机拆成可维护模块，再迁移到 TS。
+目标：中期替换 body 获取根路径。runtime 在 flow/body 到达时主动推送事件，extension 直接写 session，不再依赖 mitmweb Web API 作为 body 持久化主链路。
+
+建议模块：
+
+```text
+src/proxy/runtime-event-reader.ts
+src/proxy/body-store.ts
+types/runtime-events.d.ts
+```
+
+推荐传输：
+
+- 优先 stdout NDJSON 或单独 pipe。
+- 不复用 mitmweb/Tornado HTTP 服务。
+- stderr 继续保留人类可读日志；机器事件应有明确前缀或独立流，避免和日志混淆。
+
+事件类型建议：
+
+```ts
+type RuntimeCaptureEvent =
+  | RuntimeReadyEvent
+  | RuntimeFlowMetaEvent
+  | RuntimeBodyChunkEvent
+  | RuntimeBodyCompleteEvent
+  | RuntimeBodyErrorEvent
+  | RuntimeHealthEvent
+  | RuntimeFatalEvent;
+```
+
+示例：
+
+```json
+{"type":"runtime/ready","webPort":18844,"authToken":"...","proxyPort":8080}
+{"type":"flow/meta","flowId":"...","ordinal":886,"flow":{}}
+{"type":"body/chunk","flowId":"...","side":"response","encoding":"base64","contentType":"video/mp4","data":"..."}
+{"type":"body/complete","flowId":"...","side":"response","size":43354,"sha256":"..."}
+{"type":"body/error","flowId":"...","side":"response","message":"..."}
+{"type":"runtime/health","bodyPipeline":"healthy"}
+{"type":"runtime/fatal","component":"tornado-selector","message":"WinError 10038"}
+```
+
+迁移策略：
+
+1. 并行写入：保留 mitmweb HTTP body fetch，同时 runtime event protocol 也写 session/body store。
+2. 对比两条链路的 body size/hash。
+3. 稳定后将 runtime event body store 作为主 `BodySource`。
+4. mitmweb HTTP API 只保留为 fallback 或调试接口。
+
+完成标准：
+
+- runtime body event 能写入 `.secmp`。
+- runtime event body 与 mitmweb HTTP body 的 size/hash 可对账。
+- mitmweb HTTP API 半失效时，已经由 runtime event 到达的 body 不会丢。
+- 新协议若不兼容旧 runtime，必须 bump `PACKAGED_RUNTIME_API_VERSION`。
+
+## Stage 2: 拆分并迁移 Node/extension 模块
+
+目标：在 proxy/body 链路稳定后，把 `extension.js` 从单文件状态机拆成可维护模块，再迁移到 TS。
 
 禁止做法：
 
 - 禁止直接把 7k+ 行 `extension.js` 一次性改名为 `extension.ts` 并同时拆模块。
 - 禁止在同一个 PR 里混合功能改动、行为重构和 TS 严格化。
+- 禁止把当前 mitmweb HTTP body fetch 逻辑无抽象地搬进 `body-fetcher.ts`。
 
 推荐拆分顺序：
 
-1. 先做无行为变化的 JS 拆分。
+1. 先做无行为变化的 JS 拆分，优先 proxy/body 模块。
 2. 每拆出一个模块，跑现有 smoke test。
-3. 再逐模块改为 TS。
-4. 最后把瘦身后的主入口改为 `src/extension.ts`。
+3. 对 `mitmweb-client`、`body-source`、`body-fetcher` 增加健康状态和测试。
+4. 再逐模块改为 TS。
+5. 最后把瘦身后的主入口改为 `src/extension.ts`。
 
 推荐模块边界：
 
@@ -254,10 +489,13 @@ npm run runtime:windows:test-install -- --runtime-zip <zip> --runtime-version <v
 |------|------|
 | `runtime/manifest.ts` | runtime manifest 解析、版本和 `runtimeApiVersion` 兼容判断 |
 | `runtime/installer.ts` | global storage runtime 缓存、下载、解压、校验、清理 |
-| `proxy/lifecycle.ts` | 启动/停止 `proxy_engine`、stderr 解析 `WEB_PORT` / `AUTH_TOKEN` |
-| `proxy/mitmweb-client.ts` | `/flows.json` 轮询、`/updates` WebSocket、断线重连、对账 |
-| `proxy/flow-transform.ts` | mitmweb `flow_to_json` 到 Webview flow 的转换 |
-| `proxy/body-fetcher.ts` | request/response body 按需拉取、后台拉取、状态机、重试策略 |
+| `proxy/lifecycle.ts` | 启动/停止 `proxy_engine`、stderr/事件流解析 `WEB_PORT` / `AUTH_TOKEN` / fatal |
+| `proxy/mitmweb-client.ts` | mitmweb HTTP API、`/flows.json`、body API、`/clear`、HTTP health |
+| `proxy/runtime-event-reader.ts` | runtime NDJSON/pipe 事件读取、runtime health/fatal 事件分发 |
+| `proxy/body-source.ts` | `BodySource` 抽象、mitmweb HTTP/session/runtime event source 组合 |
+| `proxy/body-store.ts` | runtime event body chunk/complete 写入和 size/hash 对账 |
+| `proxy/flow-transform.ts` | mitmweb/runtime flow metadata 到 Webview flow 的转换 |
+| `proxy/body-fetcher.ts` | request/response body prepare、队列、retry/backoff、drain、filter/export/MCP 共享入口 |
 | `adb/device.ts` | ADB 设备、root、代理设置、网卡/IP |
 | `cert/manager.ts` | `cert_manager` 子进程封装、证书推送状态 |
 | `webview/host.ts` | Webview panel 创建、HTML 注入、消息分发 |
@@ -266,15 +504,26 @@ npm run runtime:windows:test-install -- --runtime-zip <zip> --runtime-version <v
 | `config.ts` | VS Code configuration 读取、迁移、默认值 |
 | `extension.ts` | `activate` / `deactivate` 和依赖装配 |
 
+低耦合模块仍适合在 Stage 2 中迁移：
+
+1. `secmp_session.js`
+2. `mcp_bridge.js`
+3. `mcp/secmp-mcp-server.js`
+4. 部分 `scripts/*.js`
+
 高价值类型：
 
 - `SecmpFlow`
 - `FlowBodyState`
 - `FlowBodySide`
+- `BodyPipelineHealth`
+- `BodySource`
 - `BodyFetchPolicy`
 - `BodyFetchResult`
+- `MitmwebHealthSnapshot`
 - `MitmwebFlowEnvelope`
 - `MitmwebUpdateMessage`
+- `RuntimeCaptureEvent`
 - `RuntimeInstallResult`
 - `ProxyRuntimeState`
 - `WebviewToExtensionMessage`
@@ -288,6 +537,8 @@ npm run build
 npm run test:session
 npm run l10n:check
 node scripts/test-body-fetch-policy.js
+node scripts/test-mitmweb-health.js
+node scripts/test-runtime-event-protocol.js
 ```
 
 有 runtime zip 时：
@@ -301,9 +552,10 @@ node scripts/test-extension-runtime-install.js --runtime-zip <zip> --runtime-ver
 - `package.json.main` 指向 `./out/extension.js`。
 - `activate` / `deactivate` 行为与迁移前一致。
 - Webview message 协议字段不变。
-- Windows/macOS packaged runtime 路径不变。
+- Windows/macOS packaged runtime 路径不变，除非该阶段明确包含 runtime 变更和 runtime version bump。
 - Linux/source-dev Python 启动路径不变。
 - body 拉取、导出、session 持久化 smoke test 通过。
+- flow feed health、body pipeline health、runtime process health 三者可单独观测。
 
 ## Stage 3: Webview 迁移
 
@@ -420,6 +672,10 @@ npx --yes @vscode/vsce package --allow-missing-repository
 | 风险 | 缓解 |
 |------|------|
 | `extension.js` 模块级状态多，拆分易回归 | 先 JS 无行为拆分，再逐模块 TS 化；每步跑 smoke test |
+| Windows 上 mitmweb/Tornado HTTP body API 半失效但 proxy 主进程仍存活 | Stage 1a 单独建模 body API health；Stage 1c 增加 runtime fatal diagnostics |
+| WebSocket 仍 live 导致误判 body pipeline 健康 | flow feed health、body pipeline health、runtime process health 分离 |
+| body API down 后大量 flow 被永久标为 `error` | body-fetcher 在 `down` 时 pause/backoff，失败保持可重试，明确不可恢复时才 `unavailable` |
+| body 持久化依赖“事后回头问” mitmweb HTTP API | Stage 1d 设计 runtime capture event protocol，body 到达时主动写 session/body store |
 | `strict` 错误数失控 | 分阶段打开严格选项，允许边界处短期 `any` |
 | Webview 裸脚本迁移破坏加载 | Webview 放到 Stage 3，保持输出文件仍为 `webview/app.js` |
 | VSIX 缺少编译产物 | 切换 `main` 前先验证 `npx --yes @vscode/vsce package --allow-missing-repository` |
@@ -437,6 +693,8 @@ npx --yes @vscode/vsce package --allow-missing-repository
 - 明确是否改变运行入口、VSIX 产物、CI、用户可见行为。
 - 明确是否需要 bump package version；规划文档和内部规则通常不需要。
 - 明确是否影响 packaged runtime；TS 迁移通常不影响。
+- 若改 proxy/body 链路，必须说明 flow feed health、body pipeline health、runtime process health 的影响范围。
+- 若改 `tools/proxy_engine.py`、runtime event protocol 或 extension-runtime 协议，必须按 runtime version 规则评估 `DEFAULT_RUNTIME_VERSION`、runtime manifest 和 `PACKAGED_RUNTIME_API_VERSION`。
 
 每次提交或交付前汇报：
 
@@ -449,19 +707,23 @@ npx --yes @vscode/vsce package --allow-missing-repository
 
 ## 推荐第一步
 
-若后续决定正式推进迁移，第一步只做 Stage 0：
+Stage 0 已完成，Stage 1a/1b/1c 已开始。若后续继续推进，下一步应先补齐 Stage 1c 的 Windows packaged runtime 实机验证，再继续扩展 Stage 1b 和设计 Stage 1d：
 
-1. 新增 `tsconfig.json`，`noEmit: true`。
-2. 新增 `npm run typecheck`。
-3. 新增协议类型文件，优先写 `WebviewToExtensionMessage` 和 `ExtensionToWebviewMessage`。
-4. 不改 `package.json.main`。
-5. 不改 `extension.js`、`webview/app.js` 的运行方式。
-6. 运行：
+1. 在 Windows packaged runtime 中分别跑默认 selector policy 和 `SECMP_WINDOWS_EVENT_LOOP_POLICY=proactor` A/B 压测。
+2. 若交付 runtime 产物，按 runtime version 规则更新 `DEFAULT_RUNTIME_VERSION`、runtime manifest 和 release 说明。
+3. 让 `body-fetcher` 在 session-cache、runtime-events、mitmweb-http 之间按优先级选择来源。
+4. 增加更多 body API down/degraded 策略测试。
+5. 将内容过滤、导出、MCP body prepare 的共享逻辑继续收敛到 body-fetcher。
+6. 开始 Stage 1d runtime capture event protocol 设计。
+7. 运行：
 
 ```bash
 npm run typecheck
 npm run l10n:check
 npm run test:session
+node scripts/test-body-fetch-policy.js
+npm run test:mitmweb-health
+npm run test:proxy-engine-diagnostics
 ```
 
-这一步能以最低风险建立后续迁移的类型蓝本。
+这一步能先降低 Windows 上 mitmweb HTTP body API 半失效造成的 body 丢失风险，并为后续 `BodySource` 和 runtime event protocol 替换主链路打基础。

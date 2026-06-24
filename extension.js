@@ -9,6 +9,8 @@ const crypto = require("crypto");
 const net = require("net");
 const { CaptureSession } = require("./secmp_session");
 const { createSecmpMcpBridge } = require("./mcp_bridge");
+const { createMitmwebClient } = require("./proxy/mitmweb_client");
+const { createMitmwebHttpBodySource, createSessionCacheBodySource } = require("./proxy/body_source");
 
 let proxyProcess = null;
 let outputChannel = null;
@@ -93,6 +95,7 @@ const BODY_AUTOFETCH_CONCURRENCY = 2;
 const BODY_AUTOFETCH_MAX_BYTES = 8 * 1024 * 1024;
 const BODY_AUTOFETCH_MAX_ATTEMPTS = 5;
 const BODY_AUTOFETCH_RETRY_DELAYS_MS = [1000, 5000, 30000];
+const BODY_API_DOWN_RETRY_MS = 5000;
 const BODY_DRAIN_CONCURRENCY = 6;
 const COPY_BODY_CONFIRM_BYTES = 1 * 1024 * 1024;
 const COPY_BODY_MAX_BYTES = BODY_AUTOFETCH_MAX_BYTES;
@@ -119,6 +122,12 @@ const DEFAULT_RUNTIME_SOURCES = {
     sha256: "9af752357285dd0bd10768a4fb7f41abdf5c077d5649893224e388ef957e0727",
   },
 };
+const mitmwebClient = createMitmwebClient({
+  timeoutMs: MITMWEB_REQUEST_TIMEOUT_MS,
+  getConnection: () => ({ webPort, authToken }),
+});
+const mitmwebBodySource = createMitmwebHttpBodySource({ mitmwebClient });
+const sessionCacheBodySource = createSessionCacheBodySource({ getSession: () => activeSession });
 let extensionStorageDir = null;
 let certDir = path.join(__dirname, "certificate");
 let packagedRuntimeReadyPromise = null;
@@ -1374,23 +1383,39 @@ async function getAdbEnvironmentInfo() {
 }
 
 async function getMitmproxyEnvironmentInfo() {
+  const health = getMitmwebHealthSnapshot();
   if (!webPort || !authToken) {
-    return { running: false, version: "", error: "" };
+    return { running: false, version: "", error: "", http: health.http, bodyApi: health.bodyApi };
   }
   try {
     const state = await mitmwebGetJson("/state.json");
+    const nextHealth = getMitmwebHealthSnapshot();
     return {
       running: true,
       version: state.version || "",
       error: "",
+      http: nextHealth.http,
+      bodyApi: nextHealth.bodyApi,
     };
   } catch (err) {
+    const nextHealth = getMitmwebHealthSnapshot();
     return {
       running: false,
       version: "",
       error: err.message,
+      http: nextHealth.http,
+      bodyApi: nextHealth.bodyApi,
     };
   }
+}
+
+function getBodyPipelineEnvironmentInfo() {
+  const bodyApi = getMitmwebBodyApiHealth();
+  return {
+    ...bodyApi,
+    source: "mitmweb-http",
+    backlog: bodyFetchQueue.length + bodyFetchActive,
+  };
 }
 
 function getUpdateEnvironmentInfo(context) {
@@ -1460,7 +1485,7 @@ function getFallbackEnvironmentStatus(context, error) {
       error: error?.message || String(error || ""),
     },
     device: deviceInfo,
-    mitmproxy: { running: false, version: "", error: "" },
+    mitmproxy: { running: false, version: "", error: "", ...getMitmwebHealthSnapshot() },
     platform: {
       os: process.platform,
       arch: process.arch,
@@ -1468,6 +1493,7 @@ function getFallbackEnvironmentStatus(context, error) {
     },
     updates: getUpdateEnvironmentInfo(context),
     mcp: getMcpEnvironmentInfo(),
+    bodyPipeline: getBodyPipelineEnvironmentInfo(),
   };
 }
 
@@ -1491,6 +1517,7 @@ async function getEnvironmentStatus(context) {
     },
     updates: getUpdateEnvironmentInfo(context),
     mcp: getMcpEnvironmentInfo(),
+    bodyPipeline: getBodyPipelineEnvironmentInfo(),
   };
 }
 
@@ -1512,6 +1539,7 @@ function formatEnvironmentInfoForClipboard(status) {
     `Android: ${status.device?.androidVersion || "-"}`,
     `Root: ${status.device?.isRoot ? t("device.root.yes") : t("device.root.no")}`,
     `mitmproxy: ${status.mitmproxy.version || (status.mitmproxy.running ? t("common.running") : t("common.notRunning"))}`,
+    `Body API: ${status.mitmproxy.bodyApi?.status || status.bodyPipeline?.status || "unknown"}`,
     `Platform: ${status.platform.os} ${status.platform.arch}`,
     `Node: ${status.platform.node}`,
     `Update check: ${status.updates.enabled ? "Enabled" : "Disabled"}`,
@@ -1629,30 +1657,50 @@ async function terminateProcessTree(pid, reason) {
 // ===== mitmweb REST API helpers =====
 
 function mitmwebGet(path) {
-  return new Promise((resolve, reject) => {
-    const url = `http://127.0.0.1:${webPort}${path}?token=${encodeURIComponent(authToken)}`;
-    const req = http.get(url, { timeout: MITMWEB_REQUEST_TIMEOUT_MS }, (res) => {
-      const chunks = [];
-      res.on("data", (chunk) => chunks.push(chunk));
-      res.on("end", () => {
-        const data = Buffer.concat(chunks);
-        if (res.statusCode && res.statusCode >= 400) {
-          reject(new Error(`mitmweb GET ${path} failed with HTTP ${res.statusCode}`));
-          return;
-        }
-        resolve(data);
-      });
-      res.on("error", reject);
-    });
-    req.on("timeout", () => {
-      req.destroy(new Error(`mitmweb GET ${path} timed out after ${MITMWEB_REQUEST_TIMEOUT_MS}ms`));
-    });
-    req.on("error", reject);
-  });
+  return mitmwebClient.get(path);
 }
 
 function mitmwebGetJson(path) {
-  return mitmwebGet(path).then((data) => JSON.parse(data.toString("utf-8")));
+  return mitmwebClient.getJson(path);
+}
+
+function extractRuntimeFatalFromStderr(stderrText, options = {}) {
+  const text = String(stderrText || "");
+  const lines = text.split(/\r?\n/);
+  const includeTrailingPartial = !!options.includeTrailingPartial;
+  const limit = includeTrailingPartial ? lines.length : Math.max(0, lines.length - 1);
+  let fatal = null;
+  for (let i = 0; i < limit; i += 1) {
+    const line = lines[i];
+    if (!line.startsWith("RUNTIME_FATAL=")) continue;
+    const rawPayload = line.slice("RUNTIME_FATAL=".length).trim();
+    if (!rawPayload) continue;
+    try {
+      const payload = JSON.parse(rawPayload);
+      fatal = {
+        component: payload.component || "runtime",
+        message: payload.message || payload.exception || rawPayload,
+      };
+    } catch (_) {
+      fatal = {
+        component: "runtime",
+        message: rawPayload || line,
+      };
+    }
+  }
+  return fatal;
+}
+
+function getMitmwebHealthSnapshot() {
+  return mitmwebClient.getHealth();
+}
+
+function getMitmwebBodyApiHealth() {
+  return mitmwebBodySource.getHealth();
+}
+
+function isMitmwebBodyApiDown() {
+  return getMitmwebBodyApiHealth().status === "down";
 }
 
 function getSessionCacheDir() {
@@ -4231,6 +4279,7 @@ async function startProxyEngine(options = {}) {
     }
 
     activeCaptureNetwork = captureNetwork;
+    mitmwebClient.resetHealth();
 
     proxyProcess = spawn(engine.command, spawnArgs, {
       stdio: ["pipe", "pipe", "pipe"],
@@ -4241,6 +4290,8 @@ async function startProxyEngine(options = {}) {
     let proxyReady = false;
     let stderrBuffer = "";
     let startupTimer = null;
+    let runtimeFatalMessage = "";
+    let runtimeFatalComponent = "";
 
     webPort = null;
     authToken = null;
@@ -4268,6 +4319,13 @@ async function startProxyEngine(options = {}) {
       const text = data.toString();
       stderrBuffer += text;
       log(`[proxy] ${text.trim()}`);
+
+      const runtimeFatal = extractRuntimeFatalFromStderr(stderrBuffer);
+      if (runtimeFatal && runtimeFatal.message !== runtimeFatalMessage) {
+        runtimeFatalMessage = runtimeFatal.message;
+        runtimeFatalComponent = runtimeFatal.component;
+        log(`Proxy runtime fatal (${runtimeFatalComponent || "runtime"}): ${runtimeFatalMessage}`);
+      }
 
       // Parse WEB_PORT and AUTH_TOKEN from accumulated stderr
       if (!webPort) {
@@ -4312,6 +4370,13 @@ async function startProxyEngine(options = {}) {
 
     proxyProcess.on("close", (code) => {
       log(`Proxy engine exited with code ${code}`);
+      const finalRuntimeFatal = runtimeFatalMessage
+        ? { message: runtimeFatalMessage, component: runtimeFatalComponent }
+        : extractRuntimeFatalFromStderr(stderrBuffer, { includeTrailingPartial: true });
+      if (finalRuntimeFatal) {
+        runtimeFatalMessage = finalRuntimeFatal.message;
+        runtimeFatalComponent = finalRuntimeFatal.component;
+      }
       const stoppedCaptureNetwork = activeCaptureNetwork;
       proxyProcess = null;
       stopFlowPolling();
@@ -4334,7 +4399,9 @@ async function startProxyEngine(options = {}) {
       }
       if (!started) {
         started = true;
-        reject(new Error(t("extension.proxy.startupExited", { code })));
+        reject(new Error(runtimeFatalMessage
+          ? t("extension.proxy.runtimeFatal", { message: runtimeFatalMessage })
+          : t("extension.proxy.startupExited", { code })));
       }
       if (suppressNextProxyStoppedStatus) {
         suppressNextProxyStoppedStatus = false;
@@ -4343,7 +4410,8 @@ async function startProxyEngine(options = {}) {
           command: "proxyStatus",
           running: false,
           port: port,
-          phase: "stopped",
+          phase: runtimeFatalMessage ? "error" : "stopped",
+          message: runtimeFatalMessage ? t("extension.proxy.runtimeFatal", { message: runtimeFatalMessage }) : "",
         });
       }
     });
@@ -5033,26 +5101,7 @@ async function handlePanelClosedDuringCapture() {
 // ===== REST API helpers (with method support) =====
 
 function mitmwebRequest(method, path) {
-  return new Promise((resolve, reject) => {
-    const url = `http://127.0.0.1:${webPort}${path}?token=${encodeURIComponent(authToken)}`;
-    const req = http.request(url, { method, timeout: MITMWEB_REQUEST_TIMEOUT_MS }, (res) => {
-      let data = "";
-      res.on("data", (chunk) => (data += chunk));
-      res.on("end", () => {
-        if (res.statusCode && res.statusCode >= 400) {
-          reject(new Error(`mitmweb ${method} ${path} failed with HTTP ${res.statusCode}`));
-          return;
-        }
-        resolve(data);
-      });
-      res.on("error", reject);
-    });
-    req.on("timeout", () => {
-      req.destroy(new Error(`mitmweb ${method} ${path} timed out after ${MITMWEB_REQUEST_TIMEOUT_MS}ms`));
-    });
-    req.on("error", reject);
-    req.end();
-  });
+  return mitmwebClient.request(method, path).then((data) => data.toString("utf-8"));
 }
 
 // ===== Export Functions =====
@@ -5195,39 +5244,29 @@ function isResponseComplete(flow) {
   return !!(flow._fromSession && flow.status_code);
 }
 
-function hydrateFlowBodyFromSession(flow, side) {
-  if (!activeSession || !flow?.id) return false;
-  const state = activeSession.bodyState(flow.id, side);
-  if (state.state !== "ready") return false;
-  if (side === "request") {
-    if (state.contentKind === "binary") {
-      flow.req_body_base64 = activeSession.getBodyBuffer(flow.id, "request").toString("base64");
-      flow.req_body = "";
-    } else {
-      flow.req_body = activeSession.getBodyText(flow.id, "request");
-      flow.req_body_base64 = "";
-    }
-    flow._reqBodyFetched = true;
-    setBodyState(flow, "request", "ready");
-    clearBodyFetchFailure(flow, "request");
-  } else {
-    if (state.contentKind === "binary") {
-      flow.res_body_base64 = activeSession.getBodyBuffer(flow.id, "response").toString("base64");
-      flow.res_body = "";
-    } else {
-      flow.res_body = activeSession.getBodyText(flow.id, "response");
-      flow.res_body_base64 = "";
-    }
-    flow._resBodyFetched = true;
-    setBodyState(flow, "response", "ready");
-    clearBodyFetchFailure(flow, "response");
+async function hydrateFlowBodyFromSession(flow, side) {
+  if (!flow?.id) return false;
+  try {
+    const result = await sessionCacheBodySource.getBody(flow.id, side);
+    applyFetchedBody(flow, side, result.buffer, result.contentType || "", {
+      contentKind: result.contentKind,
+      persist: false,
+    });
+    return true;
+  } catch (_) {
+    return false;
   }
-  flow._bodyFetched = !!(flow._reqBodyFetched && flow._resBodyFetched);
-  return true;
 }
 
-function applyFetchedBody(flow, side, buf, contentType) {
-  const binary = isBinaryContentType(contentType) || isLikelyBinaryBuffer(buf);
+function applyFetchedBody(flow, side, buf, contentType, options = {}) {
+  let binary;
+  if (options.contentKind === "binary") {
+    binary = true;
+  } else if (options.contentKind === "text") {
+    binary = false;
+  } else {
+    binary = isBinaryContentType(contentType) || isLikelyBinaryBuffer(buf);
+  }
   if (side === "request") {
     if (binary) {
       flow.req_body_base64 = buf.toString("base64");
@@ -5249,7 +5288,7 @@ function applyFetchedBody(flow, side, buf, contentType) {
   }
   setBodyState(flow, side, "ready");
   clearBodyFetchFailure(flow, side);
-  if (activeSession) {
+  if (options.persist !== false && activeSession) {
     activeSession.appendBody(flow.id, side, buf, {
       contentType,
       contentKind: binary ? "binary" : "text",
@@ -5265,10 +5304,10 @@ async function fetchFlowBodies(flow, scopes = { request: true, response: true })
   const wantRes = scopes.response !== false;
 
   if (wantReq && !flow._reqBodyFetched) {
-    hydrateFlowBodyFromSession(flow, "request");
+    await hydrateFlowBodyFromSession(flow, "request");
   }
   if (wantRes && !flow._resBodyFetched) {
-    hydrateFlowBodyFromSession(flow, "response");
+    await hydrateFlowBodyFromSession(flow, "response");
   }
 
   // Sides without any payload are immediately "ready empty" — no request needed.
@@ -5323,12 +5362,13 @@ async function fetchFlowBodies(flow, scopes = { request: true, response: true })
   if (fetchReqNeeded) {
     setBodyState(flow, "request", "loading");
     try {
-      const buf = await mitmwebGet(`/flows/${flow.id}/request/content.data`);
+      const result = await mitmwebBodySource.getBody(flow.id, "request");
+      const buf = result.buffer;
       if (buf.length === 0 && flow.req_size > 0) {
         throw new Error(`mitmweb returned empty content (expected ${flow.req_size} bytes)`);
       }
-      const ct = flow.req_headers?.["content-type"] || "";
-      applyFetchedBody(flow, "request", buf, ct);
+      const ct = result.contentType || flow.req_headers?.["content-type"] || "";
+      applyFetchedBody(flow, "request", buf, ct, { contentKind: result.contentKind });
       requestOk = true;
     } catch (err) {
       markBodyFetchFailure(flow, "request", err);
@@ -5338,12 +5378,13 @@ async function fetchFlowBodies(flow, scopes = { request: true, response: true })
   if (fetchResNeeded) {
     setBodyState(flow, "response", "loading");
     try {
-      const buf = await mitmwebGet(`/flows/${flow.id}/response/content.data`);
+      const result = await mitmwebBodySource.getBody(flow.id, "response");
+      const buf = result.buffer;
       if (buf.length === 0 && flow.res_size > 0) {
         throw new Error(`mitmweb returned empty content (expected ${flow.res_size} bytes)`);
       }
-      const ct = (flow.content_type || "").toLowerCase();
-      applyFetchedBody(flow, "response", buf, ct);
+      const ct = result.contentType || (flow.content_type || "").toLowerCase();
+      applyFetchedBody(flow, "response", buf, ct, { contentKind: result.contentKind });
       responseOk = true;
     } catch (err) {
       markBodyFetchFailure(flow, "response", err);
@@ -5377,6 +5418,10 @@ function enqueueBodyAutoFetch(flow) {
     retryErrors: true,
     maxAttempts: BODY_AUTOFETCH_MAX_ATTEMPTS,
   })) return;
+  if (isMitmwebBodyApiDown()) {
+    scheduleBodyAutoFetchRetry(flow);
+    return;
+  }
   if (bodyFetchQueued.has(flow.id)) return;
   const retryTimer = bodyFetchRetryTimers.get(flow.id);
   if (retryTimer) {
@@ -5396,7 +5441,8 @@ function scheduleBodyAutoFetchRetry(flow) {
       getBodyAttemptCount(flow, side) < BODY_AUTOFETCH_MAX_ATTEMPTS;
   });
   if (retryableSides.length === 0) return;
-  const waitMs = Math.max(250, getFlowBodyRetryWaitMs(flow, { maxBytes: BODY_AUTOFETCH_MAX_BYTES }));
+  const healthWaitMs = isMitmwebBodyApiDown() ? BODY_API_DOWN_RETRY_MS : 0;
+  const waitMs = Math.max(250, healthWaitMs, getFlowBodyRetryWaitMs(flow, { maxBytes: BODY_AUTOFETCH_MAX_BYTES }));
   const timer = setTimeout(() => {
     bodyFetchRetryTimers.delete(flow.id);
     const current = capturedFlowById.get(flow.id);
@@ -5407,6 +5453,15 @@ function scheduleBodyAutoFetchRetry(flow) {
 
 function pumpBodyFetchQueue() {
   while (bodyFetchActive < BODY_AUTOFETCH_CONCURRENCY && bodyFetchQueue.length > 0) {
+    if (isMitmwebBodyApiDown()) {
+      while (bodyFetchQueue.length > 0) {
+        const id = bodyFetchQueue.shift();
+        bodyFetchQueued.delete(id);
+        const flow = capturedFlowById.get(id);
+        if (flow) scheduleBodyAutoFetchRetry(flow);
+      }
+      break;
+    }
     const id = bodyFetchQueue.shift();
     bodyFetchActive += 1;
     (async () => {
@@ -6159,6 +6214,7 @@ async function mcpStatus() {
     webPort: webPort || 0,
     flowFeedStatus,
     websocketLive: !!flowWebSocketActive,
+    bodyPipeline: getBodyPipelineEnvironmentInfo(),
     deviceConnected: !!deviceInfo?.connected,
     device: deviceInfo || null,
     flowCount: capturedFlows.length,
@@ -7676,6 +7732,7 @@ module.exports = {
     BODY_AUTOFETCH_MAX_ATTEMPTS,
     BODY_AUTOFETCH_MAX_BYTES,
     getBodyRetryWaitMs,
+    extractRuntimeFatalFromStderr,
     flowNeedsBodyFetch,
     flowSideNeedsBodyFetch,
     setBodyState,

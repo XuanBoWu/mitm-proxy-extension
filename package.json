@@ -34,6 +34,8 @@
     "runtime:windows": "powershell -ExecutionPolicy Bypass -File scripts/build-windows-runtime.ps1",
     "runtime:windows:test-install": "node scripts/test-extension-runtime-install.js",
     "test:session": "node scripts/test-secmp-session.js",
+    "test:mitmweb-health": "node scripts/test-mitmweb-health.js",
+    "test:proxy-engine-diagnostics": "node scripts/test-proxy-engine-diagnostics.js",
     "l10n:check": "node scripts/check-l10n.js",
     "typecheck": "tsc --noEmit"
   },

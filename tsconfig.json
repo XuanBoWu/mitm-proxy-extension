@@ -18,6 +18,7 @@
     "extension.js",
     "secmp_session.js",
     "mcp_bridge.js",
+    "proxy/**/*.js",
     "mcp/**/*.js",
     "scripts/**/*.js",
     "types/**/*.d.ts"
