@@ -461,6 +461,7 @@ type RuntimeCaptureEvent =
 - `extension.js` 每次启动 proxy 时创建独立 runtime event reader，`runtime/ready` 可作为启动就绪信号，`runtime/fatal` 会进入 proxy error 链路。
 - runtime body event 到达时，若 flow 已存在则同步 flow 内存状态；若 flow 尚未到达则先写 `.secmp`，后续由 `session-cache` BodySource 命中。
 - `tools/proxy_engine.py` 装载 `RuntimeCaptureEventAddon`，request/response body 到达后以 64KB base64 chunk 发 stdout 事件，默认只发送不超过 8MB 的 body；更大 body 发 `body/error` 并继续依赖 mitmweb HTTP fallback。
+- runtime event body 语义必须与 mitmweb `/content.data` 对齐：优先发送 mitmproxy 解码后的 `message.content`，并携带 `contentEncoding` / `decoded` 元数据；若压缩 body 解码失败，不得把 `raw_content` 作为 ready body 写入 `.secmp`，应发 `body/error retryable=true` 交给 HTTP fallback。
 - `scripts/test-runtime-events.js` 覆盖 reader、assembler、offset mismatch 和 body/error。
 
 迁移策略：

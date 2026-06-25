@@ -59,11 +59,23 @@ class RuntimeCaptureEventAddon:
     def emit_body(self, flow, side, message):
         if not flow or not message:
             return
-        body = get_message_body_bytes(message)
-        if not body:
-            return
         flow_id = getattr(flow, "id", "")
         if not flow_id:
+            return
+        content_encoding = get_message_content_encoding(message)
+        payload = get_message_body_payload(message, content_encoding)
+        if payload.get("error"):
+            emit_runtime_event({
+                "type": "body/error",
+                "flowId": flow_id,
+                "side": side,
+                "message": payload["error"],
+                "retryable": True,
+                "contentEncoding": content_encoding,
+            })
+            return
+        body = payload["body"]
+        if not body:
             return
         content_type = get_message_content_type(message)
         if self.max_body_bytes and len(body) > self.max_body_bytes:
@@ -73,6 +85,7 @@ class RuntimeCaptureEventAddon:
                 "side": side,
                 "message": f"body size {len(body)} exceeds runtime event limit {self.max_body_bytes}",
                 "retryable": True,
+                "contentEncoding": content_encoding,
             })
             return
 
@@ -85,6 +98,8 @@ class RuntimeCaptureEventAddon:
                 "side": side,
                 "encoding": "base64",
                 "contentType": content_type,
+                "contentEncoding": content_encoding,
+                "decoded": payload["decoded"],
                 "offset": offset,
                 "data": base64.b64encode(chunk).decode("ascii"),
             })
@@ -96,6 +111,8 @@ class RuntimeCaptureEventAddon:
             "size": len(body),
             "sha256": hashlib.sha256(body).hexdigest(),
             "contentType": content_type,
+            "contentEncoding": content_encoding,
+            "decoded": payload["decoded"],
         })
 
 if sys.platform == "win32":
@@ -131,10 +148,14 @@ def get_message_content_type(message):
         return ""
 
 
-def get_message_body_bytes(message):
-    body = getattr(message, "raw_content", None)
-    if body is None:
-        body = getattr(message, "content", None)
+def get_message_content_encoding(message):
+    try:
+        return message.headers.get("content-encoding", "") or ""
+    except Exception:
+        return ""
+
+
+def coerce_body_bytes(body):
     if body is None:
         return b""
     if isinstance(body, bytes):
@@ -145,6 +166,31 @@ def get_message_body_bytes(message):
         return bytes(body)
     except Exception:
         return b""
+
+
+def get_message_body_payload(message, content_encoding=""):
+    try:
+        body = getattr(message, "content", None)
+        if body is not None:
+            return {
+                "body": coerce_body_bytes(body),
+                "decoded": bool(content_encoding and content_encoding.lower() != "identity"),
+                "error": "",
+            }
+    except Exception as e:
+        if content_encoding and content_encoding.lower() != "identity":
+            return {
+                "body": b"",
+                "decoded": False,
+                "error": f"failed to decode {content_encoding} body: {e}",
+            }
+
+    raw_body = getattr(message, "raw_content", None)
+    return {
+        "body": coerce_body_bytes(raw_body),
+        "decoded": False,
+        "error": "",
+    }
 
 
 def get_tornado_version():

@@ -54,6 +54,8 @@ function main() {
     side: "response",
     encoding: "base64",
     contentType: "text/plain",
+    contentEncoding: "gzip",
+    decoded: true,
     offset: 0,
     data: first.toString("base64"),
   }), true);
@@ -63,6 +65,8 @@ function main() {
     side: "response",
     encoding: "base64",
     contentType: "text/plain",
+    contentEncoding: "gzip",
+    decoded: true,
     offset: first.length,
     data: second.toString("base64"),
   }), true);
@@ -73,6 +77,8 @@ function main() {
     size: body.length,
     sha256: crypto.createHash("sha256").update(body).digest("hex"),
     contentType: "text/plain",
+    contentEncoding: "gzip",
+    decoded: true,
   });
   assert.strictEqual(completed.length, 1);
   assert.strictEqual(completed[0].flowId, "flow-1");
@@ -80,6 +86,8 @@ function main() {
   assert.strictEqual(completed[0].source, "runtime-events");
   assert.strictEqual(completed[0].buffer.toString("utf8"), "hello runtime body");
   assert.strictEqual(completed[0].contentType, "text/plain");
+  assert.strictEqual(completed[0].contentEncoding, "gzip");
+  assert.strictEqual(completed[0].decoded, true);
   assert.strictEqual(assemblerErrors.length, 0);
 
   assembler.handleEvent({
@@ -99,10 +107,12 @@ function main() {
     side: "response",
     message: "too large",
     retryable: true,
+    contentEncoding: "gzip",
   });
   assert.strictEqual(bodyErrors.length, 1);
   assert.strictEqual(bodyErrors[0].message, "too large");
   assert.strictEqual(bodyErrors[0].retryable, true);
+  assert.strictEqual(bodyErrors[0].contentEncoding, "gzip");
 
   console.log("runtime events ok");
 }

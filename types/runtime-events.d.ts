@@ -34,7 +34,9 @@ export interface RuntimeBodyChunkEvent {
   side: FlowBodySide;
   encoding: "base64";
   contentType?: string;
+  contentEncoding?: string;
   contentKind?: "text" | "binary" | "unknown" | string;
+  decoded?: boolean;
   data: string;
   offset?: number;
 }
@@ -46,7 +48,9 @@ export interface RuntimeBodyCompleteEvent {
   size: number;
   sha256?: string;
   contentType?: string;
+  contentEncoding?: string;
   contentKind?: "text" | "binary" | "unknown" | string;
+  decoded?: boolean;
 }
 
 export interface RuntimeBodyErrorEvent {
@@ -55,6 +59,7 @@ export interface RuntimeBodyErrorEvent {
   side: FlowBodySide;
   message: string;
   retryable?: boolean;
+  contentEncoding?: string;
 }
 
 export interface RuntimeHealthEvent {

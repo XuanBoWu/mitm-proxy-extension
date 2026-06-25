@@ -87,10 +87,15 @@ function normalizeRuntimeEvent(event, line = "") {
       });
     }
     event.offset = Number.isFinite(Number(event.offset)) ? Number(event.offset) : undefined;
+    event.contentEncoding = String(event.contentEncoding || "");
+    event.decoded = !!event.decoded;
   } else if (type === "body/complete") {
     event.size = Number.isFinite(Number(event.size)) ? Number(event.size) : 0;
+    event.contentEncoding = String(event.contentEncoding || "");
+    event.decoded = !!event.decoded;
   } else if (type === "body/error") {
     event.message = String(event.message || "runtime body error");
+    event.contentEncoding = String(event.contentEncoding || "");
   } else if (type === "runtime/fatal") {
     event.component = String(event.component || "runtime");
     event.message = String(event.message || "runtime fatal");
@@ -188,6 +193,8 @@ class RuntimeBodyAssembler {
         size: 0,
         contentType: event.contentType || "",
         contentKind: event.contentKind || "",
+        contentEncoding: event.contentEncoding || "",
+        decoded: !!event.decoded,
       };
       this.partsByKey.set(key, current);
     }
@@ -204,6 +211,8 @@ class RuntimeBodyAssembler {
     current.size += chunk.length;
     if (event.contentType) current.contentType = event.contentType;
     if (event.contentKind) current.contentKind = event.contentKind;
+    if (event.contentEncoding) current.contentEncoding = event.contentEncoding;
+    if (event.decoded) current.decoded = true;
   }
 
   handleComplete(event) {
@@ -216,6 +225,8 @@ class RuntimeBodyAssembler {
       size: 0,
       contentType: event.contentType || "",
       contentKind: event.contentKind || "",
+      contentEncoding: event.contentEncoding || "",
+      decoded: !!event.decoded,
     };
     this.partsByKey.delete(key);
     const buffer = Buffer.concat(current.chunks);
@@ -241,6 +252,8 @@ class RuntimeBodyAssembler {
       buffer,
       contentType: event.contentType || current.contentType || "",
       contentKind: event.contentKind || current.contentKind || "",
+      contentEncoding: event.contentEncoding || current.contentEncoding || "",
+      decoded: !!(event.decoded || current.decoded),
       sha256,
     });
   }
@@ -254,6 +267,7 @@ class RuntimeBodyAssembler {
       source: "runtime-events",
       message: event.message,
       retryable: !!event.retryable,
+      contentEncoding: event.contentEncoding || "",
     });
   }
 }
