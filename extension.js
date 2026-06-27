@@ -5655,6 +5655,23 @@ async function drainPendingBodiesBeforeStop() {
 
 let activeFilterRequestId = 0;
 
+function termFitsLatin1(term) {
+  for (let i = 0; i < term.length; i += 1) {
+    if (term.charCodeAt(i) > 0xff) return false;
+  }
+  return true;
+}
+
+function bodyBufferContainsTerm(buf, contentType, contentKind, lowerTerm) {
+  if (!Buffer.isBuffer(buf) || !lowerTerm) return false;
+  const kind = resolveBodyContentKind(buf, contentType || "", contentKind || "");
+  if (kind === "binary") {
+    if (!termFitsLatin1(lowerTerm)) return false;
+    return buf.toString("latin1").toLowerCase().includes(lowerTerm);
+  }
+  return buf.toString("utf8").toLowerCase().includes(lowerTerm);
+}
+
 function bodyContainsTerm(text, base64, lowerTerm) {
   if (text) {
     return text.toLowerCase().includes(lowerTerm);
@@ -5662,13 +5679,34 @@ function bodyContainsTerm(text, base64, lowerTerm) {
   if (base64) {
     // Binary bodies are searched as raw bytes (latin1), like Burp does —
     // ASCII keywords embedded in binary payloads still match.
+    if (!termFitsLatin1(lowerTerm)) return false;
     try {
-      return Buffer.from(base64, "base64").toString("latin1").toLowerCase().includes(lowerTerm);
+      return bodyBufferContainsTerm(Buffer.from(base64, "base64"), "", "binary", lowerTerm);
     } catch (_) {
       return false;
     }
   }
   return false;
+}
+
+function searchSessionBody(flow, side, lowerTerm) {
+  if (!activeSession || !flow?.id) return { available: false, matched: false };
+  const state = activeSession.bodyState(flow.id, side);
+  if (state.state !== "ready") return { available: false, matched: false };
+  const contentType = state.contentType || getBodyContentType(flow, side);
+  const contentKind = state.contentKind || "unknown";
+  if (contentKind === "binary" && !termFitsLatin1(lowerTerm)) {
+    return { available: true, matched: false };
+  }
+  try {
+    const buf = activeSession.getBodyBuffer(flow.id, side);
+    return {
+      available: true,
+      matched: bodyBufferContainsTerm(buf, contentType, contentKind, lowerTerm),
+    };
+  } catch (_) {
+    return { available: false, matched: false };
+  }
 }
 
 async function prepareFilterContent(requestId, scopes, term) {
@@ -5721,12 +5759,23 @@ async function prepareFilterContent(requestId, scopes, term) {
     while (nextIndex < total && requestId === activeFilterRequestId) {
       const flow = flowsToScan[nextIndex];
       nextIndex += 1;
-      const result = await fetchFlowBodies(flow, { request: wantReq, response: wantRes });
-      if (requestId !== activeFilterRequestId) return;
       let matched = false;
       let unsearched = false;
       let fetchFailed = false;
-      if (wantReq) {
+
+      const reqSessionSearch = wantReq ? searchSessionBody(flow, "request", lowerTerm) : { available: false, matched: false };
+      if (reqSessionSearch.matched) matched = true;
+      const resSessionSearch = wantRes && !matched ? searchSessionBody(flow, "response", lowerTerm) : { available: false, matched: false };
+      if (resSessionSearch.matched) matched = true;
+
+      const fetchReq = wantReq && !matched && !reqSessionSearch.available;
+      const fetchRes = wantRes && !matched && !resSessionSearch.available;
+      const result = (fetchReq || fetchRes)
+        ? await fetchFlowBodies(flow, { request: fetchReq, response: fetchRes })
+        : { requestOk: true, responseOk: true };
+      if (requestId !== activeFilterRequestId) return;
+
+      if (wantReq && !reqSessionSearch.available) {
         if (flow._reqBodyFetched) {
           matched = matched || bodyContainsTerm(flow.req_body, flow.req_body_base64, lowerTerm);
         } else if ((flow.req_size || 0) > 0) {
@@ -5734,7 +5783,7 @@ async function prepareFilterContent(requestId, scopes, term) {
           if (!result.requestOk) fetchFailed = true;
         }
       }
-      if (wantRes && !matched) {
+      if (wantRes && !matched && !resSessionSearch.available) {
         if (flow._resBodyFetched) {
           matched = matched || bodyContainsTerm(flow.res_body, flow.res_body_base64, lowerTerm);
         } else if ((flow.res_size || 0) > 0 || !isResponseComplete(flow)) {
@@ -7839,6 +7888,9 @@ module.exports = {
     BODY_AUTOFETCH_MAX_BYTES,
     getBodyRetryWaitMs,
     extractRuntimeFatalFromStderr,
+    bodyBufferContainsTerm,
+    bodyContainsTerm,
+    termFitsLatin1,
     flowNeedsBodyFetch,
     flowSideNeedsBodyFetch,
     setBodyState,

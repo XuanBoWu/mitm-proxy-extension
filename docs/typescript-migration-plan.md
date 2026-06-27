@@ -2,7 +2,7 @@
 
 本文档是 SecMP 从 JavaScript 增量迁移到 TypeScript 的执行方案。后续 agent 处理 TypeScript 相关任务时，应先阅读本文，再决定是否进入具体阶段。
 
-当前状态：Stage 0 基础设施已落地；Stage 1a 已开始，已新增 CommonJS `proxy/mitmweb_client.js` 作为 mitmweb HTTP keep-alive client，并把 HTTP/body API health 接入 extension/Webview/MCP 状态。Stage 1b 已开始，`fetchFlowBodies` 通过 `proxy/body_source.js` 的 `session-cache` 与 `mitmweb-http` BodySource 读取 body，为后续 runtime event body store 替换主链路预留接口。Stage 1c 已开始，`tools/proxy_engine.py` 会输出 runtime diagnostics，Windows 默认使用 selector event loop policy，并在 Tornado selector thread fatal 时主动退出；extension 会把 `RUNTIME_FATAL` 映射为 proxy error。Stage 1d 已开始，runtime 通过 stdout `SECMPRT_EVENT=` 发送 `runtime/ready` 与 body chunk/complete/error 事件，extension 可解析、聚合并写入 `.secmp`。运行入口仍为 `./extension.js`，尚未切换到 TS 编译产物。
+当前状态：Stage 0 基础设施已落地；Stage 1a 已开始，已新增 CommonJS `proxy/mitmweb_client.js` 作为 mitmweb HTTP keep-alive client，并把 HTTP/body API health 接入 extension/Webview/MCP 状态。Stage 1b 已开始，`fetchFlowBodies` 通过 `proxy/body_source.js` 的 `session-cache` 与 `mitmweb-http` BodySource 读取 body，内容过滤也会优先直接检索 `.secmp` session body buffer，减少重复访问 mitmweb body API。Stage 1c 已开始，`tools/proxy_engine.py` 会输出 runtime diagnostics，Windows 默认使用 selector event loop policy，并在 Tornado selector thread fatal 时主动退出；extension 会把 `RUNTIME_FATAL` 映射为 proxy error。Stage 1d 已开始，runtime 通过 stdout `SECMPRT_EVENT=` 发送 `runtime/ready` 与 body chunk/complete/error 事件，extension 可解析、聚合并写入 `.secmp`。运行入口仍为 `./extension.js`，尚未切换到 TS 编译产物。
 
 当前实验 runtime 版本：`DEFAULT_RUNTIME_VERSION=0.3.8-ts`，用于 GitHub Actions 构建 Windows/macOS runtime artifact 供 Windows 实机验证；正式发布前应按最终候选版本重新确认 runtime 版本号。
 
@@ -726,7 +726,7 @@ Stage 0 已完成，Stage 1a/1b/1c/1d 已开始。若后续继续推进，下一
 1. 在 Windows packaged runtime 中分别跑默认 selector policy 和 `SECMP_WINDOWS_EVENT_LOOP_POLICY=proactor` A/B 压测。
 2. 压测 runtime stdout body event，确认大流量下不会阻塞 mitmproxy 主循环，且 `.secmp` body 记录完整。
 3. 若交付 runtime 产物，按 runtime version 规则更新 `DEFAULT_RUNTIME_VERSION`、runtime manifest 和 release 说明。
-4. 让 `body-fetcher` 在 session-cache、runtime-events、mitmweb-http 之间按优先级选择来源。
+4. 让 `body-fetcher` 在 session-cache、runtime-events、mitmweb-http 之间按优先级选择来源，并把内容过滤、导出和 MCP body prepare 统一到同一套 prepare/search 入口。
 5. 增加更多 body API down/degraded 策略测试。
 6. 将内容过滤、导出、MCP body prepare 的共享逻辑继续收敛到 body-fetcher。
 7. 运行：

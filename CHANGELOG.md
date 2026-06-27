@@ -4,7 +4,15 @@ All notable changes to SecMP are documented in this file.
 
 ## Unreleased
 
-暂无。
+### TypeScript 迁移候选
+
+- 内容过滤检索请求体/响应体时，优先复用 `.secmp` 会话中已持久化的 body buffer；只有 session cache 缺失且仍需检索时才回退到 mitmweb body API，降低重复 HTTP body 请求和 Windows 上 body API 半失效时的检索风险。
+- 二进制 body 过滤统一按 latin1 原始字节执行不区分大小写匹配；非 latin1 关键词不会误匹配二进制内容。
+- MCP router 对 health probe 暂时超时但 registry 心跳仍新鲜的 bridge 保留 30 秒，并在 `secmp_list_sessions` 中标记 `bridgeHealth: "unverified"`，减少短暂探测超时导致 Agent 看不到活跃会话的情况。
+
+### 发布准备
+
+- 当前分支仍是 TypeScript/runtime body pipeline 候选分支，`package.json` 版本为 `0.3.7-ts`，`DEFAULT_RUNTIME_VERSION` 为 `0.3.8-ts`。正式发布前必须在 `staging` 上确定最终 SemVer 版本、更新 release notes，并完成 runtime 相关验证。
 
 ## 0.3.7 - 2026-06-24
 
