@@ -143,6 +143,7 @@ Server 会自动检测 Agent 使用的输入格式，并用相同格式返回响
 
 - 先调用 `secmp_list_sessions`，确认 Agent 选中的 `sessionId` / `bridgeId` 是正在抓包或正在浏览的会话
 - 确认 SecMP 代理已启动，并且当前会话已经抓到请求
+- 如果 `secmp_list_sessions` 返回 `bridgeHealth: "unverified"`，说明 registry 心跳仍新鲜但 MCP router 本次 health probe 暂时超时；优先带上该 `sessionId` / `bridgeId` 重试一次，持续失败再检查对应 VS Code / VSCodium 窗口是否仍打开
 - 如果查询 IP 归属地，确认 `secmp.ipLocation.enabled` 和 `secmp.ipLocation.endpoint` 已配置并检测通过
 
 ## Tools
@@ -166,8 +167,10 @@ Server 会自动检测 Agent 使用的输入格式，并用相同格式返回响
 ```text
 bridgeId, sessionId, name, filePath, workspace,
 proxy.running, proxy.proxyPort, proxy.webPort,
-capture.flowCount, capture.topHosts, heartbeatAt
+capture.flowCount, capture.topHosts, bridgeHealth, heartbeatAt
 ```
+
+`bridgeHealth` 为 `live` 表示 router 已成功探测 bridge；`unverified` 表示 registry entry 的心跳仍在 30 秒新鲜窗口内，但本次探测超时或失败。`unverified` 会话仍会参与显式 `sessionId` / `bridgeId` 路由，以避免短暂 health probe 抖动隐藏活跃会话。
 
 ### `secmp_status`
 

@@ -59,31 +59,31 @@ Before creating a release:
 Build the Windows runtime:
 
 ```powershell
-npm run runtime:windows -- -RuntimeVersion 0.3.4 -OutputDir dist
+npm run runtime:windows -- -RuntimeVersion 0.3.8 -OutputDir dist
 ```
 
 Build the macOS runtime:
 
 ```bash
-npm run runtime:macos -- --runtime-version 0.3.4 --output-dir dist
+npm run runtime:macos -- --runtime-version 0.3.8 --output-dir dist
 ```
 
 Smoke test the runtime:
 
 ```powershell
-.\scripts\test-windows-runtime.ps1 -RuntimeZip .\dist\secmp-runtime-win32-x64-0.3.4.zip -RuntimeVersion 0.3.4
+.\scripts\test-windows-runtime.ps1 -RuntimeZip .\dist\secmp-runtime-win32-x64-0.3.8.zip -RuntimeVersion 0.3.8
 ```
 
 Smoke test extension runtime installation:
 
 ```powershell
-npm run runtime:windows:test-install -- --runtime-zip .\dist\secmp-runtime-win32-x64-0.3.4.zip --runtime-version 0.3.4
+npm run runtime:windows:test-install -- --runtime-zip .\dist\secmp-runtime-win32-x64-0.3.8.zip --runtime-version 0.3.8
 ```
 
 On macOS, use the same install smoke test with the macOS runtime zip:
 
 ```bash
-node scripts/test-extension-runtime-install.js --runtime-zip dist/secmp-runtime-darwin-arm64-0.3.4.zip --runtime-version 0.3.4
+node scripts/test-extension-runtime-install.js --runtime-zip dist/secmp-runtime-darwin-arm64-0.3.8.zip --runtime-version 0.3.8
 ```
 
 Package the VSIX:
@@ -99,8 +99,8 @@ After the final code is on `master`, create and push a tag:
 ```powershell
 git checkout master
 git pull --ff-only
-git tag v0.3.7
-git push origin v0.3.7
+git tag v0.3.8
+git push origin v0.3.8
 ```
 
 The `Build and Package SecMP` workflow starts with a detection job. It will:
@@ -121,7 +121,7 @@ For a manual release run, trigger the workflow with:
 publish=true
 build_runtime=false
 runtime_version=
-release_tag=v0.3.7
+release_tag=v0.3.8
 ```
 
 Set `build_runtime=true` and provide or confirm `runtime_version` only when the release intentionally ships new packaged runtime assets.
@@ -129,7 +129,7 @@ Set `build_runtime=true` and provide or confirm `runtime_version` only when the 
 ## Release Notes Template
 
 ```markdown
-## SecMP 0.3.7
+## SecMP 0.3.8
 
 Patch release for a focused bug fix or feature stage.
 
@@ -152,7 +152,7 @@ Patch release for a focused bug fix or feature stage.
 
 ### Assets
 
-- `secmp-0.3.7.vsix`
+- `secmp-0.3.8.vsix`
 
 Runtime assets are included only when this release intentionally builds a new packaged runtime. VSIX-only patch releases should mention the reused runtime release explicitly.
 ```

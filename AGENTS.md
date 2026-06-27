@@ -36,6 +36,7 @@ Webview UI (HTML/CSS/JS) → vscode.postMessage → extension.js (Node.js)
 | `.github/workflows/build-windows-runtime.yml` | CI 构建 runtime、测试 runtime、打包 VSIX、tag 发布 GitHub Release |
 | `docs/release.md` | 正式发布编排、检查清单和 release notes 模板 |
 | `docs/windows-runtime.md` | 历史路径保留；当前说明 Windows/macOS packaged runtime 包格式、安装优先级和手动测试 |
+| `docs/typescript-migration-plan.md` | TypeScript 增量迁移方案、阶段计划、产物策略和后续 agent 执行检查清单 |
 
 ## 品牌与命名约定
 
@@ -67,6 +68,8 @@ Webview UI (HTML/CSS/JS) → vscode.postMessage → extension.js (Node.js)
 - 涉及 Webview 的改动必须说明消息链影响：Webview → extension.js → runtime/mitmweb → Webview。
 - 涉及平台差异的改动必须明确影响范围：Windows / macOS / Linux / source-dev。
 - 修改后必须运行与风险匹配的验证；至少做语法或静态检查，能跑 smoke test 时优先跑 smoke test。
+- 涉及 TypeScript 迁移、构建产物、入口切换或类型约束时，必须先阅读 `docs/typescript-migration-plan.md`，按文档中的 stage 分步处理；不要直接把 `extension.js` 或 `webview/app.js` 一次性改名为 `.ts`。
+- TypeScript 迁移默认不更新 packaged runtime 版本；只有 runtime 产物、runtime package layout 或 extension ↔ runtime 协议实际变化时，才更新 `DEFAULT_RUNTIME_VERSION` 和 runtime manifest。
 
 ### 版本更新规则
 

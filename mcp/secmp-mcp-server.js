@@ -6,7 +6,8 @@ const path = require("path");
 
 const DEFAULT_REGISTRY_DIR = path.join(os.homedir(), ".secmp", "mcp", "bridges");
 const PROTOCOL_VERSION = "2024-11-05";
-const BRIDGE_HEALTH_TIMEOUT_MS = 1500;
+const BRIDGE_HEALTH_TIMEOUT_MS = 3000;
+const BRIDGE_REGISTRY_FRESH_MS = 30000;
 
 const sessionSelectorProperties = {
   sessionId: { type: "string", description: "SecMP session id. Use secmp_list_sessions when multiple sessions are active." },
@@ -233,6 +234,7 @@ function publicSession(entry) {
     device: entry.device || {},
     pid: entry.pid || entry.extensionHostPid || 0,
     extensionVersion: entry.extensionVersion || "",
+    bridgeHealth: entry.bridgeHealth || "live",
     heartbeatAt: entry.heartbeatAt || "",
     updatedAt: entry.updatedAt || "",
     lastActiveAt: entry.lastActiveAt || entry.updatedAt || "",
@@ -294,6 +296,11 @@ async function bridgeIsLive(entry) {
   }
 }
 
+function bridgeRegistryEntryIsFresh(entry) {
+  const timestamp = Date.parse(entry?.heartbeatAt || entry?.lastActiveAt || entry?.updatedAt || "");
+  return Number.isFinite(timestamp) && Date.now() - timestamp <= BRIDGE_REGISTRY_FRESH_MS;
+}
+
 async function listBridgeEntries() {
   const direct = getDirectBridgeConfig();
   if (direct) return [direct];
@@ -309,7 +316,9 @@ async function listBridgeEntries() {
       continue;
     }
     if (await bridgeIsLive(state)) {
-      entries.push({ ...state, registryFile: filePath });
+      entries.push({ ...state, registryFile: filePath, bridgeHealth: "live" });
+    } else if (bridgeRegistryEntryIsFresh(state)) {
+      entries.push({ ...state, registryFile: filePath, bridgeHealth: "unverified" });
     } else {
       try {
         fs.unlinkSync(filePath);
