@@ -90,6 +90,12 @@ function main() {
   assert.strictEqual(flows[0].req_body, "{\"secret\":\"needle\"}");
   assert.strictEqual(flows[0].res_body, "{\"ok\":true}");
   assert.strictEqual(flows[0].ip_location, "United States");
+  assert.deepStrictEqual(loaded.bodyState("flow-1", "request"), {
+    state: "ready",
+    size: Buffer.byteLength("{\"secret\":\"needle\"}", "utf8"),
+    contentKind: "text",
+    contentType: "application/json",
+  });
   assert.deepStrictEqual(flows[0].ip_location_detail, {
     ip: "8.8.8.8",
     state: "ready",

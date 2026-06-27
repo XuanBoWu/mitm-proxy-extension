@@ -6,6 +6,31 @@ All notable changes to SecMP are documented in this file.
 
 暂无。
 
+## 0.3.8 - 2026-06-27
+
+### TypeScript 迁移基础
+
+- 新增 TypeScript 工具链、协议类型定义和阶段迁移计划；扩展运行入口仍保持 `./extension.js`，未切换到 TS 编译产物。
+- 新增 `proxy/mitmweb_client.js` keep-alive client，集中管理 mitmweb HTTP/body API timeout、错误和健康状态，Webview 与 MCP 可区分 flow feed health 和 body API health。
+- 新增 `proxy/body_source.js` BodySource 抽象，body 拉取优先使用 `.secmp` session cache，再回退到 mitmweb HTTP body API。
+
+### Runtime body pipeline
+
+- `tools/proxy_engine.py` 新增 runtime diagnostics 输出，Windows 默认使用 selector event loop policy，并在 Tornado selector thread fatal 时主动退出，避免 proxy 主进程继续存活但 body API 半失效。
+- 新增 runtime stdout capture event reader 和 body assembler，支持 `runtime/ready`、`body/chunk`、`body/complete`、`body/error` 等事件，为后续减少对 mitmweb body API 的依赖建立主链路。
+- runtime body event 写入 `.secmp` 会话时保留 decoded/content-encoding 元数据，并用 size/hash 做完整性校验。
+
+### 过滤与 MCP
+
+- 内容过滤检索请求体/响应体时，优先复用 `.secmp` 会话中已持久化的 body buffer；只有 session cache 缺失且仍需检索时才回退到 mitmweb body API，降低重复 HTTP body 请求和 Windows 上 body API 半失效时的检索风险。
+- 二进制 body 过滤统一按 latin1 原始字节执行不区分大小写匹配；非 latin1 关键词不会误匹配二进制内容。
+- MCP router 对 health probe 暂时超时但 registry 心跳仍新鲜的 bridge 保留 30 秒，并在 `secmp_list_sessions` 中标记 `bridgeHealth: "unverified"`，减少短暂探测超时导致 Agent 看不到活跃会话的情况。
+
+### 发布与 runtime
+
+- 将 VSIX 版本更新为 `0.3.8`。
+- 将内置 packaged runtime 版本更新为 `0.3.8`，用于发布包含 runtime diagnostics 和 runtime body event pipeline 的 Windows/macOS runtime 包；`runtimeApiVersion` 继续保持兼容的 `1`。
+
 ## 0.3.7 - 2026-06-24
 
 ### MCP 多会话

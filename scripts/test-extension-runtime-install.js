@@ -54,12 +54,22 @@ function readJsonFile(filePath) {
 }
 
 function removeDirRecursive(filePath) {
-  fs.rmSync(filePath, {
-    recursive: true,
-    force: true,
-    maxRetries: 10,
-    retryDelay: 500,
-  });
+  let lastError = null;
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    try {
+      fs.rmSync(filePath, {
+        recursive: true,
+        force: true,
+        maxRetries: 10,
+        retryDelay: 500,
+      });
+      return;
+    } catch (err) {
+      lastError = err;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 500);
+    }
+  }
+  throw lastError;
 }
 
 async function main() {
@@ -258,7 +268,7 @@ async function main() {
       } catch (_) {}
     }
     try {
-      sandbox.module.exports.deactivate();
+      await sandbox.module.exports.deactivate();
     } catch (_) {}
     removeDirRecursive(storageDir);
   }

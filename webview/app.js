@@ -830,7 +830,9 @@ function renderEnvironmentStatus() {
   setText("envVersionInfo", versionDisplayText(status));
   setText("envRuntimeVersion", runtimeDisplayText(status.runtime));
   setText("envRuntimeApi", status.runtime?.apiVersion ?? "-");
-  setText("envMitmproxyVersion", status.mitmproxy?.version || (status.mitmproxy?.running ? t("common.running") : t("common.notRunning")));
+  const mitmproxyText = status.mitmproxy?.version || (status.mitmproxy?.running ? t("common.running") : t("common.notRunning"));
+  const bodyApiText = bodyApiStatusText(status);
+  setText("envMitmproxyVersion", bodyApiText ? `${mitmproxyText} · ${bodyApiText}` : mitmproxyText);
 
   setText("envAdbStatus", status.adb?.available ? `${t("common.available")}${status.adb.version ? ` · ${status.adb.version}` : ""}` : t("common.missing"));
   setText("envAdbVersion", status.adb?.version || status.adb?.detail || "-");
@@ -853,6 +855,15 @@ function renderEnvironmentStatus() {
   setText("envUpdateLatest", latestDisplayText(updates));
   $("envDownloadUpdateBtn").style.display = updates.latest?.status === "updateAvailable" ? "" : "none";
   renderMcpStatus(status.mcp);
+}
+
+function bodyApiStatusText(status) {
+  const health = status?.mitmproxy?.bodyApi || status?.bodyPipeline;
+  if (!health) return "";
+  const rawStatus = String(health.status || "unknown");
+  if (rawStatus === "unknown" && !status?.mitmproxy?.running) return "";
+  const label = t(`webview.about.bodyApi.${rawStatus}`, {}, t("webview.about.bodyApi.unknown"));
+  return t("webview.about.bodyApiStatus", { status: label });
 }
 
 function versionDisplayText(status) {

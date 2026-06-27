@@ -9,6 +9,9 @@ const crypto = require("crypto");
 const net = require("net");
 const { CaptureSession } = require("./secmp_session");
 const { createSecmpMcpBridge } = require("./mcp_bridge");
+const { createMitmwebClient } = require("./proxy/mitmweb_client");
+const { createMitmwebHttpBodySource, createSessionCacheBodySource } = require("./proxy/body_source");
+const { createRuntimeBodyAssembler, createRuntimeEventReader } = require("./proxy/runtime_event_reader");
 
 let proxyProcess = null;
 let outputChannel = null;
@@ -56,7 +59,7 @@ let mcpRegistryUpdateTimer = null;
 let mcpRegistryHeartbeatTimer = null;
 
 const TOOLS_DIR = path.join(__dirname, "tools");
-const DEFAULT_RUNTIME_VERSION = "0.3.4";
+const DEFAULT_RUNTIME_VERSION = "0.3.8";
 const DEFAULT_RUNTIME_REPO = "https://github.com/XuanBoWu/mitm-proxy-extension";
 const GITHUB_RELEASE_API_URL = "https://api.github.com/repos/XuanBoWu/mitm-proxy-extension/releases/latest";
 const GITHUB_RELEASE_LATEST_URL = `${DEFAULT_RUNTIME_REPO}/releases/latest`;
@@ -93,6 +96,7 @@ const BODY_AUTOFETCH_CONCURRENCY = 2;
 const BODY_AUTOFETCH_MAX_BYTES = 8 * 1024 * 1024;
 const BODY_AUTOFETCH_MAX_ATTEMPTS = 5;
 const BODY_AUTOFETCH_RETRY_DELAYS_MS = [1000, 5000, 30000];
+const BODY_API_DOWN_RETRY_MS = 5000;
 const BODY_DRAIN_CONCURRENCY = 6;
 const COPY_BODY_CONFIRM_BYTES = 1 * 1024 * 1024;
 const COPY_BODY_MAX_BYTES = BODY_AUTOFETCH_MAX_BYTES;
@@ -119,6 +123,17 @@ const DEFAULT_RUNTIME_SOURCES = {
     sha256: "9af752357285dd0bd10768a4fb7f41abdf5c077d5649893224e388ef957e0727",
   },
 };
+const mitmwebClient = createMitmwebClient({
+  timeoutMs: MITMWEB_REQUEST_TIMEOUT_MS,
+  getConnection: () => ({ webPort, authToken }),
+});
+const mitmwebBodySource = createMitmwebHttpBodySource({ mitmwebClient });
+const sessionCacheBodySource = createSessionCacheBodySource({ getSession: () => activeSession });
+const runtimeBodyAssembler = createRuntimeBodyAssembler({
+  onBodyComplete: handleRuntimeBodyComplete,
+  onBodyError: handleRuntimeBodyError,
+  onError: (err) => log(`Runtime body event ignored: ${err.message}`),
+});
 let extensionStorageDir = null;
 let certDir = path.join(__dirname, "certificate");
 let packagedRuntimeReadyPromise = null;
@@ -1374,23 +1389,39 @@ async function getAdbEnvironmentInfo() {
 }
 
 async function getMitmproxyEnvironmentInfo() {
+  const health = getMitmwebHealthSnapshot();
   if (!webPort || !authToken) {
-    return { running: false, version: "", error: "" };
+    return { running: false, version: "", error: "", http: health.http, bodyApi: health.bodyApi };
   }
   try {
     const state = await mitmwebGetJson("/state.json");
+    const nextHealth = getMitmwebHealthSnapshot();
     return {
       running: true,
       version: state.version || "",
       error: "",
+      http: nextHealth.http,
+      bodyApi: nextHealth.bodyApi,
     };
   } catch (err) {
+    const nextHealth = getMitmwebHealthSnapshot();
     return {
       running: false,
       version: "",
       error: err.message,
+      http: nextHealth.http,
+      bodyApi: nextHealth.bodyApi,
     };
   }
+}
+
+function getBodyPipelineEnvironmentInfo() {
+  const bodyApi = getMitmwebBodyApiHealth();
+  return {
+    ...bodyApi,
+    source: "mitmweb-http",
+    backlog: bodyFetchQueue.length + bodyFetchActive,
+  };
 }
 
 function getUpdateEnvironmentInfo(context) {
@@ -1460,7 +1491,7 @@ function getFallbackEnvironmentStatus(context, error) {
       error: error?.message || String(error || ""),
     },
     device: deviceInfo,
-    mitmproxy: { running: false, version: "", error: "" },
+    mitmproxy: { running: false, version: "", error: "", ...getMitmwebHealthSnapshot() },
     platform: {
       os: process.platform,
       arch: process.arch,
@@ -1468,6 +1499,7 @@ function getFallbackEnvironmentStatus(context, error) {
     },
     updates: getUpdateEnvironmentInfo(context),
     mcp: getMcpEnvironmentInfo(),
+    bodyPipeline: getBodyPipelineEnvironmentInfo(),
   };
 }
 
@@ -1491,6 +1523,7 @@ async function getEnvironmentStatus(context) {
     },
     updates: getUpdateEnvironmentInfo(context),
     mcp: getMcpEnvironmentInfo(),
+    bodyPipeline: getBodyPipelineEnvironmentInfo(),
   };
 }
 
@@ -1512,6 +1545,7 @@ function formatEnvironmentInfoForClipboard(status) {
     `Android: ${status.device?.androidVersion || "-"}`,
     `Root: ${status.device?.isRoot ? t("device.root.yes") : t("device.root.no")}`,
     `mitmproxy: ${status.mitmproxy.version || (status.mitmproxy.running ? t("common.running") : t("common.notRunning"))}`,
+    `Body API: ${status.mitmproxy.bodyApi?.status || status.bodyPipeline?.status || "unknown"}`,
     `Platform: ${status.platform.os} ${status.platform.arch}`,
     `Node: ${status.platform.node}`,
     `Update check: ${status.updates.enabled ? "Enabled" : "Disabled"}`,
@@ -1629,30 +1663,85 @@ async function terminateProcessTree(pid, reason) {
 // ===== mitmweb REST API helpers =====
 
 function mitmwebGet(path) {
-  return new Promise((resolve, reject) => {
-    const url = `http://127.0.0.1:${webPort}${path}?token=${encodeURIComponent(authToken)}`;
-    const req = http.get(url, { timeout: MITMWEB_REQUEST_TIMEOUT_MS }, (res) => {
-      const chunks = [];
-      res.on("data", (chunk) => chunks.push(chunk));
-      res.on("end", () => {
-        const data = Buffer.concat(chunks);
-        if (res.statusCode && res.statusCode >= 400) {
-          reject(new Error(`mitmweb GET ${path} failed with HTTP ${res.statusCode}`));
-          return;
-        }
-        resolve(data);
-      });
-      res.on("error", reject);
-    });
-    req.on("timeout", () => {
-      req.destroy(new Error(`mitmweb GET ${path} timed out after ${MITMWEB_REQUEST_TIMEOUT_MS}ms`));
-    });
-    req.on("error", reject);
-  });
+  return mitmwebClient.get(path);
 }
 
 function mitmwebGetJson(path) {
-  return mitmwebGet(path).then((data) => JSON.parse(data.toString("utf-8")));
+  return mitmwebClient.getJson(path);
+}
+
+function extractRuntimeFatalFromStderr(stderrText, options = {}) {
+  const text = String(stderrText || "");
+  const lines = text.split(/\r?\n/);
+  const includeTrailingPartial = !!options.includeTrailingPartial;
+  const limit = includeTrailingPartial ? lines.length : Math.max(0, lines.length - 1);
+  let fatal = null;
+  for (let i = 0; i < limit; i += 1) {
+    const line = lines[i];
+    if (!line.startsWith("RUNTIME_FATAL=")) continue;
+    const rawPayload = line.slice("RUNTIME_FATAL=".length).trim();
+    if (!rawPayload) continue;
+    try {
+      const payload = JSON.parse(rawPayload);
+      fatal = {
+        component: payload.component || "runtime",
+        message: payload.message || payload.exception || rawPayload,
+      };
+    } catch (_) {
+      fatal = {
+        component: "runtime",
+        message: rawPayload || line,
+      };
+    }
+  }
+  return fatal;
+}
+
+function handleRuntimeCaptureEvent(event, options = {}) {
+  if (!event || typeof event !== "object") return;
+  if (runtimeBodyAssembler.handleEvent(event)) return;
+
+  if (event.type === "runtime/ready") {
+    const nextWebPort = Number(event.webPort);
+    if (Number.isInteger(nextWebPort) && nextWebPort > 0 && !webPort) {
+      webPort = nextWebPort;
+      log(`Runtime event web UI port: ${webPort}`);
+    }
+    if (event.authToken && !authToken) {
+      authToken = String(event.authToken);
+      log("Runtime event auth token received");
+    }
+    if (typeof options.onReady === "function") options.onReady(event);
+    return;
+  }
+
+  if (event.type === "runtime/fatal") {
+    log(`Runtime event fatal (${event.component || "runtime"}): ${event.message || ""}`);
+    if (typeof options.onFatal === "function") options.onFatal(event);
+    return;
+  }
+
+  if (event.type === "runtime/health") {
+    log(`Runtime health: ${event.message || event.bodyPipeline || event.mitmwebHttp || "ok"}`);
+    return;
+  }
+
+  if (event.type === "flow/meta") {
+    // Flow metadata continues to be reconciled through mitmweb for now.
+    return;
+  }
+}
+
+function getMitmwebHealthSnapshot() {
+  return mitmwebClient.getHealth();
+}
+
+function getMitmwebBodyApiHealth() {
+  return mitmwebBodySource.getHealth();
+}
+
+function isMitmwebBodyApiDown() {
+  return getMitmwebBodyApiHealth().status === "down";
 }
 
 function getSessionCacheDir() {
@@ -4231,6 +4320,8 @@ async function startProxyEngine(options = {}) {
     }
 
     activeCaptureNetwork = captureNetwork;
+    mitmwebClient.resetHealth();
+    runtimeBodyAssembler.reset();
 
     proxyProcess = spawn(engine.command, spawnArgs, {
       stdio: ["pipe", "pipe", "pipe"],
@@ -4241,6 +4332,21 @@ async function startProxyEngine(options = {}) {
     let proxyReady = false;
     let stderrBuffer = "";
     let startupTimer = null;
+    let runtimeFatalMessage = "";
+    let runtimeFatalComponent = "";
+    const runtimeEventReader = createRuntimeEventReader({
+      onEvent: (event) => handleRuntimeCaptureEvent(event, {
+        onReady: () => {
+          proxyReady = true;
+          resolveStarted();
+        },
+        onFatal: (fatalEvent) => {
+          runtimeFatalMessage = fatalEvent.message || "runtime fatal";
+          runtimeFatalComponent = fatalEvent.component || "runtime";
+        },
+      }),
+      onError: (err) => log(`Runtime event parse error: ${err.message}`),
+    });
 
     webPort = null;
     authToken = null;
@@ -4269,6 +4375,13 @@ async function startProxyEngine(options = {}) {
       stderrBuffer += text;
       log(`[proxy] ${text.trim()}`);
 
+      const runtimeFatal = extractRuntimeFatalFromStderr(stderrBuffer);
+      if (runtimeFatal && runtimeFatal.message !== runtimeFatalMessage) {
+        runtimeFatalMessage = runtimeFatal.message;
+        runtimeFatalComponent = runtimeFatal.component;
+        log(`Proxy runtime fatal (${runtimeFatalComponent || "runtime"}): ${runtimeFatalMessage}`);
+      }
+
       // Parse WEB_PORT and AUTH_TOKEN from accumulated stderr
       if (!webPort) {
         const webPortMatch = stderrBuffer.match(/WEB_PORT=(\d+)/);
@@ -4293,7 +4406,10 @@ async function startProxyEngine(options = {}) {
     });
 
     proxyProcess.stdout.on("data", (data) => {
-      log(`[proxy stdout] ${data.toString().trim()}`);
+      const passthrough = runtimeEventReader.push(data);
+      if (passthrough.length > 0) {
+        log(`[proxy stdout] ${passthrough.join("\n").trim()}`);
+      }
     });
 
     proxyProcess.on("error", (err) => {
@@ -4312,6 +4428,17 @@ async function startProxyEngine(options = {}) {
 
     proxyProcess.on("close", (code) => {
       log(`Proxy engine exited with code ${code}`);
+      const stdoutPassthrough = runtimeEventReader.flush();
+      if (stdoutPassthrough.length > 0) {
+        log(`[proxy stdout] ${stdoutPassthrough.join("\n").trim()}`);
+      }
+      const finalRuntimeFatal = runtimeFatalMessage
+        ? { message: runtimeFatalMessage, component: runtimeFatalComponent }
+        : extractRuntimeFatalFromStderr(stderrBuffer, { includeTrailingPartial: true });
+      if (finalRuntimeFatal) {
+        runtimeFatalMessage = finalRuntimeFatal.message;
+        runtimeFatalComponent = finalRuntimeFatal.component;
+      }
       const stoppedCaptureNetwork = activeCaptureNetwork;
       proxyProcess = null;
       stopFlowPolling();
@@ -4334,7 +4461,9 @@ async function startProxyEngine(options = {}) {
       }
       if (!started) {
         started = true;
-        reject(new Error(t("extension.proxy.startupExited", { code })));
+        reject(new Error(runtimeFatalMessage
+          ? t("extension.proxy.runtimeFatal", { message: runtimeFatalMessage })
+          : t("extension.proxy.startupExited", { code })));
       }
       if (suppressNextProxyStoppedStatus) {
         suppressNextProxyStoppedStatus = false;
@@ -4343,7 +4472,8 @@ async function startProxyEngine(options = {}) {
           command: "proxyStatus",
           running: false,
           port: port,
-          phase: "stopped",
+          phase: runtimeFatalMessage ? "error" : "stopped",
+          message: runtimeFatalMessage ? t("extension.proxy.runtimeFatal", { message: runtimeFatalMessage }) : "",
         });
       }
     });
@@ -5033,26 +5163,7 @@ async function handlePanelClosedDuringCapture() {
 // ===== REST API helpers (with method support) =====
 
 function mitmwebRequest(method, path) {
-  return new Promise((resolve, reject) => {
-    const url = `http://127.0.0.1:${webPort}${path}?token=${encodeURIComponent(authToken)}`;
-    const req = http.request(url, { method, timeout: MITMWEB_REQUEST_TIMEOUT_MS }, (res) => {
-      let data = "";
-      res.on("data", (chunk) => (data += chunk));
-      res.on("end", () => {
-        if (res.statusCode && res.statusCode >= 400) {
-          reject(new Error(`mitmweb ${method} ${path} failed with HTTP ${res.statusCode}`));
-          return;
-        }
-        resolve(data);
-      });
-      res.on("error", reject);
-    });
-    req.on("timeout", () => {
-      req.destroy(new Error(`mitmweb ${method} ${path} timed out after ${MITMWEB_REQUEST_TIMEOUT_MS}ms`));
-    });
-    req.on("error", reject);
-    req.end();
-  });
+  return mitmwebClient.request(method, path).then((data) => data.toString("utf-8"));
 }
 
 // ===== Export Functions =====
@@ -5088,6 +5199,12 @@ function isLikelyBinaryBuffer(buf) {
     }
   }
   return controlBytes / sampleLength > 0.1;
+}
+
+function resolveBodyContentKind(buf, contentType, contentKind = "") {
+  if (contentKind === "binary") return "binary";
+  if (contentKind === "text") return "text";
+  return isBinaryContentType(contentType) || isLikelyBinaryBuffer(buf) ? "binary" : "text";
 }
 
 // Per-side body lifecycle: (absent) -> "loading" -> "ready" | "error" | "unavailable".
@@ -5195,39 +5312,23 @@ function isResponseComplete(flow) {
   return !!(flow._fromSession && flow.status_code);
 }
 
-function hydrateFlowBodyFromSession(flow, side) {
-  if (!activeSession || !flow?.id) return false;
-  const state = activeSession.bodyState(flow.id, side);
-  if (state.state !== "ready") return false;
-  if (side === "request") {
-    if (state.contentKind === "binary") {
-      flow.req_body_base64 = activeSession.getBodyBuffer(flow.id, "request").toString("base64");
-      flow.req_body = "";
-    } else {
-      flow.req_body = activeSession.getBodyText(flow.id, "request");
-      flow.req_body_base64 = "";
-    }
-    flow._reqBodyFetched = true;
-    setBodyState(flow, "request", "ready");
-    clearBodyFetchFailure(flow, "request");
-  } else {
-    if (state.contentKind === "binary") {
-      flow.res_body_base64 = activeSession.getBodyBuffer(flow.id, "response").toString("base64");
-      flow.res_body = "";
-    } else {
-      flow.res_body = activeSession.getBodyText(flow.id, "response");
-      flow.res_body_base64 = "";
-    }
-    flow._resBodyFetched = true;
-    setBodyState(flow, "response", "ready");
-    clearBodyFetchFailure(flow, "response");
+async function hydrateFlowBodyFromSession(flow, side) {
+  if (!flow?.id) return false;
+  try {
+    const result = await sessionCacheBodySource.getBody(flow.id, side);
+    applyFetchedBody(flow, side, result.buffer, result.contentType || "", {
+      contentKind: result.contentKind,
+      persist: false,
+    });
+    return true;
+  } catch (_) {
+    return false;
   }
-  flow._bodyFetched = !!(flow._reqBodyFetched && flow._resBodyFetched);
-  return true;
 }
 
-function applyFetchedBody(flow, side, buf, contentType) {
-  const binary = isBinaryContentType(contentType) || isLikelyBinaryBuffer(buf);
+function applyFetchedBody(flow, side, buf, contentType, options = {}) {
+  const contentKind = resolveBodyContentKind(buf, contentType, options.contentKind);
+  const binary = contentKind === "binary";
   if (side === "request") {
     if (binary) {
       flow.req_body_base64 = buf.toString("base64");
@@ -5249,10 +5350,10 @@ function applyFetchedBody(flow, side, buf, contentType) {
   }
   setBodyState(flow, side, "ready");
   clearBodyFetchFailure(flow, side);
-  if (activeSession) {
+  if (options.persist !== false && activeSession && !sessionHasBody(flow.id, side)) {
     activeSession.appendBody(flow.id, side, buf, {
       contentType,
-      contentKind: binary ? "binary" : "text",
+      contentKind,
     });
     scheduleActiveSessionBufferFlush();
     scheduleActiveSessionSync();
@@ -5260,15 +5361,59 @@ function applyFetchedBody(flow, side, buf, contentType) {
   flow._bodyFetched = !!(flow._reqBodyFetched && flow._resBodyFetched);
 }
 
+function sessionHasBody(flowId, side) {
+  return !!(activeSession && activeSession.bodyState(flowId, side).state === "ready");
+}
+
+function persistRuntimeBodyToSession(flowId, side, buf, contentType, contentKind) {
+  if (!activeSession || sessionHasBody(flowId, side)) return false;
+  activeSession.appendBody(flowId, side, buf, {
+    contentType,
+    contentKind,
+  });
+  scheduleActiveSessionBufferFlush();
+  scheduleActiveSessionSync();
+  return true;
+}
+
+function handleRuntimeBodyComplete(result) {
+  if (!result?.flowId || !Buffer.isBuffer(result.buffer)) return;
+  const side = result.side === "request" ? "request" : "response";
+  const contentType = result.contentType || "";
+  const contentKind = resolveBodyContentKind(result.buffer, contentType, result.contentKind);
+  const flow = capturedFlowById.get(result.flowId);
+  const shouldPersist = !sessionHasBody(result.flowId, side);
+  if (flow) {
+    applyFetchedBody(flow, side, result.buffer, contentType, {
+      contentKind,
+      persist: shouldPersist,
+    });
+    syncFetchedBodiesToCurrentFlow(flow);
+  } else {
+    persistRuntimeBodyToSession(result.flowId, side, result.buffer, contentType, contentKind);
+  }
+}
+
+function handleRuntimeBodyError(result) {
+  if (!result?.flowId) return;
+  const flow = capturedFlowById.get(result.flowId);
+  if (!flow) return;
+  const side = result.side === "request" ? "request" : "response";
+  if (!getBodyFetched(flow, side)) {
+    setBodyState(flow, side, result.retryable ? "error" : "unavailable", result.message || "");
+    syncFetchedBodiesToCurrentFlow(flow);
+  }
+}
+
 async function fetchFlowBodies(flow, scopes = { request: true, response: true }) {
   const wantReq = scopes.request !== false;
   const wantRes = scopes.response !== false;
 
   if (wantReq && !flow._reqBodyFetched) {
-    hydrateFlowBodyFromSession(flow, "request");
+    await hydrateFlowBodyFromSession(flow, "request");
   }
   if (wantRes && !flow._resBodyFetched) {
-    hydrateFlowBodyFromSession(flow, "response");
+    await hydrateFlowBodyFromSession(flow, "response");
   }
 
   // Sides without any payload are immediately "ready empty" — no request needed.
@@ -5323,12 +5468,13 @@ async function fetchFlowBodies(flow, scopes = { request: true, response: true })
   if (fetchReqNeeded) {
     setBodyState(flow, "request", "loading");
     try {
-      const buf = await mitmwebGet(`/flows/${flow.id}/request/content.data`);
+      const result = await mitmwebBodySource.getBody(flow.id, "request");
+      const buf = result.buffer;
       if (buf.length === 0 && flow.req_size > 0) {
         throw new Error(`mitmweb returned empty content (expected ${flow.req_size} bytes)`);
       }
-      const ct = flow.req_headers?.["content-type"] || "";
-      applyFetchedBody(flow, "request", buf, ct);
+      const ct = result.contentType || flow.req_headers?.["content-type"] || "";
+      applyFetchedBody(flow, "request", buf, ct, { contentKind: result.contentKind });
       requestOk = true;
     } catch (err) {
       markBodyFetchFailure(flow, "request", err);
@@ -5338,12 +5484,13 @@ async function fetchFlowBodies(flow, scopes = { request: true, response: true })
   if (fetchResNeeded) {
     setBodyState(flow, "response", "loading");
     try {
-      const buf = await mitmwebGet(`/flows/${flow.id}/response/content.data`);
+      const result = await mitmwebBodySource.getBody(flow.id, "response");
+      const buf = result.buffer;
       if (buf.length === 0 && flow.res_size > 0) {
         throw new Error(`mitmweb returned empty content (expected ${flow.res_size} bytes)`);
       }
-      const ct = (flow.content_type || "").toLowerCase();
-      applyFetchedBody(flow, "response", buf, ct);
+      const ct = result.contentType || (flow.content_type || "").toLowerCase();
+      applyFetchedBody(flow, "response", buf, ct, { contentKind: result.contentKind });
       responseOk = true;
     } catch (err) {
       markBodyFetchFailure(flow, "response", err);
@@ -5377,6 +5524,10 @@ function enqueueBodyAutoFetch(flow) {
     retryErrors: true,
     maxAttempts: BODY_AUTOFETCH_MAX_ATTEMPTS,
   })) return;
+  if (isMitmwebBodyApiDown()) {
+    scheduleBodyAutoFetchRetry(flow);
+    return;
+  }
   if (bodyFetchQueued.has(flow.id)) return;
   const retryTimer = bodyFetchRetryTimers.get(flow.id);
   if (retryTimer) {
@@ -5396,7 +5547,8 @@ function scheduleBodyAutoFetchRetry(flow) {
       getBodyAttemptCount(flow, side) < BODY_AUTOFETCH_MAX_ATTEMPTS;
   });
   if (retryableSides.length === 0) return;
-  const waitMs = Math.max(250, getFlowBodyRetryWaitMs(flow, { maxBytes: BODY_AUTOFETCH_MAX_BYTES }));
+  const healthWaitMs = isMitmwebBodyApiDown() ? BODY_API_DOWN_RETRY_MS : 0;
+  const waitMs = Math.max(250, healthWaitMs, getFlowBodyRetryWaitMs(flow, { maxBytes: BODY_AUTOFETCH_MAX_BYTES }));
   const timer = setTimeout(() => {
     bodyFetchRetryTimers.delete(flow.id);
     const current = capturedFlowById.get(flow.id);
@@ -5407,6 +5559,15 @@ function scheduleBodyAutoFetchRetry(flow) {
 
 function pumpBodyFetchQueue() {
   while (bodyFetchActive < BODY_AUTOFETCH_CONCURRENCY && bodyFetchQueue.length > 0) {
+    if (isMitmwebBodyApiDown()) {
+      while (bodyFetchQueue.length > 0) {
+        const id = bodyFetchQueue.shift();
+        bodyFetchQueued.delete(id);
+        const flow = capturedFlowById.get(id);
+        if (flow) scheduleBodyAutoFetchRetry(flow);
+      }
+      break;
+    }
     const id = bodyFetchQueue.shift();
     bodyFetchActive += 1;
     (async () => {
@@ -5494,6 +5655,23 @@ async function drainPendingBodiesBeforeStop() {
 
 let activeFilterRequestId = 0;
 
+function termFitsLatin1(term) {
+  for (let i = 0; i < term.length; i += 1) {
+    if (term.charCodeAt(i) > 0xff) return false;
+  }
+  return true;
+}
+
+function bodyBufferContainsTerm(buf, contentType, contentKind, lowerTerm) {
+  if (!Buffer.isBuffer(buf) || !lowerTerm) return false;
+  const kind = resolveBodyContentKind(buf, contentType || "", contentKind || "");
+  if (kind === "binary") {
+    if (!termFitsLatin1(lowerTerm)) return false;
+    return buf.toString("latin1").toLowerCase().includes(lowerTerm);
+  }
+  return buf.toString("utf8").toLowerCase().includes(lowerTerm);
+}
+
 function bodyContainsTerm(text, base64, lowerTerm) {
   if (text) {
     return text.toLowerCase().includes(lowerTerm);
@@ -5501,13 +5679,34 @@ function bodyContainsTerm(text, base64, lowerTerm) {
   if (base64) {
     // Binary bodies are searched as raw bytes (latin1), like Burp does —
     // ASCII keywords embedded in binary payloads still match.
+    if (!termFitsLatin1(lowerTerm)) return false;
     try {
-      return Buffer.from(base64, "base64").toString("latin1").toLowerCase().includes(lowerTerm);
+      return bodyBufferContainsTerm(Buffer.from(base64, "base64"), "", "binary", lowerTerm);
     } catch (_) {
       return false;
     }
   }
   return false;
+}
+
+function searchSessionBody(flow, side, lowerTerm) {
+  if (!activeSession || !flow?.id) return { available: false, matched: false };
+  const state = activeSession.bodyState(flow.id, side);
+  if (state.state !== "ready") return { available: false, matched: false };
+  const contentType = state.contentType || getBodyContentType(flow, side);
+  const contentKind = state.contentKind || "unknown";
+  if (contentKind === "binary" && !termFitsLatin1(lowerTerm)) {
+    return { available: true, matched: false };
+  }
+  try {
+    const buf = activeSession.getBodyBuffer(flow.id, side);
+    return {
+      available: true,
+      matched: bodyBufferContainsTerm(buf, contentType, contentKind, lowerTerm),
+    };
+  } catch (_) {
+    return { available: false, matched: false };
+  }
 }
 
 async function prepareFilterContent(requestId, scopes, term) {
@@ -5560,12 +5759,23 @@ async function prepareFilterContent(requestId, scopes, term) {
     while (nextIndex < total && requestId === activeFilterRequestId) {
       const flow = flowsToScan[nextIndex];
       nextIndex += 1;
-      const result = await fetchFlowBodies(flow, { request: wantReq, response: wantRes });
-      if (requestId !== activeFilterRequestId) return;
       let matched = false;
       let unsearched = false;
       let fetchFailed = false;
-      if (wantReq) {
+
+      const reqSessionSearch = wantReq ? searchSessionBody(flow, "request", lowerTerm) : { available: false, matched: false };
+      if (reqSessionSearch.matched) matched = true;
+      const resSessionSearch = wantRes && !matched ? searchSessionBody(flow, "response", lowerTerm) : { available: false, matched: false };
+      if (resSessionSearch.matched) matched = true;
+
+      const fetchReq = wantReq && !matched && !reqSessionSearch.available;
+      const fetchRes = wantRes && !matched && !resSessionSearch.available;
+      const result = (fetchReq || fetchRes)
+        ? await fetchFlowBodies(flow, { request: fetchReq, response: fetchRes })
+        : { requestOk: true, responseOk: true };
+      if (requestId !== activeFilterRequestId) return;
+
+      if (wantReq && !reqSessionSearch.available) {
         if (flow._reqBodyFetched) {
           matched = matched || bodyContainsTerm(flow.req_body, flow.req_body_base64, lowerTerm);
         } else if ((flow.req_size || 0) > 0) {
@@ -5573,7 +5783,7 @@ async function prepareFilterContent(requestId, scopes, term) {
           if (!result.requestOk) fetchFailed = true;
         }
       }
-      if (wantRes && !matched) {
+      if (wantRes && !matched && !resSessionSearch.available) {
         if (flow._resBodyFetched) {
           matched = matched || bodyContainsTerm(flow.res_body, flow.res_body_base64, lowerTerm);
         } else if ((flow.res_size || 0) > 0 || !isResponseComplete(flow)) {
@@ -6159,6 +6369,7 @@ async function mcpStatus() {
     webPort: webPort || 0,
     flowFeedStatus,
     websocketLive: !!flowWebSocketActive,
+    bodyPipeline: getBodyPipelineEnvironmentInfo(),
     deviceConnected: !!deviceInfo?.connected,
     device: deviceInfo || null,
     flowCount: capturedFlows.length,
@@ -7676,6 +7887,10 @@ module.exports = {
     BODY_AUTOFETCH_MAX_ATTEMPTS,
     BODY_AUTOFETCH_MAX_BYTES,
     getBodyRetryWaitMs,
+    extractRuntimeFatalFromStderr,
+    bodyBufferContainsTerm,
+    bodyContainsTerm,
+    termFitsLatin1,
     flowNeedsBodyFetch,
     flowSideNeedsBodyFetch,
     setBodyState,

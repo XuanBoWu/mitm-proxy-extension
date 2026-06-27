@@ -447,8 +447,13 @@ class CaptureSession {
 
   bodyState(flowId, side) {
     const body = this.bodyByKey.get(keyFor(flowId, side));
-    if (!body) return { state: "missing", size: 0, contentKind: "unknown" };
-    return { state: body.complete ? "ready" : "loading", size: body.size, contentKind: body.contentKind };
+    if (!body) return { state: "missing", size: 0, contentKind: "unknown", contentType: "" };
+    return {
+      state: body.complete ? "ready" : "loading",
+      size: body.size,
+      contentKind: body.contentKind,
+      contentType: body.contentType || "",
+    };
   }
 
   searchBody(flowId, side, term) {
