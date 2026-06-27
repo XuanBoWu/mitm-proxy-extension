@@ -59,7 +59,7 @@ let mcpRegistryUpdateTimer = null;
 let mcpRegistryHeartbeatTimer = null;
 
 const TOOLS_DIR = path.join(__dirname, "tools");
-const DEFAULT_RUNTIME_VERSION = "0.3.8-ts";
+const DEFAULT_RUNTIME_VERSION = "0.3.8";
 const DEFAULT_RUNTIME_REPO = "https://github.com/XuanBoWu/mitm-proxy-extension";
 const GITHUB_RELEASE_API_URL = "https://api.github.com/repos/XuanBoWu/mitm-proxy-extension/releases/latest";
 const GITHUB_RELEASE_LATEST_URL = `${DEFAULT_RUNTIME_REPO}/releases/latest`;

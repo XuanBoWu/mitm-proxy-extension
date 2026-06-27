@@ -4,7 +4,7 @@
 
 当前状态：Stage 0 基础设施已落地；Stage 1a 已开始，已新增 CommonJS `proxy/mitmweb_client.js` 作为 mitmweb HTTP keep-alive client，并把 HTTP/body API health 接入 extension/Webview/MCP 状态。Stage 1b 已开始，`fetchFlowBodies` 通过 `proxy/body_source.js` 的 `session-cache` 与 `mitmweb-http` BodySource 读取 body，内容过滤也会优先直接检索 `.secmp` session body buffer，减少重复访问 mitmweb body API。Stage 1c 已开始，`tools/proxy_engine.py` 会输出 runtime diagnostics，Windows 默认使用 selector event loop policy，并在 Tornado selector thread fatal 时主动退出；extension 会把 `RUNTIME_FATAL` 映射为 proxy error。Stage 1d 已开始，runtime 通过 stdout `SECMPRT_EVENT=` 发送 `runtime/ready` 与 body chunk/complete/error 事件，extension 可解析、聚合并写入 `.secmp`。运行入口仍为 `./extension.js`，尚未切换到 TS 编译产物。
 
-当前实验 runtime 版本：`DEFAULT_RUNTIME_VERSION=0.3.8-ts`，用于 GitHub Actions 构建 Windows/macOS runtime artifact 供 Windows 实机验证；正式发布前应按最终候选版本重新确认 runtime 版本号。
+当前正式 runtime 版本：`DEFAULT_RUNTIME_VERSION=0.3.8`，用于发布包含 runtime diagnostics 和 runtime body event pipeline 的 Windows/macOS runtime 包；`runtimeApiVersion` 继续保持兼容的 `1`。
 
 ## 目标
 

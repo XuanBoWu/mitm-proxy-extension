@@ -21,6 +21,7 @@ SecMP is intended for authorized testing of devices and applications you own or 
 - Bind the selected capture network to both the proxy listener and the mitmproxy upstream source address when multiple host interfaces are available.
 - Export captures as HAR or JSON.
 - Expose one or more open capture sessions to local MCP agents for authorized inspection, search, assertions, and evidence export.
+- Persist body data through the `.secmp` session cache and runtime body event pipeline, reducing reliance on mitmweb body API during long captures.
 - Use the SecMP Activity Bar icon and sidebar to create/open sessions before entering the capture panel.
 - Run on Windows and macOS with a packaged runtime, without requiring users to install Python or mitmproxy.
 
@@ -118,7 +119,7 @@ For offline installation, configure a local runtime archive path:
 
 ```json
 {
-  "secmp.runtimeArchivePath": "C:\\Users\\me\\Downloads\\secmp-runtime-win32-x64-0.3.4.zip"
+  "secmp.runtimeArchivePath": "C:\\Users\\me\\Downloads\\secmp-runtime-win32-x64-0.3.8.zip"
 }
 ```
 
@@ -194,13 +195,13 @@ python -m venv .venv
 Build the Windows runtime:
 
 ```powershell
-npm run runtime:windows -- -RuntimeVersion 0.3.4 -OutputDir dist
+npm run runtime:windows -- -RuntimeVersion 0.3.8 -OutputDir dist
 ```
 
 Build the macOS runtime:
 
 ```bash
-npm run runtime:macos -- --runtime-version 0.3.4 --output-dir dist
+npm run runtime:macos -- --runtime-version 0.3.8 --output-dir dist
 ```
 
 Runtime builds embed platform icon assets from `media/secmp.ico` on Windows and `media/secmp.icns` on macOS. Updating those files changes the packaged runtime output.
